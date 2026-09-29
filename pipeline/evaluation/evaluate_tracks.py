@@ -49,8 +49,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--min-pred-score", type=float, default=0.0)
     parser.add_argument("--max-frames", type=int)
+    parser.add_argument(
+        "--video-meta",
+        type=Path,
+        help=(
+            "video_meta.json produced with the predictions. When --max-frames is "
+            "omitted, processed_frames is used as the evaluation boundary. By "
+            "default a sibling video_meta.json is discovered automatically."
+        ),
+    )
+    parser.add_argument(
+        "--ignore-video-meta",
+        action="store_true",
+        help="Evaluate the union of reference/prediction frames instead of auto-limiting",
+    )
     parser.add_argument("--sequence-name")
     return parser
+
+
+def resolve_frame_limit(
+    args: argparse.Namespace,
+    prediction_path: Path,
+) -> tuple[int | None, str | None, Path | None]:
+    """Resolve the evaluated frame count without hiding tracker misses.
+
+    The prediction file's final observed frame is deliberately *not* used: the
+    tracker may simply have missed every person near the end of a valid video.
+    ``processed_frames`` records how many source frames were actually presented
+    to MOTIP and is therefore the correct automatic boundary.
+    """
+    if args.max_frames is not None:
+        if args.max_frames <= 0:
+            raise ValueError("--max-frames must be positive")
+        return args.max_frames, "--max-frames", None
+    if args.ignore_video_meta:
+        return None, None, None
+
+    metadata_path = (
+        args.video_meta.expanduser().resolve()
+        if args.video_meta
+        else prediction_path.with_name("video_meta.json")
+    )
+    if not metadata_path.is_file():
+        if args.video_meta:
+            raise FileNotFoundError(f"Video metadata not found: {metadata_path}")
+        return None, None, None
+
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    processed_frames = int(metadata.get("processed_frames", 0))
+    if processed_frames <= 0:
+        raise ValueError(
+            f"Invalid processed_frames in video metadata {metadata_path}: "
+            f"{metadata.get('processed_frames')!r}"
+        )
+    return processed_frames, "video_meta.processed_frames", metadata_path
 
 
 def read_reference(
@@ -200,6 +253,9 @@ def run(args: argparse.Namespace) -> None:
 
     reference_path = args.reference.expanduser().resolve()
     prediction_path = args.prediction.expanduser().resolve()
+    max_frames, frame_limit_source, video_meta_path = resolve_frame_limit(
+        args, prediction_path
+    )
     output_path = (
         args.output.expanduser().resolve()
         if args.output
@@ -213,16 +269,26 @@ def run(args: argparse.Namespace) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     events_path.parent.mkdir(parents=True, exist_ok=True)
 
-    reference = read_reference(
+    reference_all = read_reference(
         reference_path,
         frame_base=args.reference_frame_base,
-        max_frames=args.max_frames,
+        max_frames=None,
     )
-    prediction = read_predictions(
+    prediction_all = read_predictions(
         prediction_path,
         min_score=args.min_pred_score,
-        max_frames=args.max_frames,
+        max_frames=None,
     )
+    reference = [
+        item
+        for item in reference_all
+        if max_frames is None or item.frame_idx < max_frames
+    ]
+    prediction = [
+        item
+        for item in prediction_all
+        if max_frames is None or item.frame_idx < max_frames
+    ]
     if not reference:
         raise ValueError(f"No valid reference observations found in {reference_path}")
     if not prediction:
@@ -281,7 +347,15 @@ def run(args: argparse.Namespace) -> None:
         "evaluation": {
             "frame_count": len(frame_indices),
             "iou_threshold": args.iou_threshold,
-            "max_frames": args.max_frames,
+            "max_frames": max_frames,
+            "frame_limit_source": frame_limit_source,
+            "video_meta": str(video_meta_path) if video_meta_path else None,
+            "reference_observations_ignored_after_limit": (
+                len(reference_all) - len(reference)
+            ),
+            "prediction_observations_ignored_after_limit": (
+                len(prediction_all) - len(prediction)
+            ),
         },
         "metrics": metrics,
         "metric_notes": {
@@ -302,6 +376,11 @@ def run(args: argparse.Namespace) -> None:
         namemap=mm.io.motchallenge_metric_names,
     )
     print(rendered)
+    if max_frames is not None:
+        print(
+            f"Evaluation limited to source frames [0, {max_frames - 1}] "
+            f"using {frame_limit_source}."
+        )
     print(
         json.dumps(
             {

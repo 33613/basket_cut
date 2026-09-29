@@ -6,6 +6,7 @@
 video.mp4
   -> MOTIP tracking
   -> tracks.jsonl
+  -> KPR track identity evidence
   -> action backend
   -> actions.jsonl
 ```
@@ -14,7 +15,8 @@ video.mp4
 
 - `MOTIP/`：上游 MOTIP 源码，不在其中写项目代码。
 - `MMAction2/`：上游 MMAction2 源码，不在其中写项目代码。
-- `pipeline/`：本项目可修改的跟踪、动作和公共接口代码。
+- `KPR/`：服务器上单独 clone 的 KPR 上游源码，已被 Git 忽略，不在其中写项目代码。
+- `pipeline/`：本项目可修改的跟踪、身份、动作和公共接口代码。
 - 数据、权重、运行结果保存在 `/root/autodl-tmp`，不提交到 Git。
 
 ## 1. 导出 MOTIP 轨迹
@@ -161,6 +163,12 @@ python -m pipeline.evaluation.evaluate_tracks \
   --iou-threshold 0.5
 ```
 
+评估器会自动读取与 `tracks.jsonl` 同目录的 `video_meta.json`，并使用其中的
+`processed_frames` 限制评估区间。例如视频实际只解码了 58 帧、参考轨迹却有
+72 帧时，只评估 `[0, 57]`，不会把视频中不存在的 14 帧误算成漏检。需要故意
+评估两侧帧号并集时才使用 `--ignore-video-meta`；也可以用 `--max-frames N`
+显式覆盖自动值。
+
 评估过程不是比较两边的 ID 数字是否相等。每一帧先计算所有参考框与预测框的 IoU，使用匈牙利算法寻找整体代价最小的对应关系；IoU 小于 0.5 的候选不能匹配。随后在整段时间上检查同一个参考人物是否持续对应到同一个预测 ID。
 
 重点指标：
@@ -175,6 +183,86 @@ python -m pipeline.evaluation.evaluate_tracks \
 
 `tracking_events.csv` 保存逐帧 `MATCH`、`MISS`、`FP` 和 `SWITCH` 事件，可用来定位具体出错帧。SHOT 的 `track_with_gt.txt` 是与人工关键帧身份对齐并经过检查的参考轨迹，适合当前小规模验证，但仍应称为 reference，而不是把它当作绝对无误的逐帧人工真值。
 
+## 6. 加入 KPR 轨迹身份证据
+
+KPR 与 MOTIP 使用独立环境。KPR 接收人物裁剪图，输出分部位 embedding 和
+部位可见度；本项目再把多帧人物特征汇总成轨迹级原型。第一版不使用关键点
+提示，因为 KPR 官方接口允许无提示推理；跑通后再接姿态模型提供正、负关键点。
+
+### 6.1 在服务器安装上游 KPR
+
+```bash
+cd /root/autodl-tmp/project/basket_cut
+git clone https://github.com/VlSomers/keypoint_promptable_reidentification.git KPR
+
+conda create -p /root/autodl-tmp/envs/kpr \
+  python=3.10 \
+  pytorch=1.13.0 \
+  torchvision=0.14.0 \
+  pytorch-cuda=11.7 \
+  -c pytorch -c nvidia -y
+
+conda activate /root/autodl-tmp/envs/kpr
+cd /root/autodl-tmp/project/basket_cut/KPR
+pip install -r requirements.txt
+python setup.py develop
+pip install gdown
+```
+
+这是 KPR 官方给出的兼容环境，不要安装进 MOTIP 环境。服务器驱动可以向下
+兼容该环境自带的 CUDA runtime。
+
+### 6.2 下载官方 Demo 使用的权重
+
+```bash
+mkdir -p /root/autodl-tmp/models/kpr
+
+gdown 1Np5wu3nQa_Fl_z7Zw2kchJNC8JZVwsh5 \
+  -O /root/autodl-tmp/models/kpr/kpr_occ_pt_IN_82.34_92.33_42323828.pth.tar
+```
+
+该权重和 `configs/kpr/imagenet/kpr_occ_posetrack_test.yaml` 是官方 Demo 的组合。
+
+### 6.3 对当前 SHOT 片段提取轨迹身份特征
+
+回到项目根目录，在 KPR 环境中运行：
+
+```bash
+cd /root/autodl-tmp/project/basket_cut
+conda activate /root/autodl-tmp/envs/kpr
+
+python -m pipeline.identity.run_kpr_reid \
+  --input /root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/ATLvsNJ-10-view1-3.mp4 \
+  --tracks /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracks.jsonl \
+  --kpr-root /root/autodl-tmp/project/basket_cut/KPR \
+  --config /root/autodl-tmp/project/basket_cut/KPR/configs/kpr/imagenet/kpr_occ_posetrack_test.yaml \
+  --checkpoint /root/autodl-tmp/models/kpr/kpr_occ_pt_IN_82.34_92.33_42323828.pth.tar \
+  --output-dir /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/kpr \
+  --samples-per-track 8 \
+  --batch-size 8 \
+  --overwrite
+```
+
+首次运行不要设置 `--candidate-threshold`。KPR 官方也提示跨数据域 ReID 的效果
+不保证稳定，因此距离阈值要用 SHOT 参考身份标注校准，不能凭感觉指定。
+
+输出包括：
+
+- `kpr_samples.jsonl`：实际送入 KPR 的帧、轨迹框和裁剪框；
+- `kpr_samples.npz`：逐人物裁剪的 embedding 和可见度；
+- `kpr_track_prototypes.npz`：每条轨迹的聚合 embedding、可见度和距离矩阵；
+- `kpr_track_pairs.jsonl`：任意两条轨迹的 KPR 距离、时间重叠和可合并性；
+- `kpr_summary.json`：轨迹内外观一致性统计。
+
+距离已按官方 Demo 归一化到约 `[0, 1]`：越接近 0，外观越像；但它不是概率。
+同时存在的两个人默认不能合并，所以只有不重叠、间隔不超过 90 帧的轨迹才标记
+为 `temporally_compatible`。后续阈值校准完成后，可以追加
+`--candidate-threshold VALUE` 生成候选标记，仍不会自动修改 MOTIP 的原始 ID。
+
+KPR 解决的是“两个轨迹是否可能属于同一个人”，不是直接输出球员姓名。要得到
+真实身份，还需要建立带姓名或球衣号码标签的 gallery，再把轨迹原型与 gallery
+特征比较。
+
 ## 同步到云服务器
 
 本地修改并推送后，在云端执行：
@@ -188,6 +276,6 @@ git pull --ff-only origin main
 
 ```text
 /root/autodl-tmp/data/basket_cut
-/root/autodl-tmp/models/{motip,action}
+/root/autodl-tmp/models/{motip,kpr,action}
 /root/autodl-tmp/outputs/basket_cut
 ```

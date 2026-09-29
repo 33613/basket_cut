@@ -1,5 +1,6 @@
 /outputs/
 /tests/
+/KPR/
 __pycache__/
 *.py[cod]
 .pytest_cache/
