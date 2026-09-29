@@ -15,7 +15,6 @@ video.mp4
 - `MOTIP/`：上游 MOTIP 源码，不在其中写项目代码。
 - `MMAction2/`：上游 MMAction2 源码，不在其中写项目代码。
 - `pipeline/`：本项目可修改的跟踪、动作和公共接口代码。
-- `tests/`：不依赖 GPU 的接口测试。
 - 数据、权重、运行结果保存在 `/root/autodl-tmp`，不提交到 Git。
 
 ## 1. 导出 MOTIP 轨迹
@@ -81,6 +80,101 @@ python -m pipeline.visualization.render_results \
 
 `--show-top-candidate` 会把未达到阈值的最高分动作显示为 `top?`，只用于诊断，不能视为最终识别结果。去掉该参数时，只显示达到动作阈值的标签。
 
+## 4. 按需下载 SHOT 数据
+
+先在 MOTIP 环境安装仅用于下载和评估的依赖：
+
+```bash
+conda activate /root/autodl-tmp/envs/motip
+cd /root/autodl-tmp/project/basket_cut
+pip install -r requirements-eval.txt
+```
+
+先查看下载计划，不产生下载流量：
+
+```bash
+python -m pipeline.data.download_shot --dry-run
+```
+
+默认只选择官方示例 `ATLvsNJ-10-view1-3`，并使用 `tracking-eval` 配置，只下载：
+
+```text
+ATLvsNJ-10-view1-3.mp4
+ATLvsNJ-10-view1-3-track_with_gt.txt
+```
+
+确认后开始下载：
+
+```bash
+python -m pipeline.data.download_shot
+```
+
+下载量由三层参数控制：
+
+- `--profile video`：只下载 MP4；
+- `--profile tracking-eval`：只下载 MP4 和对齐后的参考轨迹，推荐；
+- `--profile full`：下载所选样本的所有帧、姿态、视线等文件，不建议首次使用；
+- `--sample PATH`：精确指定一个样本，可重复传入；
+- `--max-samples N`：多次传入 `--sample` 时只保留前 N 个；
+- `--dry-run`：只显示精确文件清单。
+
+下载多个已选片段时，重复传入 `--sample`；下面仅演示参数形式，运行前先从 SHOT 文件页复制真实路径：
+
+```bash
+python -m pipeline.data.download_shot \
+  --sample view1/Drive_Dunk/ATLvsNJ-10-view1-3 \
+  --sample VIEW/TACTIC/ANOTHER_SAMPLE \
+  --max-samples 2 \
+  --profile tracking-eval \
+  --dry-run
+```
+
+去掉最后的 `--dry-run` 才会真正下载。数据保存在：
+
+```text
+/root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/
+```
+
+## 5. 使用 SHOT 评估 MOTIP 轨迹
+
+先对下载的视频运行 MOTIP：
+
+```bash
+conda activate /root/autodl-tmp/envs/motip
+cd /root/autodl-tmp/project/basket_cut
+
+python -m pipeline.tracking.export_motip_tracks \
+  --input /root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/ATLvsNJ-10-view1-3.mp4 \
+  --checkpoint /root/autodl-tmp/models/motip/r50_deformable_detr_motip_sportsmot.pth \
+  --output-dir /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3 \
+  --overwrite
+```
+
+再把 MOTIP 输出与 SHOT 对齐后的参考轨迹比较：
+
+```bash
+python -m pipeline.evaluation.evaluate_tracks \
+  --reference /root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/ATLvsNJ-10-view1-3-track_with_gt.txt \
+  --prediction /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracks.jsonl \
+  --output /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracking_metrics.json \
+  --events-output /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracking_events.csv \
+  --iou-threshold 0.5
+```
+
+评估过程不是比较两边的 ID 数字是否相等。每一帧先计算所有参考框与预测框的 IoU，使用匈牙利算法寻找整体代价最小的对应关系；IoU 小于 0.5 的候选不能匹配。随后在整段时间上检查同一个参考人物是否持续对应到同一个预测 ID。
+
+重点指标：
+
+- `precision / recall`：误检和漏检情况；
+- `matched_mean_iou`：成功匹配框的平均 IoU，越高越好；
+- `IDF1`：人物身份在整段视频上的连续性，越高越好；
+- `num_switches`：同一参考人物被切换到另一个预测 ID 的次数，越低越好；
+- `num_fragmentations`：参考轨迹丢失后又重新出现的次数，越低越好；
+- `MOTA`：综合漏检、误检和 ID Switch，越高越好；
+- `MOTP`：本工具中是匹配框的平均 `1-IoU` 距离，越低越好。
+
+`tracking_events.csv` 保存逐帧 `MATCH`、`MISS`、`FP` 和 `SWITCH` 事件，可用来定位具体出错帧。SHOT 的 `track_with_gt.txt` 是与人工关键帧身份对齐并经过检查的参考轨迹，适合当前小规模验证，但仍应称为 reference，而不是把它当作绝对无误的逐帧人工真值。
+
 ## 同步到云服务器
 
 本地修改并推送后，在云端执行：
@@ -96,10 +190,4 @@ git pull --ff-only origin main
 /root/autodl-tmp/data/basket_cut
 /root/autodl-tmp/models/{motip,action}
 /root/autodl-tmp/outputs/basket_cut
-```
-
-## 接口测试
-
-```bash
-python -m unittest discover -s tests -v
 ```

@@ -1,0 +1,3 @@
+huggingface_hub>=0.25
+numpy<2
+motmetrics>=1.4,<2
