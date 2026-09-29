@@ -63,6 +63,24 @@ python -m pipeline.action.run_multisports \
 
 `tracks.jsonl` 中的 `det_score` 是 MOTIP 检测置信度。当前上游运行接口没有返回 ID 分类的关联分数，所以 `association_score` 暂时为 `null`；不要把检测置信度误当成身份关联置信度。`track_summary.json` 额外提供轨迹长度、观测覆盖率和检测分数统计，可用于第一轮质量筛选。
 
+## 3. 独立生成对照视频
+
+可视化不会重新运行模型，可以反复调整显示方式：
+
+```bash
+conda activate /root/autodl-tmp/envs/motip
+
+python -m pipeline.visualization.render_results \
+  --input /root/autodl-tmp/data/basket_cut/pl_nba_smoke/VIDEO.mp4 \
+  --tracks /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/tracks.jsonl \
+  --actions /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/actions.jsonl \
+  --output /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/result.mp4 \
+  --show-top-candidate \
+  --overwrite
+```
+
+`--show-top-candidate` 会把未达到阈值的最高分动作显示为 `top?`，只用于诊断，不能视为最终识别结果。去掉该参数时，只显示达到动作阈值的标签。
+
 ## 同步到云服务器
 
 本地修改并推送后，在云端执行：
