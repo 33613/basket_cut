@@ -197,7 +197,9 @@ def make_track_prototypes(embeddings, visibility, sample_metadata, torch):
     for track_id in track_ids:
         indices = track_to_indices[track_id]
         track_embeddings = embeddings[indices]
-        track_visibility = visibility[indices].clamp_min(0)
+        track_visibility = visibility[indices].to(
+            dtype=track_embeddings.dtype
+        ).clamp_min(0)
         weights = track_visibility.unsqueeze(-1)
         denominator = weights.sum(dim=0).clamp_min(1e-12)
         prototype = (track_embeddings * weights).sum(dim=0) / denominator

@@ -177,6 +177,11 @@ class KPRBackend:
                     model_output,
                     self.cfg.model.kpr.test_embeddings,
                 )
+                # KPR can return binary visibility indicators as an integer
+                # tensor when no pose prompts are supplied.  Downstream track
+                # aggregation treats visibility as weights and averages it,
+                # so expose one consistent floating-point contract here.
+                visibility = visibility.to(dtype=embeddings.dtype)
                 if self.cfg.test.normalize_feature:
                     embeddings = self.torch.nn.functional.normalize(
                         embeddings, p=2, dim=-1
