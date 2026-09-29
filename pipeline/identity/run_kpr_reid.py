@@ -24,15 +24,23 @@ from pipeline.common.schema import (
 from pipeline.identity.kpr_backend import KPRBackend
 
 
+DEFAULT_KPR_ROOT = Path("KPR")
+DEFAULT_KPR_CONFIG = Path("configs/kpr/multidataset_sports_test.yaml")
+DEFAULT_KPR_CHECKPOINT = Path(
+    "/root/autodl-tmp/models/kpr/"
+    "kpr_dancetrack_sportsmot_posetrack21_occludedduke_market_split0.pth.tar"
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Extract KPR track prototypes and ReID pair distances"
     )
     parser.add_argument("--input", required=True, type=Path, help="Source video")
     parser.add_argument("--tracks", required=True, type=Path, help="MOTIP tracks.jsonl")
-    parser.add_argument("--kpr-root", required=True, type=Path)
-    parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument("--kpr-root", type=Path, default=DEFAULT_KPR_ROOT)
+    parser.add_argument("--config", type=Path, default=DEFAULT_KPR_CONFIG)
+    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_KPR_CHECKPOINT)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--samples-per-track", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -395,6 +403,7 @@ def run(args: argparse.Namespace) -> None:
         "tracks": str(tracks_path),
         "backend": "KPR",
         "prompt_mode": "none",
+        "config": str(args.config.expanduser().resolve()),
         "checkpoint": str(args.checkpoint.expanduser().resolve()),
         "sample_count": len(sample_metadata),
         "track_count": len(track_ids),

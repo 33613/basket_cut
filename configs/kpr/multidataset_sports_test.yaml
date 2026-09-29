@@ -1,0 +1,31 @@
+# Project-owned inference settings for the Hugging Face multi-dataset KPR model.
+#
+# The checkpoint contains the exact trained model.kpr / promptable transformer
+# configuration.  pipeline.identity.KPRBackend always sets model.load_config
+# to True, so those architecture values are restored from the checkpoint.
+
+data:
+  sources: ["sportsmot"]
+  targets: ["sportsmot"]
+  height: 256
+  width: 128
+  norm_mean: [0.485, 0.456, 0.406]
+  norm_std: [0.229, 0.224, 0.225]
+
+model:
+  pretrained: false
+  load_config: true
+  kpr:
+    keypoints:
+      prompt_masks: keypoints_gaussian
+      prompt_preprocess: cck8
+    masks:
+      dir: pose_on_img_crops
+      preprocess: eight
+  transreid:
+    sie_camera: false
+
+test:
+  evaluate: true
+  normalize_feature: true
+

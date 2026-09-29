@@ -212,20 +212,48 @@ pip install gdown
 这是 KPR 官方给出的兼容环境，不要安装进 MOTIP 环境。服务器驱动可以向下
 兼容该环境自带的 CUDA runtime。
 
-### 6.2 下载官方 Demo 使用的权重
+### 6.2 下载 Hugging Face 多数据集权重
 
 ```bash
 mkdir -p /root/autodl-tmp/models/kpr
+mkdir -p /root/autodl-tmp/cache/huggingface
 
-gdown 1Np5wu3nQa_Fl_z7Zw2kchJNC8JZVwsh5 \
-  -O /root/autodl-tmp/models/kpr/kpr_occ_pt_IN_82.34_92.33_42323828.pth.tar
+unset HF_ENDPOINT
+source /etc/network_turbo
+
+export HF_HOME=/root/autodl-tmp/cache/huggingface
+export HF_HUB_DOWNLOAD_TIMEOUT=600
+
+hf download trackinglaboratory/keypoint_promptable_reid \
+  kpr_dancetrack_sportsmot_posetrack21_occludedduke_market_split0.pth.tar \
+  --local-dir /root/autodl-tmp/models/kpr
 ```
 
-该权重和 `configs/kpr/imagenet/kpr_occ_posetrack_test.yaml` 是官方 Demo 的组合。
+该 checkpoint 联合使用 DanceTrack、SportsMOT、PoseTrack21、OccludedDuke 和
+Market 数据训练。项目使用 `configs/kpr/multidataset_sports_test.yaml` 作为
+推理配置；`model.load_config=True`，模型结构和 KPR 参数从 checkpoint 内嵌
+配置恢复。
+
+下载后先验证官方发布的 SHA-256、checkpoint 结构、内嵌配置和所有浮点 tensor：
+
+```bash
+cd /root/autodl-tmp/project/basket_cut
+conda activate /root/autodl-tmp/envs/kpr
+
+python -m pipeline.identity.inspect_kpr_checkpoint \
+  --output /root/autodl-tmp/outputs/basket_cut/kpr_checkpoint_report.json
+```
+
+成功时输出中的 `valid` 和 `sha256_matches_published_value` 都应为 `true`。
+本项目记录的官方 SHA-256 是：
+
+```text
+c7f3a74d86a0bb56940b2703508a50f1d3dbee4d755049272ef5caa18457db3f
+```
 
 ### 6.3 对当前 SHOT 片段提取轨迹身份特征
 
-回到项目根目录，在 KPR 环境中运行：
+先用每条轨迹 2 个样本进行真实视频前向测试：
 
 ```bash
 cd /root/autodl-tmp/project/basket_cut
@@ -235,13 +263,17 @@ python -m pipeline.identity.run_kpr_reid \
   --input /root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/ATLvsNJ-10-view1-3.mp4 \
   --tracks /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracks.jsonl \
   --kpr-root /root/autodl-tmp/project/basket_cut/KPR \
-  --config /root/autodl-tmp/project/basket_cut/KPR/configs/kpr/imagenet/kpr_occ_posetrack_test.yaml \
-  --checkpoint /root/autodl-tmp/models/kpr/kpr_occ_pt_IN_82.34_92.33_42323828.pth.tar \
-  --output-dir /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/kpr \
-  --samples-per-track 8 \
-  --batch-size 8 \
+  --config /root/autodl-tmp/project/basket_cut/configs/kpr/multidataset_sports_test.yaml \
+  --checkpoint /root/autodl-tmp/models/kpr/kpr_dancetrack_sportsmot_posetrack21_occludedduke_market_split0.pth.tar \
+  --output-dir /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/kpr_smoke \
+  --samples-per-track 2 \
+  --batch-size 4 \
   --overwrite
 ```
+
+成功后把输出目录改为 `kpr`，并把 `--samples-per-track` 和 `--batch-size`
+分别改为 8，运行正式测试。三个路径参数已有上述默认值，从项目根目录运行时
+可以省略，但首次测试建议显式保留，便于核对日志。
 
 首次运行不要设置 `--candidate-threshold`。KPR 官方也提示跨数据域 ReID 的效果
 不保证稳定，因此距离阈值要用 SHOT 参考身份标注校准，不能凭感觉指定。
