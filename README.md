@@ -187,7 +187,9 @@ python -m pipeline.evaluation.evaluate_tracks \
 
 KPR 与 MOTIP 使用独立环境。KPR 接收人物裁剪图，输出分部位 embedding 和
 部位可见度；本项目再把多帧人物特征汇总成轨迹级原型。第一版不使用关键点
-提示，因为 KPR 官方接口允许无提示推理；跑通后再接姿态模型提供正、负关键点。
+提示，因为 KPR 官方接口允许无提示推理；适配层在这种模式下不传
+`prompt_masks`，由 checkpoint 对应的模型创建通道数兼容的空提示。跑通后再接
+姿态模型提供正、负关键点。
 
 ### 6.1 在服务器安装上游 KPR
 

@@ -17,6 +17,20 @@ from types import SimpleNamespace
 from typing import Any, Iterator, Sequence
 
 
+EXPLICIT_PROMPT_KEYS = frozenset({"keypoints_xyc", "kp_path", "prompt_masks"})
+
+
+def has_explicit_prompt(sample: dict[str, Any]) -> bool:
+    """Return whether a caller supplied a real prompt for this image.
+
+    KPR's dataset preprocessing also creates placeholder prompt masks for plain
+    image-only samples.  Those placeholders follow the bootstrap dataset
+    schema and can have a different channel count from the loaded checkpoint.
+    They must not be forwarded as if they were user-provided prompts.
+    """
+    return any(sample.get(key) is not None for key in EXPLICIT_PROMPT_KEYS)
+
+
 @contextmanager
 def working_directory(path: Path) -> Iterator[None]:
     previous = Path.cwd()
@@ -117,6 +131,12 @@ class KPRBackend:
         with self.torch.inference_mode():
             for start in range(0, len(samples), batch_size):
                 batch = list(samples[start : start + batch_size])
+                explicit_prompts = [has_explicit_prompt(sample) for sample in batch]
+                if any(explicit_prompts) and not all(explicit_prompts):
+                    raise ValueError(
+                        "A KPR batch cannot mix prompted and unprompted samples"
+                    )
+                use_prompt_masks = bool(explicit_prompts) and all(explicit_prompts)
                 images = []
                 prompt_masks = []
                 for sample in batch:
@@ -131,20 +151,26 @@ class KPRBackend:
                         load_masks=True,
                     )
                     images.append(prepared["image"])
-                    if "prompt_masks" in prepared:
+                    if use_prompt_masks and "prompt_masks" in prepared:
                         prompt_masks.append(prepared["prompt_masks"])
 
                 model_args = {
                     "images": self.torch.stack(images, dim=0).to(device)
                 }
-                if prompt_masks:
+                if use_prompt_masks:
                     if len(prompt_masks) != len(images):
                         raise RuntimeError(
-                            "KPR preprocessing produced prompts for only part of a batch"
+                            "KPR preprocessing did not produce a prompt mask for "
+                            "every explicitly prompted sample"
                         )
                     model_args["prompt_masks"] = self.torch.stack(
                         prompt_masks, dim=0
                     ).to(device)
+
+                # For ordinary image-only inference, deliberately omit
+                # prompt_masks.  The checkpoint-backed KPR model then creates
+                # its own empty prompt tensor with the exact channel count its
+                # prompt projection layer expects.
 
                 model_output = self.extractor.model(**model_args)
                 embeddings, visibility, _, _ = extract_test_embeddings(

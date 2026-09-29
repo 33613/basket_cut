@@ -158,6 +158,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "embedded_backbone": json_safe(
             nested_value(embedded_config, "model", "kpr", "backbone")
         ),
+        "embedded_mask_preprocess": json_safe(
+            nested_value(embedded_config, "model", "kpr", "masks", "preprocess")
+        ),
+        "embedded_prompt_preprocess": json_safe(
+            nested_value(
+                embedded_config,
+                "model",
+                "kpr",
+                "keypoints",
+                "prompt_preprocess",
+            )
+        ),
+        "embedded_prompt_parts_num": json_safe(
+            nested_value(
+                embedded_config,
+                "model",
+                "kpr",
+                "masks",
+                "prompt_parts_num",
+            )
+        ),
+        "embedded_disable_inference_prompting": json_safe(
+            nested_value(
+                embedded_config,
+                "model",
+                "promptable_trans",
+                "disable_inference_prompting",
+            )
+        ),
         "tensor_scan_performed": not args.skip_tensor_scan,
     }
     if not result["valid"]:
@@ -182,4 +211,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
