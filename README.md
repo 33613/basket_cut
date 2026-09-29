@@ -234,6 +234,11 @@ Market 数据训练。项目使用 `configs/kpr/multidataset_sports_test.yaml` �
 推理配置；`model.load_config=True`，模型结构和 KPR 参数从 checkpoint 内嵌
 配置恢复。
 
+配置中的 `data.sources/targets` 使用 `occ_PoseTrack21`，只是因为 KPR 在读取
+checkpoint 之前必须从其内置 ReID 数据集注册表初始化 17 个关键点与八部位
+预处理结构；上游代码没有注册名为 `sportsmot` 的图像 ReID 数据集。这里不会
+加载 PoseTrack 数据，也不会把联合训练 checkpoint 换成 PoseTrack 权重。
+
 下载后先验证官方发布的 SHA-256、checkpoint 结构、内嵌配置和所有浮点 tensor：
 
 ```bash

@@ -5,8 +5,14 @@
 # to True, so those architecture values are restored from the checkpoint.
 
 data:
-  sources: ["sportsmot"]
-  targets: ["sportsmot"]
+  # KPR calls its dataset registry before it restores the checkpoint's
+  # embedded model configuration. SportsMOT is part of this checkpoint's
+  # training mixture but is not registered as an image-ReID dataset in the
+  # upstream KPR repository. occ_PoseTrack21 supplies the compatible 17-keypoint
+  # / eight-body-part preprocessing schema only; it does not change the loaded
+  # checkpoint or run a PoseTrack dataset evaluation.
+  sources: ["occ_PoseTrack21"]
+  targets: ["occ_PoseTrack21"]
   height: 256
   width: 128
   norm_mean: [0.485, 0.456, 0.406]
@@ -28,4 +34,3 @@ model:
 test:
   evaluate: true
   normalize_feature: true
-
