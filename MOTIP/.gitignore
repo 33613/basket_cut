@@ -2,3 +2,22 @@
 
 # PyCharm
 .idea/
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python/CUDA extension builds
+*.egg-info/
+build/
+
+# Experiment outputs
+/outputs/
+
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+/outputs/
