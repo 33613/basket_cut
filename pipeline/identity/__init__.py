@@ -1,2 +1,1 @@
-"""Person re-identification adapters and track-level identity evidence."""
-
+"""Person re-identification backend and identity-archive service."""

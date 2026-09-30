@@ -7,7 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable
 
-from pipeline.common.schema import TrackRecord
+from contracts.schema import TrackRecord
 
 
 @dataclass(frozen=True)
@@ -65,4 +65,3 @@ def nearest_proposals(
             TrackProposal(track=observation, center_frame_idx=center_frame_idx)
         )
     return selected
-

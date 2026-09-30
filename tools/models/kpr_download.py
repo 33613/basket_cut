@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import argparse
-import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline.identity.inspect_kpr_checkpoint import PUBLISHED_SHA256, sha256_file
+from tools.models.kpr_checkpoint import PUBLISHED_SHA256, sha256_file
 
 
 MODEL_SPECS: dict[str, dict[str, Any]] = {
@@ -31,25 +30,23 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--model", choices=sorted(MODEL_SPECS), default="multidataset-sports"
-    )
-    parser.add_argument(
-        "--output-dir", type=Path, default=Path("/root/autodl-tmp/models/kpr")
-    )
-    parser.add_argument("--list", action="store_true", help="Print model metadata only")
-    parser.add_argument("--force-download", action="store_true")
-    return parser
+@dataclass(frozen=True)
+class KPRDownloadOptions:
+    model: str = "multidataset-sports"
+    output_dir: Path = Path("/root/autodl-tmp/models/kpr")
+    list_only: bool = False
+    force_download: bool = False
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
-    spec = dict(MODEL_SPECS[args.model])
-    if args.list:
-        result = {"model": args.model, **spec}
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return result
+def download_kpr_model(options: KPRDownloadOptions) -> dict[str, Any]:
+    if options.model not in MODEL_SPECS:
+        raise ValueError(
+            f"Unknown KPR model {options.model!r}; "
+            f"expected one of {sorted(MODEL_SPECS)}"
+        )
+    spec = dict(MODEL_SPECS[options.model])
+    if options.list_only:
+        return {"model": options.model, **spec}
 
     try:
         from huggingface_hub import hf_hub_download
@@ -58,14 +55,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "huggingface_hub is required: pip install -U huggingface_hub"
         ) from exc
 
-    output_dir = args.output_dir.expanduser().resolve()
+    output_dir = options.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     path = Path(
         hf_hub_download(
             repo_id=spec["repo_id"],
             filename=spec["filename"],
             local_dir=output_dir,
-            force_download=bool(args.force_download),
+            force_download=bool(options.force_download),
         )
     ).resolve()
     actual_sha256 = sha256_file(path)
@@ -75,20 +72,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"expected={spec['sha256']}, actual={actual_sha256}, path={path}"
         )
     result = {
-        "model": args.model,
+        "model": options.model,
         "path": str(path),
         "size_bytes": path.stat().st_size,
         "sha256": actual_sha256,
         "verified": True,
         "supports_prompt_modes": spec["supports_prompt_modes"],
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()

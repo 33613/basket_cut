@@ -1,17 +1,16 @@
-"""Run MOTIP on one video and export a framework-independent track file."""
+"""Core MOTIP tracking service with no command-line or visualization concerns."""
 
 from __future__ import annotations
 
-import argparse
 import hashlib
-import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
 from tqdm import tqdm
 
-from pipeline.common.schema import (
+from contracts.schema import (
     TrackRecord,
     VideoMeta,
     normalize_xyxy,
@@ -21,48 +20,30 @@ from pipeline.common.schema import (
 from pipeline.tracking.motip_backend import MotipBackend, MotipRuntimeConfig
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Export MOTIP person tracks from one video"
-    )
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--checkpoint", required=True, type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--motip-root", type=Path, default=REPOSITORY_ROOT / "MOTIP")
-    parser.add_argument(
-        "--config",
-        default="configs/r50_deformable_detr_motip_sportsmot.yaml",
-    )
-    parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--assignment-protocol", default="object-max")
-    parser.add_argument("--miss-tolerance", type=int, default=60)
-    parser.add_argument("--det-thresh", type=float, default=0.3)
-    parser.add_argument("--newborn-thresh", type=float, default=0.6)
-    parser.add_argument("--id-thresh", type=float, default=0.2)
-    parser.add_argument("--area-thresh", type=int, default=0)
-    parser.add_argument("--max-shorter", type=int, default=800)
-    parser.add_argument("--max-longer", type=int, default=1440)
-    parser.add_argument("--fp32", action="store_true")
-    parser.add_argument("--max-frames", type=int)
-    parser.add_argument("--no-visualization", action="store_true")
-    parser.add_argument("--overwrite", action="store_true")
-    return parser
+@dataclass(frozen=True)
+class TrackingOptions:
+    input: Path
+    checkpoint: Path
+    output_dir: Path
+    motip_root: Path
+    config: str = "configs/r50_deformable_detr_motip_sportsmot.yaml"
+    device: str = "cuda:0"
+    assignment_protocol: str = "object-max"
+    miss_tolerance: int = 60
+    det_thresh: float = 0.3
+    newborn_thresh: float = 0.6
+    id_thresh: float = 0.2
+    area_thresh: int = 0
+    max_shorter: int = 800
+    max_longer: int = 1440
+    fp32: bool = False
+    max_frames: int | None = None
+    overwrite: bool = False
 
 
 def video_id_for(path: Path) -> str:
     digest = hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:10]
     return f"{path.stem}-{digest}"
-
-
-def color_for(track_id: int) -> tuple[int, int, int]:
-    return (
-        64 + (track_id * 47) % 192,
-        64 + (track_id * 89) % 192,
-        64 + (track_id * 131) % 192,
-    )
 
 
 def update_summary(
@@ -103,12 +84,12 @@ def finalize_summary(
     return {"track_count": len(tracks), "tracks": tracks}
 
 
-def run(args: argparse.Namespace) -> None:
-    input_path = args.input.expanduser().resolve()
-    output_dir = args.output_dir.expanduser().resolve()
+def track_video(options: TrackingOptions) -> dict[str, Any]:
+    input_path = options.input.expanduser().resolve()
+    output_dir = options.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     tracks_path = output_dir / "tracks.jsonl"
-    if tracks_path.exists() and not args.overwrite:
+    if tracks_path.exists() and not options.overwrite:
         raise FileExistsError(
             f"{tracks_path} already exists; pass --overwrite to replace this run"
         )
@@ -123,48 +104,43 @@ def run(args: argparse.Namespace) -> None:
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     declared_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     frame_limit = declared_frames
-    if args.max_frames is not None:
-        frame_limit = min(frame_limit, args.max_frames) if frame_limit else args.max_frames
+    if options.max_frames is not None:
+        frame_limit = (
+            min(frame_limit, options.max_frames)
+            if frame_limit
+            else options.max_frames
+        )
 
     runtime_config = MotipRuntimeConfig(
-        assignment_protocol=args.assignment_protocol,
-        miss_tolerance=args.miss_tolerance,
-        det_thresh=args.det_thresh,
-        newborn_thresh=args.newborn_thresh,
-        id_thresh=args.id_thresh,
-        area_thresh=args.area_thresh,
-        max_shorter=args.max_shorter,
-        max_longer=args.max_longer,
-        fp16=not args.fp32,
+        assignment_protocol=options.assignment_protocol,
+        miss_tolerance=options.miss_tolerance,
+        det_thresh=options.det_thresh,
+        newborn_thresh=options.newborn_thresh,
+        id_thresh=options.id_thresh,
+        area_thresh=options.area_thresh,
+        max_shorter=options.max_shorter,
+        max_longer=options.max_longer,
+        fp16=not options.fp32,
     )
     backend = MotipBackend(
-        motip_root=args.motip_root,
-        config_path=args.config,
-        checkpoint_path=args.checkpoint,
+        motip_root=options.motip_root,
+        config_path=options.config,
+        checkpoint_path=options.checkpoint,
         runtime_config=runtime_config,
-        device=args.device,
+        device=options.device,
     )
     tracker = backend.create_tracker(height=height, width=width)
     video_id = video_id_for(input_path)
     summaries: dict[int, dict[str, Any]] = {}
-    writer = None
     processed_frames = 0
-
-    if not args.no_visualization:
-        visualization_path = output_dir / "tracks_vis.mp4"
-        writer = cv2.VideoWriter(
-            str(visualization_path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            fps,
-            (width, height),
-        )
-        if not writer.isOpened():
-            raise RuntimeError(f"Could not open video writer: {visualization_path}")
 
     try:
         with tracks_path.open("w", encoding="utf-8") as tracks_file:
             progress = tqdm(total=frame_limit or None, desc=input_path.stem, unit="frame")
-            while args.max_frames is None or processed_frames < args.max_frames:
+            while (
+                options.max_frames is None
+                or processed_frames < options.max_frames
+            ):
                 ok, frame = capture.read()
                 if not ok:
                     break
@@ -189,29 +165,11 @@ def run(args: argparse.Namespace) -> None:
                     )
                     write_jsonl_line(tracks_file, record.to_dict())
                     update_summary(summaries, record)
-                    if writer is not None:
-                        x1, y1, x2, y2 = (int(value) for value in bbox)
-                        color = color_for(record.track_id)
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                        label = f"ID {record.track_id} {record.det_score:.2f}"
-                        cv2.putText(
-                            frame,
-                            label,
-                            (x1, max(15, y1 - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            color,
-                            2,
-                        )
-                if writer is not None:
-                    writer.write(frame)
                 processed_frames += 1
                 progress.update(1)
             progress.close()
     finally:
         capture.release()
-        if writer is not None:
-            writer.release()
 
     meta = VideoMeta(
         video_id=video_id,
@@ -225,15 +183,11 @@ def run(args: argparse.Namespace) -> None:
         tracker_config=runtime_config.to_dict(),
     )
     write_json(output_dir / "video_meta.json", meta.to_dict())
-    write_json(
-        output_dir / "track_summary.json", finalize_summary(summaries, fps)
-    )
-    print(json.dumps({"output_dir": str(output_dir), **finalize_summary(summaries, fps)}, indent=2))
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()
+    track_summary = finalize_summary(summaries, fps)
+    write_json(output_dir / "track_summary.json", track_summary)
+    return {
+        "output_dir": str(output_dir),
+        "tracks": str(tracks_path),
+        "video_meta": str(output_dir / "video_meta.json"),
+        **track_summary,
+    }

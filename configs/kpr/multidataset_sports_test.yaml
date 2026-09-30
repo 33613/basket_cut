@@ -1,8 +1,8 @@
 # Project-owned inference settings for the Hugging Face multi-dataset KPR model.
 #
 # The checkpoint contains the exact trained model.kpr / promptable transformer
-# configuration.  pipeline.identity.KPRBackend always sets model.load_config
-# to True, so those architecture values are restored from the checkpoint.
+# configuration.  pipeline.identity.kpr_backend.KPRBackend always sets
+# model.load_config to True, so those values are restored from the checkpoint.
 
 data:
   # KPR calls its image-ReID dataset registry before restoring the checkpoint

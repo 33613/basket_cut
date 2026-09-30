@@ -6,6 +6,15 @@ from bisect import bisect_left
 from typing import Any
 
 
+def color_for(track_id: int) -> tuple[int, int, int]:
+    """Return a deterministic BGR color for a raw track ID."""
+    return (
+        64 + (track_id * 47) % 192,
+        64 + (track_id * 89) % 192,
+        64 + (track_id * 131) % 192,
+    )
+
+
 def nearest_action(
     actions: list[dict[str, Any]], frame_idx: int, max_gap: int
 ) -> dict[str, Any] | None:
@@ -39,4 +48,3 @@ def action_text(
         best = candidates[0]
         return f'top? {best["label"]} {float(best["score"]):.2f}'
     return None
-

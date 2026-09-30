@@ -7,7 +7,6 @@ errors and the temporal consistency of the matched identities.
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import math
@@ -16,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from pipeline.common.schema import TrackRecord, read_jsonl, write_json
+from contracts.schema import TrackRecord, read_jsonl, write_json
 
 
 @dataclass(frozen=True)
@@ -27,48 +26,23 @@ class MotObservation:
     score: float
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Evaluate MOTIP JSONL tracks against SHOT reference tracks"
-    )
-    parser.add_argument("--reference", required=True, type=Path)
-    parser.add_argument("--prediction", required=True, type=Path)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--events-output", type=Path)
-    parser.add_argument(
-        "--iou-threshold",
-        type=float,
-        default=0.5,
-        help="Minimum box IoU for a frame-level match (default: 0.5)",
-    )
-    parser.add_argument(
-        "--reference-frame-base",
-        type=int,
-        default=1,
-        help="SHOT MOT files start at frame 1; predictions start at frame 0",
-    )
-    parser.add_argument("--min-pred-score", type=float, default=0.0)
-    parser.add_argument("--max-frames", type=int)
-    parser.add_argument(
-        "--video-meta",
-        type=Path,
-        help=(
-            "video_meta.json produced with the predictions. When --max-frames is "
-            "omitted, processed_frames is used as the evaluation boundary. By "
-            "default a sibling video_meta.json is discovered automatically."
-        ),
-    )
-    parser.add_argument(
-        "--ignore-video-meta",
-        action="store_true",
-        help="Evaluate the union of reference/prediction frames instead of auto-limiting",
-    )
-    parser.add_argument("--sequence-name")
-    return parser
+@dataclass(frozen=True)
+class TrackingEvaluationOptions:
+    reference: Path
+    prediction: Path
+    output: Path | None = None
+    events_output: Path | None = None
+    iou_threshold: float = 0.5
+    reference_frame_base: int = 1
+    min_pred_score: float = 0.0
+    max_frames: int | None = None
+    video_meta: Path | None = None
+    ignore_video_meta: bool = False
+    sequence_name: str | None = None
 
 
 def resolve_frame_limit(
-    args: argparse.Namespace,
+    options: TrackingEvaluationOptions,
     prediction_path: Path,
 ) -> tuple[int | None, str | None, Path | None]:
     """Resolve the evaluated frame count without hiding tracker misses.
@@ -78,20 +52,20 @@ def resolve_frame_limit(
     ``processed_frames`` records how many source frames were actually presented
     to MOTIP and is therefore the correct automatic boundary.
     """
-    if args.max_frames is not None:
-        if args.max_frames <= 0:
+    if options.max_frames is not None:
+        if options.max_frames <= 0:
             raise ValueError("--max-frames must be positive")
-        return args.max_frames, "--max-frames", None
-    if args.ignore_video_meta:
+        return options.max_frames, "--max-frames", None
+    if options.ignore_video_meta:
         return None, None, None
 
     metadata_path = (
-        args.video_meta.expanduser().resolve()
-        if args.video_meta
+        options.video_meta.expanduser().resolve()
+        if options.video_meta
         else prediction_path.with_name("video_meta.json")
     )
     if not metadata_path.is_file():
-        if args.video_meta:
+        if options.video_meta:
             raise FileNotFoundError(f"Video metadata not found: {metadata_path}")
         return None, None, None
 
@@ -238,10 +212,10 @@ def iou_distance_matrix(
     return distances
 
 
-def run(args: argparse.Namespace) -> None:
-    if not 0.0 < args.iou_threshold <= 1.0:
+def evaluate_tracks(options: TrackingEvaluationOptions) -> dict[str, Any]:
+    if not 0.0 < options.iou_threshold <= 1.0:
         raise ValueError("--iou-threshold must be in (0, 1]")
-    if not 0.0 <= args.min_pred_score <= 1.0:
+    if not 0.0 <= options.min_pred_score <= 1.0:
         raise ValueError("--min-pred-score must be in [0, 1]")
 
     try:
@@ -251,19 +225,19 @@ def run(args: argparse.Namespace) -> None:
             "motmetrics is required: pip install 'motmetrics>=1.4,<2'"
         ) from exc
 
-    reference_path = args.reference.expanduser().resolve()
-    prediction_path = args.prediction.expanduser().resolve()
+    reference_path = options.reference.expanduser().resolve()
+    prediction_path = options.prediction.expanduser().resolve()
     max_frames, frame_limit_source, video_meta_path = resolve_frame_limit(
-        args, prediction_path
+        options, prediction_path
     )
     output_path = (
-        args.output.expanduser().resolve()
-        if args.output
+        options.output.expanduser().resolve()
+        if options.output
         else prediction_path.with_name("tracking_metrics.json")
     )
     events_path = (
-        args.events_output.expanduser().resolve()
-        if args.events_output
+        options.events_output.expanduser().resolve()
+        if options.events_output
         else output_path.with_name("tracking_events.csv")
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,12 +245,12 @@ def run(args: argparse.Namespace) -> None:
 
     reference_all = read_reference(
         reference_path,
-        frame_base=args.reference_frame_base,
+        frame_base=options.reference_frame_base,
         max_frames=None,
     )
     prediction_all = read_predictions(
         prediction_path,
-        min_score=args.min_pred_score,
+        min_score=options.min_pred_score,
         max_frames=None,
     )
     reference = [
@@ -304,7 +278,7 @@ def run(args: argparse.Namespace) -> None:
         distances = iou_distance_matrix(
             [item.bbox_xywh for item in gt],
             [item.bbox_xywh for item in pred],
-            iou_threshold=args.iou_threshold,
+            iou_threshold=options.iou_threshold,
         )
         accumulator.update(
             [item.track_id for item in gt],
@@ -317,7 +291,7 @@ def run(args: argparse.Namespace) -> None:
     for extra in ("num_frames", "num_objects", "num_predictions", "num_matches"):
         if extra in metrics_host.metrics and extra not in metric_names:
             metric_names.append(extra)
-    sequence_name = args.sequence_name or prediction_path.parent.name
+    sequence_name = options.sequence_name or prediction_path.parent.name
     summary = metrics_host.compute(
         accumulator,
         metrics=metric_names,
@@ -334,7 +308,7 @@ def run(args: argparse.Namespace) -> None:
         "sequence": sequence_name,
         "reference": {
             "path": str(reference_path),
-            "frame_base": args.reference_frame_base,
+            "frame_base": options.reference_frame_base,
             "observation_count": len(reference),
             "track_count": len({item.track_id for item in reference}),
         },
@@ -342,11 +316,11 @@ def run(args: argparse.Namespace) -> None:
             "path": str(prediction_path),
             "observation_count": len(prediction),
             "track_count": len({item.track_id for item in prediction}),
-            "min_score": args.min_pred_score,
+            "min_score": options.min_pred_score,
         },
         "evaluation": {
             "frame_count": len(frame_indices),
-            "iou_threshold": args.iou_threshold,
+            "iou_threshold": options.iou_threshold,
             "max_frames": max_frames,
             "frame_limit_source": frame_limit_source,
             "video_meta": str(video_meta_path) if video_meta_path else None,
@@ -375,28 +349,9 @@ def run(args: argparse.Namespace) -> None:
         formatters=metrics_host.formatters,
         namemap=mm.io.motchallenge_metric_names,
     )
-    print(rendered)
-    if max_frames is not None:
-        print(
-            f"Evaluation limited to source frames [0, {max_frames - 1}] "
-            f"using {frame_limit_source}."
-        )
-    print(
-        json.dumps(
-            {
-                "metrics_json": str(output_path),
-                "events_csv": str(events_path),
-                "matched_mean_iou": metrics["matched_mean_iou"],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()
+    result["artifacts"] = {
+        "metrics_json": str(output_path),
+        "events_csv": str(events_path),
+    }
+    result["rendered_summary"] = rendered
+    return result

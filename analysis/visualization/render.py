@@ -2,36 +2,28 @@
 
 from __future__ import annotations
 
-import argparse
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
 
-from pipeline.common.schema import TrackRecord, read_jsonl
-from pipeline.tracking.export_motip_tracks import color_for
-from pipeline.visualization.timeline import action_text, nearest_action
+from analysis.visualization.timeline import action_text, color_for, nearest_action
+from contracts.schema import TrackRecord, read_jsonl
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Render modular tracking/action outputs without rerunning models"
-    )
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--tracks", required=True, type=Path)
-    parser.add_argument("--actions", type=Path)
-    parser.add_argument(
-        "--identity-map",
-        type=Path,
-        help="Optional identity_map.jsonl produced by KPR archive mode",
-    )
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--max-action-gap", type=int, default=4)
-    parser.add_argument("--show-top-candidate", action="store_true")
-    parser.add_argument("--max-frames", type=int)
-    parser.add_argument("--overwrite", action="store_true")
-    return parser
+@dataclass(frozen=True)
+class RenderOptions:
+    input: Path
+    tracks: Path
+    output: Path
+    actions: Path | None = None
+    identity_map: Path | None = None
+    max_action_gap: int = 4
+    show_top_candidate: bool = False
+    max_frames: int | None = None
+    overwrite: bool = False
 
 
 def load_tracks(path: Path) -> dict[int, list[TrackRecord]]:
@@ -67,17 +59,17 @@ def load_identity_map(path: Path | None) -> dict[int, dict[str, Any]]:
     return mappings
 
 
-def run(args: argparse.Namespace) -> None:
-    input_path = args.input.expanduser().resolve()
-    output_path = args.output.expanduser().resolve()
-    if output_path.exists() and not args.overwrite:
+def render_results(options: RenderOptions) -> dict[str, Any]:
+    input_path = options.input.expanduser().resolve()
+    output_path = options.output.expanduser().resolve()
+    if output_path.exists() and not options.overwrite:
         raise FileExistsError(
             f"{output_path} already exists; pass --overwrite to replace it"
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tracks = load_tracks(args.tracks)
-    actions = load_actions(args.actions)
-    identities = load_identity_map(args.identity_map)
+    tracks = load_tracks(options.tracks)
+    actions = load_actions(options.actions)
+    identities = load_identity_map(options.identity_map)
 
     capture = cv2.VideoCapture(str(input_path))
     if not capture.isOpened():
@@ -99,7 +91,7 @@ def run(args: argparse.Namespace) -> None:
 
     frame_idx = 0
     try:
-        while args.max_frames is None or frame_idx < args.max_frames:
+        while options.max_frames is None or frame_idx < options.max_frames:
             ok, frame = capture.read()
             if not ok:
                 break
@@ -122,10 +114,10 @@ def run(args: argparse.Namespace) -> None:
                 action = nearest_action(
                     actions.get(track.track_id, []),
                     frame_idx,
-                    args.max_action_gap,
+                    options.max_action_gap,
                 )
                 predicted_action = action_text(
-                    action, show_top_candidate=args.show_top_candidate
+                    action, show_top_candidate=options.show_top_candidate
                 )
                 if predicted_action:
                     labels.append(predicted_action)
@@ -145,12 +137,4 @@ def run(args: argparse.Namespace) -> None:
     finally:
         capture.release()
         writer.release()
-    print(f"Rendered {frame_idx} frames to {output_path}")
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()
+    return {"output": str(output_path), "rendered_frames": frame_idx}

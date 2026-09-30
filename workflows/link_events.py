@@ -6,29 +6,21 @@ backend in either order and never needs to reload either neural network.
 
 from __future__ import annotations
 
-import argparse
-import json
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from pipeline.common.schema import read_jsonl, write_json, write_jsonl_line
+from contracts.schema import read_jsonl, write_json, write_jsonl_line
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Attach canonical person IDs to action JSONL records"
-    )
-    parser.add_argument("--actions", required=True, type=Path)
-    parser.add_argument("--identity-map", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument(
-        "--allow-unmapped",
-        action="store_true",
-        help="Keep action records whose raw track has no identity mapping",
-    )
-    parser.add_argument("--overwrite", action="store_true")
-    return parser
+@dataclass(frozen=True)
+class LinkEventsOptions:
+    actions: Path
+    identity_map: Path
+    output: Path
+    allow_unmapped: bool = False
+    overwrite: bool = False
 
 
 def load_identity_map(path: Path) -> dict[int, dict[str, Any]]:
@@ -43,11 +35,11 @@ def load_identity_map(path: Path) -> dict[int, dict[str, Any]]:
     return mappings
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
-    actions_path = args.actions.expanduser().resolve()
-    identity_map_path = args.identity_map.expanduser().resolve()
-    output_path = args.output.expanduser().resolve()
-    if output_path.exists() and not args.overwrite:
+def link_actions_to_people(options: LinkEventsOptions) -> dict[str, Any]:
+    actions_path = options.actions.expanduser().resolve()
+    identity_map_path = options.identity_map.expanduser().resolve()
+    output_path = options.output.expanduser().resolve()
+    if output_path.exists() and not options.overwrite:
         raise FileExistsError(
             f"{output_path} already exists; pass --overwrite to replace it"
         )
@@ -65,7 +57,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             mapping = mappings.get(raw_track_id)
             if mapping is None:
                 unmapped_tracks[raw_track_id] += 1
-                if not args.allow_unmapped:
+                if not options.allow_unmapped:
                     continue
                 person_id = None
                 identity_status = "unmapped"
@@ -91,7 +83,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "mapped_action_records": mapped_count,
         "written_action_records": (
             mapped_count + sum(unmapped_tracks.values())
-            if args.allow_unmapped
+            if options.allow_unmapped
             else mapped_count
         ),
         "person_count": len(people),
@@ -99,16 +91,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "unmapped_tracks": {
             str(track_id): count for track_id, count in sorted(unmapped_tracks.items())
         },
-        "allow_unmapped": bool(args.allow_unmapped),
+        "allow_unmapped": bool(options.allow_unmapped),
     }
     write_json(output_path.with_suffix(".summary.json"), summary)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return summary
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()

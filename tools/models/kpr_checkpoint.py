@@ -7,10 +7,10 @@ Run it only for the trusted Tracking Laboratory artifact documented here.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,23 +22,12 @@ DEFAULT_CHECKPOINT = Path(
 PUBLISHED_SHA256 = "c7f3a74d86a0bb56940b2703508a50f1d3dbee4d755049272ef5caa18457db3f"
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Verify and inspect the official multi-dataset KPR checkpoint"
-    )
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
-    parser.add_argument(
-        "--expected-sha256",
-        default=PUBLISHED_SHA256,
-        help="Expected digest published by the Hugging Face file page",
-    )
-    parser.add_argument(
-        "--skip-tensor-scan",
-        action="store_true",
-        help="Skip the finite-value scan over floating-point model tensors",
-    )
-    parser.add_argument("--output", type=Path)
-    return parser
+@dataclass(frozen=True)
+class KPRCheckpointOptions:
+    checkpoint: Path = DEFAULT_CHECKPOINT
+    expected_sha256: str = PUBLISHED_SHA256
+    skip_tensor_scan: bool = False
+    output: Path | None = None
 
 
 def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -85,13 +74,13 @@ def locate_state_dict(checkpoint: Any, torch) -> tuple[str | None, Mapping | Non
     return None, None
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
-    checkpoint_path = args.checkpoint.expanduser().resolve()
+def inspect_kpr_checkpoint(options: KPRCheckpointOptions) -> dict[str, Any]:
+    checkpoint_path = options.checkpoint.expanduser().resolve()
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     actual_sha256 = sha256_file(checkpoint_path)
-    expected_sha256 = args.expected_sha256.lower().strip()
+    expected_sha256 = options.expected_sha256.lower().strip()
     sha256_matches = actual_sha256 == expected_sha256
     if not sha256_matches:
         raise RuntimeError(
@@ -118,7 +107,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         tensor_count += 1
         parameter_count += value.numel()
         if (
-            not args.skip_tensor_scan
+            not options.skip_tensor_scan
             and (torch.is_floating_point(value) or torch.is_complex(value))
             and not bool(torch.isfinite(value).all())
         ):
@@ -187,7 +176,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "disable_inference_prompting",
             )
         ),
-        "tensor_scan_performed": not args.skip_tensor_scan,
+        "tensor_scan_performed": not options.skip_tensor_scan,
     }
     if not result["valid"]:
         raise RuntimeError(
@@ -195,19 +184,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"failed validation: {json.dumps(result, ensure_ascii=False)}"
         )
 
-    if args.output:
-        output_path = args.output.expanduser().resolve()
+    if options.output:
+        output_path = options.output.expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with output_path.open("w", encoding="utf-8") as handle:
             json.dump(result, handle, ensure_ascii=False, indent=2, sort_keys=True)
             handle.write("\n")
-    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return result
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()

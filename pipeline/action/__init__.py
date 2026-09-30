@@ -1,2 +1,1 @@
-"""Action recognition backends and command-line entry points."""
-
+"""Action-recognition backend and core service."""

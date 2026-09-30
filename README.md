@@ -11,13 +11,41 @@ video.mp4
   -> actions.jsonl
 ```
 
-## 目录约定
+## 目录与职责
 
-- `MOTIP/`：上游 MOTIP 源码，不在其中写项目代码。
-- `MMAction2/`：上游 MMAction2 源码，不在其中写项目代码。
-- `KPR/`：服务器上单独 clone 的 KPR 上游源码，已被 Git 忽略，不在其中写项目代码。
-- `pipeline/`：本项目可修改的跟踪、身份、动作和公共接口代码。
-- 数据、权重、运行结果保存在 `/root/autodl-tmp`，不提交到 Git。
+上游仓库保留在项目根目录，不改动其源码，也不再额外套一层
+`third_party/`：
+
+- `MOTIP/`：上游 MOTIP 源码。
+- `MMAction2/`：上游 MMAction2 源码。
+- `KPR/`：服务器上单独 clone 的 KPR 源码，已被 Git 忽略。
+
+本项目自己的代码按职责分层：
+
+- `pipeline/`：只保留 `tracking/`、`identity/`、`action/` 三个核心模块；
+  负责模型调用和单模块业务逻辑，不解析命令行，不负责可视化。
+- `contracts/`：跨模块稳定数据契约，包括 `tracks.jsonl` 等 JSON/JSONL
+  的读写和结构校验。
+- `workflows/`：应用级编排；组合核心模块、分析和产物，也是未来 Web
+  后端应调用的入口。
+- `cli/`：所有命令行入口；只做参数解析、调用 workflow/service 和
+  JSON 结果输出。
+- `analysis/`：辅助分析能力，目前包含轨迹评估和结果可视化；不属于
+  三个模型模块。
+- `tools/`：数据集与模型权重的下载、校验等开发工具。
+- `configs/`：项目接入层的配置文件。
+
+依赖方向保持单向：
+
+```text
+cli -> workflows -> pipeline
+                 -> analysis
+pipeline / workflows / analysis -> contracts
+tools 独立负责准备外部资源
+```
+
+`pipeline` 不反向依赖 `cli`、`workflows` 或 `analysis`。数据、权重、运行结果
+保存在 `/root/autodl-tmp`，不提交到 Git。当前不包含 Web 前后端代码。
 
 ## 1. 导出 MOTIP 轨迹
 
@@ -26,7 +54,7 @@ video.mp4
 ```bash
 conda activate /root/autodl-tmp/envs/motip
 
-python -m pipeline.tracking.export_motip_tracks \
+python -m cli.tracking \
   --input /root/autodl-tmp/data/basket_cut/pl_nba_smoke/VIDEO.mp4 \
   --checkpoint /root/autodl-tmp/models/motip/r50_deformable_detr_motip_sportsmot.pth \
   --output-dir /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO \
@@ -49,7 +77,7 @@ python -m pipeline.tracking.export_motip_tracks \
 ```bash
 conda activate /root/autodl-tmp/envs/mmaction2
 
-python -m pipeline.action.run_multisports \
+python -m cli.action \
   --input /root/autodl-tmp/data/basket_cut/pl_nba_smoke/VIDEO.mp4 \
   --tracks /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/tracks.jsonl \
   --config MMAction2/configs/detection/slowfast/slowfast_kinetics400-pretrained-r50_8xb16-4x16x1-8e_multisports-rgb.py \
@@ -71,7 +99,7 @@ python -m pipeline.action.run_multisports \
 ```bash
 conda activate /root/autodl-tmp/envs/motip
 
-python -m pipeline.visualization.render_results \
+python -m cli.render_results \
   --input /root/autodl-tmp/data/basket_cut/pl_nba_smoke/VIDEO.mp4 \
   --tracks /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/tracks.jsonl \
   --actions /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/actions.jsonl \
@@ -95,7 +123,7 @@ pip install -r requirements-eval.txt
 先查看下载计划，不产生下载流量：
 
 ```bash
-python -m pipeline.data.download_shot --dry-run
+python -m cli.download_shot --dry-run
 ```
 
 默认只选择官方示例 `ATLvsNJ-10-view1-3`，并使用 `tracking-eval` 配置，只下载：
@@ -108,7 +136,7 @@ ATLvsNJ-10-view1-3-track_with_gt.txt
 确认后开始下载：
 
 ```bash
-python -m pipeline.data.download_shot
+python -m cli.download_shot
 ```
 
 下载量由三层参数控制：
@@ -123,7 +151,7 @@ python -m pipeline.data.download_shot
 下载多个已选片段时，重复传入 `--sample`；下面仅演示参数形式，运行前先从 SHOT 文件页复制真实路径：
 
 ```bash
-python -m pipeline.data.download_shot \
+python -m cli.download_shot \
   --sample view1/Drive_Dunk/ATLvsNJ-10-view1-3 \
   --sample VIEW/TACTIC/ANOTHER_SAMPLE \
   --max-samples 2 \
@@ -145,7 +173,7 @@ python -m pipeline.data.download_shot \
 conda activate /root/autodl-tmp/envs/motip
 cd /root/autodl-tmp/project/basket_cut
 
-python -m pipeline.tracking.export_motip_tracks \
+python -m cli.tracking \
   --input /root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/ATLvsNJ-10-view1-3.mp4 \
   --checkpoint /root/autodl-tmp/models/motip/r50_deformable_detr_motip_sportsmot.pth \
   --output-dir /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3 \
@@ -155,7 +183,7 @@ python -m pipeline.tracking.export_motip_tracks \
 再把 MOTIP 输出与 SHOT 对齐后的参考轨迹比较：
 
 ```bash
-python -m pipeline.evaluation.evaluate_tracks \
+python -m cli.evaluate_tracking \
   --reference /root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/ATLvsNJ-10-view1-3-track_with_gt.txt \
   --prediction /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracks.jsonl \
   --output /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracking_metrics.json \
@@ -227,8 +255,8 @@ DanceTrack、SportsMOT、PoseTrack21、OccludedDuke 和 Market1501 训练，既�
 cd /root/autodl-tmp/project/basket_cut
 conda activate /root/autodl-tmp/envs/kpr
 
-python -m pipeline.identity.download_kpr_model --list
-python -m pipeline.identity.download_kpr_model
+python -m cli.download_kpr --list
+python -m cli.download_kpr
 ```
 
 下载器默认保存到 `/root/autodl-tmp/models/kpr`，并检查项目记录的官方
@@ -260,7 +288,7 @@ checkpoint 之前初始化 KPR 配置树。
 cd /root/autodl-tmp/project/basket_cut
 conda activate /root/autodl-tmp/envs/kpr
 
-python -m pipeline.identity.inspect_kpr_checkpoint \
+python -m cli.inspect_kpr_checkpoint \
   --output /root/autodl-tmp/outputs/basket_cut/kpr_checkpoint_report.json
 ```
 
@@ -300,7 +328,7 @@ c7f3a74d86a0bb56940b2703508a50f1d3dbee4d755049272ef5caa18457db3f
 验证视频/轨迹/提示接口并保存实际抽取的人物图和检查清单：
 
 ```bash
-python -m pipeline.identity.run_kpr_reid \
+python -m cli.identity \
   --input VIDEO.mp4 \
   --tracks tracks.jsonl \
   --output-dir identity_prepare \
@@ -320,7 +348,7 @@ python -m pipeline.identity.run_kpr_reid \
 cd /root/autodl-tmp/project/basket_cut
 conda activate /root/autodl-tmp/envs/kpr
 
-python -m pipeline.identity.run_kpr_reid \
+python -m cli.identity \
   --input /root/autodl-tmp/data/basket_cut/SHOT/view1/Drive_Dunk/ATLvsNJ-10-view1-3/ATLvsNJ-10-view1-3.mp4 \
   --tracks /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/tracks.jsonl \
   --kpr-root /root/autodl-tmp/project/basket_cut/KPR \
@@ -383,7 +411,7 @@ KPR 解决的是“两个轨迹是否可能属于同一个人”，不是直接�
 环境中执行 CPU-only join，无需重新加载模型：
 
 ```bash
-python -m pipeline.identity.link_events \
+python -m cli.link_events \
   --actions /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/actions.jsonl \
   --identity-map /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/identity_archive/identity_map.jsonl \
   --output /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/actions_with_identity.jsonl \
@@ -397,7 +425,7 @@ python -m pipeline.identity.link_events \
 独立渲染结果时可以显示规范人物 ID：
 
 ```bash
-python -m pipeline.visualization.render_results \
+python -m cli.render_results \
   --input VIDEO.mp4 \
   --tracks tracks.jsonl \
   --actions actions_with_identity.jsonl \

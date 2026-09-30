@@ -1,2 +1,1 @@
-"""Tracking backends and command-line entry points."""
-
+"""Person-tracking backend and core service."""

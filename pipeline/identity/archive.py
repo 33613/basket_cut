@@ -1,4 +1,4 @@
-"""Extract KPR identity evidence from MOTIP tracks.
+"""Core KPR identity archive service.
 
 This first integration is deliberately conservative: it samples high-quality
 person crops, builds one visibility-aware KPR prototype per track, and ranks
@@ -7,16 +7,15 @@ temporally compatible track pairs.  It never rewrites MOTIP IDs automatically.
 
 from __future__ import annotations
 
-import argparse
 import itertools
-import json
 import math
 import shutil
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from pipeline.common.schema import (
+from contracts.schema import (
     TrackRecord,
     read_jsonl,
     write_json,
@@ -46,74 +45,30 @@ GENERATED_FILES = (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Extract KPR track prototypes and ReID pair distances"
-    )
-    parser.add_argument("--input", required=True, type=Path, help="Source video")
-    parser.add_argument("--tracks", required=True, type=Path, help="MOTIP tracks.jsonl")
-    parser.add_argument("--kpr-root", type=Path, default=DEFAULT_KPR_ROOT)
-    parser.add_argument("--config", type=Path, default=DEFAULT_KPR_CONFIG)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_KPR_CHECKPOINT)
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument(
-        "--prompt-mode",
-        choices=PROMPT_MODES,
-        default="none",
-        help=(
-            "none uses RGB crops only; keypoints strictly requires one COCO-17 "
-            "prompt record for every selected track observation"
-        ),
-    )
-    parser.add_argument(
-        "--keypoints",
-        type=Path,
-        help="JSONL prompts used only with --prompt-mode keypoints",
-    )
-    parser.add_argument("--samples-per-track", type=int, default=8)
-    parser.add_argument("--archive-exemplars", type=int, default=4)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--min-det-score", type=float, default=0.5)
-    parser.add_argument("--min-box-width", type=float, default=16.0)
-    parser.add_argument("--min-box-height", type=float, default=40.0)
-    parser.add_argument("--crop-padding", type=float, default=0.05)
-    parser.add_argument(
-        "--context-padding",
-        type=float,
-        default=0.5,
-        help="Extra target-box size retained around saved context images",
-    )
-    parser.add_argument(
-        "--max-gap-frames",
-        type=int,
-        default=90,
-        help="Only propose merging non-overlapping tracklets separated by at most N frames",
-    )
-    parser.add_argument(
-        "--max-overlap-frames",
-        type=int,
-        default=0,
-        help="Maximum temporal overlap for a merge candidate (default: 0)",
-    )
-    parser.add_argument(
-        "--candidate-threshold",
-        type=float,
-        help=(
-            "Optional normalized KPR distance threshold. Omit until calibrated; "
-            "all pair distances are still written."
-        ),
-    )
-    parser.add_argument("--cpu", action="store_true")
-    parser.add_argument(
-        "--prepare-only",
-        action="store_true",
-        help=(
-            "CPU-only data preflight: save sampled crops/manifests without "
-            "loading KPR or producing identity embeddings"
-        ),
-    )
-    parser.add_argument("--overwrite", action="store_true")
-    return parser
+@dataclass(frozen=True)
+class IdentityArchiveOptions:
+    input: Path
+    tracks: Path
+    output_dir: Path
+    kpr_root: Path = DEFAULT_KPR_ROOT
+    config: Path = DEFAULT_KPR_CONFIG
+    checkpoint: Path = DEFAULT_KPR_CHECKPOINT
+    prompt_mode: str = "none"
+    keypoints: Path | None = None
+    samples_per_track: int = 8
+    archive_exemplars: int = 4
+    batch_size: int = 16
+    min_det_score: float = 0.5
+    min_box_width: float = 16.0
+    min_box_height: float = 40.0
+    crop_padding: float = 0.05
+    context_padding: float = 0.5
+    max_gap_frames: int = 90
+    max_overlap_frames: int = 0
+    candidate_threshold: float | None = None
+    cpu: bool = False
+    prepare_only: bool = False
+    overwrite: bool = False
 
 
 def load_keypoint_prompts(path: Path | None) -> dict[tuple[int, int], dict[str, Any]]:
@@ -615,38 +570,43 @@ def temporal_relation(
     return 0, first_start - second_end - 1
 
 
-def run(args: argparse.Namespace) -> None:
-    if not 0.0 <= args.min_det_score <= 1.0:
+def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
+    if options.prompt_mode not in PROMPT_MODES:
+        raise ValueError(
+            f"Unsupported --prompt-mode {options.prompt_mode!r}; "
+            f"expected one of {PROMPT_MODES}"
+        )
+    if not 0.0 <= options.min_det_score <= 1.0:
         raise ValueError("--min-det-score must be in [0, 1]")
-    if not 0.0 <= args.crop_padding <= 1.0:
+    if not 0.0 <= options.crop_padding <= 1.0:
         raise ValueError("--crop-padding must be in [0, 1]")
-    if not 0.0 <= args.context_padding <= 2.0:
+    if not 0.0 <= options.context_padding <= 2.0:
         raise ValueError("--context-padding must be in [0, 2]")
-    if args.archive_exemplars <= 0:
+    if options.archive_exemplars <= 0:
         raise ValueError("--archive-exemplars must be positive")
-    if args.prompt_mode == "none" and args.keypoints is not None:
+    if options.prompt_mode == "none" and options.keypoints is not None:
         raise ValueError("--keypoints requires --prompt-mode keypoints")
-    if args.prompt_mode == "keypoints" and args.keypoints is None:
+    if options.prompt_mode == "keypoints" and options.keypoints is None:
         raise ValueError("--prompt-mode keypoints requires --keypoints JSONL")
-    if args.candidate_threshold is not None and not (
-        0.0 <= args.candidate_threshold <= 1.0
+    if options.candidate_threshold is not None and not (
+        0.0 <= options.candidate_threshold <= 1.0
     ):
         raise ValueError("--candidate-threshold must be in [0, 1]")
 
-    video_path = args.input.expanduser().resolve()
-    tracks_path = args.tracks.expanduser().resolve()
-    output_dir = args.output_dir.expanduser().resolve()
+    video_path = options.input.expanduser().resolve()
+    tracks_path = options.tracks.expanduser().resolve()
+    output_dir = options.output_dir.expanduser().resolve()
     if not video_path.is_file():
         raise FileNotFoundError(f"Input video not found: {video_path}")
     if not tracks_path.is_file():
         raise FileNotFoundError(f"Tracks JSONL not found: {tracks_path}")
-    if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite:
+    if output_dir.exists() and any(output_dir.iterdir()) and not options.overwrite:
         raise FileExistsError(
             f"Output directory is not empty: {output_dir}; pass --overwrite"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
     media_root = output_dir / "identity_media"
-    if args.overwrite:
+    if options.overwrite:
         if media_root.exists():
             shutil.rmtree(media_root)
         # A failed rerun must not leave apparently valid archive metadata from
@@ -657,7 +617,7 @@ def run(args: argparse.Namespace) -> None:
                 path.unlink()
 
     prompts = load_keypoint_prompts(
-        args.keypoints.expanduser().resolve() if args.keypoints else None
+        options.keypoints.expanduser().resolve() if options.keypoints else None
     )
 
     all_records = [TrackRecord.from_dict(value) for value in read_jsonl(tracks_path)]
@@ -672,18 +632,18 @@ def run(args: argparse.Namespace) -> None:
         selected.extend(
             choose_track_samples(
                 records_by_track[track_id],
-                sample_count=args.samples_per_track,
-                min_score=args.min_det_score,
-                min_width=args.min_box_width,
-                min_height=args.min_box_height,
+                sample_count=options.samples_per_track,
+                min_score=options.min_det_score,
+                min_width=options.min_box_width,
+                min_height=options.min_box_height,
             )
         )
     track_sampling = build_track_sampling_diagnostics(
         records_by_track,
         selected,
-        min_score=args.min_det_score,
-        min_width=args.min_box_width,
-        min_height=args.min_box_height,
+        min_score=options.min_det_score,
+        min_width=options.min_box_width,
+        min_height=options.min_box_height,
     )
     with (output_dir / "kpr_track_sampling.jsonl").open(
         "w", encoding="utf-8"
@@ -696,10 +656,10 @@ def run(args: argparse.Namespace) -> None:
     samples, sample_metadata = load_selected_crops(
         video_path,
         selected,
-        padding=args.crop_padding,
-        context_padding=args.context_padding,
+        padding=options.crop_padding,
+        context_padding=options.context_padding,
         output_dir=output_dir,
-        prompt_mode=args.prompt_mode,
+        prompt_mode=options.prompt_mode,
         prompts=prompts,
     )
     with (output_dir / "kpr_sampling_manifest.jsonl").open(
@@ -707,12 +667,12 @@ def run(args: argparse.Namespace) -> None:
     ) as handle:
         for value in sample_metadata:
             write_jsonl_line(handle, value)
-    if args.prepare_only:
+    if options.prepare_only:
         prepare_summary = {
             "status": "prepared_not_inferred",
             "input": str(video_path),
             "tracks": str(tracks_path),
-            "prompt_mode": args.prompt_mode,
+            "prompt_mode": options.prompt_mode,
             "sample_count": len(sample_metadata),
             "input_track_count": len(records_by_track),
             "selected_track_count": len(
@@ -726,16 +686,15 @@ def run(args: argparse.Namespace) -> None:
             ),
         }
         write_json(output_dir / "kpr_prepare_summary.json", prepare_summary)
-        print(json.dumps(prepare_summary, ensure_ascii=False, indent=2))
-        return
+        return prepare_summary
     backend = KPRBackend(
-        kpr_root=args.kpr_root,
-        config_path=args.config,
-        checkpoint_path=args.checkpoint,
-        prompt_mode=args.prompt_mode,
-        use_gpu=not args.cpu,
+        kpr_root=options.kpr_root,
+        config_path=options.config,
+        checkpoint_path=options.checkpoint,
+        prompt_mode=options.prompt_mode,
+        use_gpu=not options.cpu,
     )
-    embeddings, visibility = backend.extract(samples, batch_size=args.batch_size)
+    embeddings, visibility = backend.extract(samples, batch_size=options.batch_size)
     track_ids, track_to_indices, prototypes, prototype_visibility = (
         make_track_prototypes(
             embeddings, visibility, sample_metadata, backend.torch
@@ -820,7 +779,7 @@ def run(args: argparse.Namespace) -> None:
         track_to_indices=track_to_indices,
         sample_metadata=sample_metadata,
         track_summaries=track_summaries,
-        exemplar_count=args.archive_exemplars,
+        exemplar_count=options.archive_exemplars,
     )
 
     pairs_path = output_dir / "kpr_track_pairs.jsonl"
@@ -832,13 +791,13 @@ def run(args: argparse.Namespace) -> None:
             records_by_track[left_id], records_by_track[right_id]
         )
         compatible = (
-            overlap <= args.max_overlap_frames and gap <= args.max_gap_frames
+            overlap <= options.max_overlap_frames and gap <= options.max_gap_frames
         )
         distance = float(prototype_distances[left_idx, right_idx].item())
         is_candidate = (
             None
-            if args.candidate_threshold is None
-            else compatible and distance <= args.candidate_threshold
+            if options.candidate_threshold is None
+            else compatible and distance <= options.candidate_threshold
         )
         if is_candidate:
             candidate_count += 1
@@ -851,7 +810,7 @@ def run(args: argparse.Namespace) -> None:
                 "overlap_frames": overlap,
                 "gap_frames": gap,
                 "temporally_compatible": compatible,
-                "candidate_threshold": args.candidate_threshold,
+                "candidate_threshold": options.candidate_threshold,
                 "is_merge_candidate": is_candidate,
             }
         )
@@ -874,10 +833,10 @@ def run(args: argparse.Namespace) -> None:
         "input": str(video_path),
         "tracks": str(tracks_path),
         "backend": "KPR",
-        "prompt_mode": args.prompt_mode,
-        "keypoints": str(args.keypoints.expanduser().resolve()) if args.keypoints else None,
-        "config": str(args.config.expanduser().resolve()),
-        "checkpoint": str(args.checkpoint.expanduser().resolve()),
+        "prompt_mode": options.prompt_mode,
+        "keypoints": str(options.keypoints.expanduser().resolve()) if options.keypoints else None,
+        "config": str(options.config.expanduser().resolve()),
+        "checkpoint": str(options.checkpoint.expanduser().resolve()),
         "sample_count": len(sample_metadata),
         "input_track_count": len(records_by_track),
         "track_count": len(track_ids),
@@ -887,7 +846,7 @@ def run(args: argparse.Namespace) -> None:
         "identity_count": len(identities),
         "identity_resolution_mode": "archive_no_merge",
         "candidate_count": candidate_count,
-        "candidate_threshold": args.candidate_threshold,
+        "candidate_threshold": options.candidate_threshold,
         "warning": (
             "KPR distances are cross-domain evidence, not calibrated identity "
             "probabilities. No MOTIP track IDs were modified."
@@ -900,7 +859,7 @@ def run(args: argparse.Namespace) -> None:
         {
             "schema_version": 1,
             "identity_resolution_mode": "archive_no_merge",
-            "prompt_mode": args.prompt_mode,
+            "prompt_mode": options.prompt_mode,
             "artifacts": {
                 "track_sampling": "kpr_track_sampling.jsonl",
                 "sampling_manifest": "kpr_sampling_manifest.jsonl",
@@ -928,12 +887,4 @@ def run(args: argparse.Namespace) -> None:
             ),
         },
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()
+    return summary

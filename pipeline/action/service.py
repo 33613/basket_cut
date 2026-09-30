@@ -1,10 +1,9 @@
-"""Run MultiSports SlowFast using MOTIP tracks as person proposals."""
+"""Core MultiSports action-recognition service."""
 
 from __future__ import annotations
 
-import argparse
-import json
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,29 +19,26 @@ from mmaction.registry import MODELS
 from mmaction.structures import ActionDataSample
 
 from pipeline.action.proposals import group_by_track, nearest_proposals
-from pipeline.common.schema import TrackRecord, read_jsonl, write_json, write_jsonl_line
+from contracts.schema import TrackRecord, read_jsonl, write_json, write_jsonl_line
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Apply MultiSports SlowFast to MOTIP person tracks"
-    )
-    parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--tracks", required=True, type=Path)
-    parser.add_argument("--config", required=True, type=Path)
-    parser.add_argument("--checkpoint", required=True, type=Path)
-    parser.add_argument("--label-map", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--short-side", type=int, default=256)
-    parser.add_argument("--predict-stepsize", type=int, default=8)
-    parser.add_argument("--proposal-max-gap", type=int, default=2)
-    parser.add_argument("--min-det-score", type=float, default=0.3)
-    parser.add_argument("--action-threshold", type=float, default=0.2)
-    parser.add_argument("--top-k", type=int, default=3)
-    parser.add_argument("--label-prefix", default="basketball_")
-    parser.add_argument("--overwrite", action="store_true")
-    return parser
+@dataclass(frozen=True)
+class ActionOptions:
+    input: Path
+    tracks: Path
+    config: Path
+    checkpoint: Path
+    label_map: Path
+    output: Path
+    device: str = "cuda:0"
+    short_side: int = 256
+    predict_stepsize: int = 8
+    proposal_max_gap: int = 2
+    min_det_score: float = 0.3
+    action_threshold: float = 0.2
+    top_k: int = 3
+    label_prefix: str = "basketball_"
+    overwrite: bool = False
 
 
 def load_labels(path: Path, prefix: str) -> dict[int, str]:
@@ -100,25 +96,25 @@ def sampler_settings(config: mmengine.Config) -> tuple[int, int]:
     raise KeyError("The MMAction2 config has no SampleAVAFrames transform")
 
 
-def run(args: argparse.Namespace) -> None:
-    output_path = args.output.expanduser().resolve()
-    if output_path.exists() and not args.overwrite:
+def recognize_actions(options: ActionOptions) -> dict[str, Any]:
+    output_path = options.output.expanduser().resolve()
+    if output_path.exists() and not options.overwrite:
         raise FileExistsError(
             f"{output_path} already exists; pass --overwrite to replace it"
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    records = [TrackRecord.from_dict(value) for value in read_jsonl(args.tracks)]
+    records = [TrackRecord.from_dict(value) for value in read_jsonl(options.tracks)]
     if not records:
-        raise ValueError(f"No track observations found in {args.tracks}")
+        raise ValueError(f"No track observations found in {options.tracks}")
     video_ids = {record.video_id for record in records}
     if len(video_ids) != 1:
         raise ValueError("One action run must contain tracks from exactly one video")
     tracks = group_by_track(records)
-    labels = load_labels(args.label_map, args.label_prefix)
-    frames, video_meta = read_video(args.input, args.short_side)
+    labels = load_labels(options.label_map, options.label_prefix)
+    frames, video_meta = read_video(options.input, options.short_side)
 
-    config = mmengine.Config.fromfile(str(args.config))
+    config = mmengine.Config.fromfile(str(options.config))
     clip_len, frame_interval = sampler_settings(config)
     window_size = clip_len * frame_interval
     if len(frames) < window_size:
@@ -129,7 +125,7 @@ def run(args: argparse.Namespace) -> None:
     timestamps = np.arange(
         window_size // 2,
         len(frames) + 1 - window_size // 2,
-        args.predict_stepsize,
+        options.predict_stepsize,
     )
 
     try:
@@ -138,8 +134,8 @@ def run(args: argparse.Namespace) -> None:
         pass
     config.model.backbone.pretrained = None
     model = MODELS.build(config.model)
-    load_checkpoint(model, str(args.checkpoint), map_location="cpu")
-    model.to(args.device).eval()
+    load_checkpoint(model, str(options.checkpoint), map_location="cpu")
+    model.to(options.device).eval()
 
     mean = np.array(config.model.data_preprocessor.mean)
     std = np.array(config.model.data_preprocessor.std)
@@ -156,8 +152,8 @@ def run(args: argparse.Namespace) -> None:
             proposals = nearest_proposals(
                 tracks,
                 center_frame_idx=center_frame_idx,
-                max_frame_gap=args.proposal_max_gap,
-                min_det_score=args.min_det_score,
+                max_frame_gap=options.proposal_max_gap,
+                min_det_score=options.min_det_score,
             )
             if not proposals:
                 progress.update()
@@ -169,7 +165,7 @@ def run(args: argparse.Namespace) -> None:
             for image in images:
                 mmcv.imnormalize_(image, mean=mean, std=std, to_rgb=False)
             input_array = np.stack(images).transpose((3, 0, 1, 2))[np.newaxis]
-            input_tensor = torch.from_numpy(input_array).to(args.device)
+            input_tensor = torch.from_numpy(input_array).to(options.device)
 
             boxes = []
             for proposal in proposals:
@@ -182,7 +178,9 @@ def run(args: argparse.Namespace) -> None:
                         y2 * height_ratio,
                     ]
                 )
-            box_tensor = torch.tensor(boxes, dtype=torch.float32, device=args.device)
+            box_tensor = torch.tensor(
+                boxes, dtype=torch.float32, device=options.device
+            )
             data_sample = ActionDataSample()
             data_sample.proposals = InstanceData(bboxes=box_tensor)
             data_sample.set_metainfo(
@@ -210,11 +208,11 @@ def run(args: argparse.Namespace) -> None:
                     key=lambda item: item["score"],
                     reverse=True,
                 )
-                candidates = ranked_actions[: args.top_k]
+                candidates = ranked_actions[: options.top_k]
                 selected = [
                     item
                     for item in ranked_actions
-                    if item["score"] >= args.action_threshold
+                    if item["score"] >= options.action_threshold
                 ]
                 for item in selected:
                     action_counts[item["label"]] += 1
@@ -235,8 +233,8 @@ def run(args: argparse.Namespace) -> None:
             progress.update()
 
     summary = {
-        "input": str(args.input.expanduser().resolve()),
-        "tracks": str(args.tracks.expanduser().resolve()),
+        "input": str(options.input.expanduser().resolve()),
+        "tracks": str(options.tracks.expanduser().resolve()),
         "output": str(output_path),
         "video_id": next(iter(video_ids)),
         "frame_count": len(frames),
@@ -246,21 +244,13 @@ def run(args: argparse.Namespace) -> None:
         "settings": {
             "clip_len": clip_len,
             "frame_interval": frame_interval,
-            "predict_stepsize": args.predict_stepsize,
-            "proposal_max_gap": args.proposal_max_gap,
-            "min_det_score": args.min_det_score,
-            "action_threshold": args.action_threshold,
-            "top_k": args.top_k,
-            "label_prefix": args.label_prefix,
+            "predict_stepsize": options.predict_stepsize,
+            "proposal_max_gap": options.proposal_max_gap,
+            "min_det_score": options.min_det_score,
+            "action_threshold": options.action_threshold,
+            "top_k": options.top_k,
+            "label_prefix": options.label_prefix,
         },
     }
     write_json(output_path.with_suffix(".summary.json"), summary)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-
-
-def main() -> None:
-    run(build_parser().parse_args())
-
-
-if __name__ == "__main__":
-    main()
+    return summary
