@@ -5,14 +5,12 @@
 # to True, so those architecture values are restored from the checkpoint.
 
 data:
-  # KPR calls its dataset registry before it restores the checkpoint's
-  # embedded model configuration. SportsMOT is part of this checkpoint's
-  # training mixture but is not registered as an image-ReID dataset in the
-  # upstream KPR repository. occ_PoseTrack21 supplies the compatible 17-keypoint
-  # / eight-body-part preprocessing schema only; it does not change the loaded
-  # checkpoint or run a PoseTrack dataset evaluation.
-  sources: ["occ_PoseTrack21"]
-  targets: ["occ_PoseTrack21"]
+  # KPR calls its image-ReID dataset registry before restoring the checkpoint
+  # configuration.  SportsMOT is in the checkpoint's training mixture but is
+  # not registered there, so use the valid Market1501 bootstrap chosen by the
+  # official TrackLab wrapper.  No Market1501 images are loaded by this adapter.
+  sources: ["market1501"]
+  targets: ["market1501"]
   height: 256
   width: 128
   norm_mean: [0.485, 0.456, 0.406]
@@ -24,10 +22,11 @@ model:
   kpr:
     keypoints:
       prompt_masks: keypoints_gaussian
-      prompt_preprocess: cck8
+      # This multi-dataset checkpoint's official TrackLab wrapper uses cck6.
+      prompt_preprocess: cck6
     masks:
-      dir: pose_on_img_crops
-      preprocess: eight
+      dir: ""
+      preprocess: five_v
   transreid:
     sie_camera: false
 

@@ -216,6 +216,24 @@ pip install gdown
 
 ### 6.2 下载 Hugging Face 多数据集权重
 
+本项目当前只注册一个推荐权重别名 `multidataset-sports`。它联合使用
+DanceTrack、SportsMOT、PoseTrack21、OccludedDuke 和 Market1501 训练，既包含
+体育域数据，也是 Hugging Face 模型仓库目前提供的多数据集 checkpoint。
+`none` 与 `keypoints` 两种提示模式使用同一份权重，不要重复下载。
+
+无卡实例可以完成下载和 SHA-256 校验：
+
+```bash
+cd /root/autodl-tmp/project/basket_cut
+conda activate /root/autodl-tmp/envs/kpr
+
+python -m pipeline.identity.download_kpr_model --list
+python -m pipeline.identity.download_kpr_model
+```
+
+下载器默认保存到 `/root/autodl-tmp/models/kpr`，并检查项目记录的官方
+SHA-256。也可以继续使用等价的 Hugging Face CLI：
+
 ```bash
 mkdir -p /root/autodl-tmp/models/kpr
 mkdir -p /root/autodl-tmp/cache/huggingface
@@ -231,15 +249,10 @@ hf download trackinglaboratory/keypoint_promptable_reid \
   --local-dir /root/autodl-tmp/models/kpr
 ```
 
-该 checkpoint 联合使用 DanceTrack、SportsMOT、PoseTrack21、OccludedDuke 和
-Market 数据训练。项目使用 `configs/kpr/multidataset_sports_test.yaml` 作为
-推理配置；`model.load_config=True`，模型结构和 KPR 参数从 checkpoint 内嵌
-配置恢复。
-
-配置中的 `data.sources/targets` 使用 `occ_PoseTrack21`，只是因为 KPR 在读取
-checkpoint 之前必须从其内置 ReID 数据集注册表初始化 17 个关键点与八部位
-预处理结构；上游代码没有注册名为 `sportsmot` 的图像 ReID 数据集。这里不会
-加载 PoseTrack 数据，也不会把联合训练 checkpoint 换成 PoseTrack 权重。
+项目使用 `configs/kpr/multidataset_sports_test.yaml` 作为推理引导配置，并用
+`model.load_config=True` 恢复 checkpoint 内嵌的 KPR 模型参数。引导配置使用
+上游已注册的 `market1501` 名称，但不会读取 Market1501 数据；它只负责在加载
+checkpoint 之前初始化 KPR 配置树。
 
 下载后先验证官方发布的 SHA-256、checkpoint 结构、内嵌配置和所有浮点 tensor：
 
@@ -260,6 +273,47 @@ c7f3a74d86a0bb56940b2703508a50f1d3dbee4d755049272ef5caa18457db3f
 
 ### 6.3 对当前 SHOT 片段提取轨迹身份特征
 
+#### Prompt mode 怎么选
+
+- `--prompt-mode none`：默认。只使用 RGB 人物裁剪；没有可靠姿态结果时选择它。
+- `--prompt-mode keypoints`：需要每个被采样的 Track/Frame 都有一个 COCO-17
+  正关键点提示，可另外提供同一裁剪内其他人的负关键点。适合一个人物框中混入
+  多个人或严重人物遮挡的情况。
+
+关键点提示不是越多越好。错误骨架会明确地把 KPR 指向错误人物，所以第一版
+身份归档先用 `none` 建立基线；准备好姿态模型后，再在同一批样本上对比
+`none/keypoints`。提示模式不改变 KPR checkpoint，额外需要的是姿态模型输出。
+
+`keypoints` 模式接受 JSONL，每行格式为：
+
+```json
+{"track_id": 7, "frame_idx": 24, "coordinate_space": "frame", "keypoints_xyc": [[123,80,0.95],[121,77,0.92],[126,77,0.91],[118,80,0.88],[130,80,0.87],[114,105,0.96],[135,105,0.95],[108,135,0.90],[141,135,0.89],[104,165,0.84],[145,165,0.82],[117,166,0.94],[133,166,0.93],[116,210,0.91],[135,210,0.90],[115,250,0.86],[137,250,0.85]], "negative_kps": []}
+```
+
+`keypoints_xyc` 必须有 17 个 `[x, y, confidence]`，顺序采用 COCO-17。
+`coordinate_space` 可为 `frame` 或 `crop`。推荐保存原视频帧坐标，程序会根据
+实际 KPR padded crop 自动转换。`negative_kps` 为可选的 `N x 17 x 3` 数组。
+严格模式发现缺帧、重复 Track/Frame、错误形状或 checkpoint 通道不匹配时会
+立即停止，而不会悄悄混用有提示和无提示特征。
+
+无卡实例可以先执行数据预检。下面命令不加载 KPR，也不产生 embedding；它会
+验证视频/轨迹/提示接口并保存实际抽取的人物图和检查清单：
+
+```bash
+python -m pipeline.identity.run_kpr_reid \
+  --input VIDEO.mp4 \
+  --tracks tracks.jsonl \
+  --output-dir identity_prepare \
+  --prompt-mode none \
+  --samples-per-track 8 \
+  --prepare-only \
+  --overwrite
+```
+
+检查 `kpr_prepare_summary.json`、`kpr_track_sampling.jsonl`、
+`kpr_sampling_manifest.jsonl` 和 `identity_media/samples/`。获得 GPU 后用相同输入
+去掉 `--prepare-only`，并将输出目录换成正式的 `identity_archive`。
+
 先用每条轨迹 2 个样本进行真实视频前向测试：
 
 ```bash
@@ -273,25 +327,46 @@ python -m pipeline.identity.run_kpr_reid \
   --config /root/autodl-tmp/project/basket_cut/configs/kpr/multidataset_sports_test.yaml \
   --checkpoint /root/autodl-tmp/models/kpr/kpr_dancetrack_sportsmot_posetrack21_occludedduke_market_split0.pth.tar \
   --output-dir /root/autodl-tmp/outputs/basket_cut/shot/ATLvsNJ-10-view1-3/kpr_smoke \
+  --prompt-mode none \
   --samples-per-track 2 \
   --batch-size 4 \
   --overwrite
 ```
 
-成功后把输出目录改为 `kpr`，并把 `--samples-per-track` 和 `--batch-size`
-分别改为 8，运行正式测试。三个路径参数已有上述默认值，从项目根目录运行时
-可以省略，但首次测试建议显式保留，便于核对日志。
+成功后把输出目录改为 `identity_archive`，并把 `--samples-per-track` 改为 8；
+`--archive-exemplars 4` 会为每个人保留一张封面和最多四张代表图。路径参数已有
+默认值，从项目根目录运行时可以省略，但首次测试建议显式保留。
+
+`keypoints` 模式在同一条命令中改为：
+
+```bash
+  --prompt-mode keypoints \
+  --keypoints /root/autodl-tmp/outputs/basket_cut/pose/VIDEO/keypoints.jsonl
+```
 
 首次运行不要设置 `--candidate-threshold`。KPR 官方也提示跨数据域 ReID 的效果
 不保证稳定，因此距离阈值要用 SHOT 参考身份标注校准，不能凭感觉指定。
 
 输出包括：
 
+- `kpr_track_sampling.jsonl`：所有原始轨迹的入选数、排除原因和实际过滤阈值；
+- `kpr_sampling_manifest.jsonl`：KPR 前向前就保存的采样、裁剪和 prompt 检查表；
 - `kpr_samples.jsonl`：实际送入 KPR 的帧、轨迹框和裁剪框；
 - `kpr_samples.npz`：逐人物裁剪的 embedding 和可见度；
 - `kpr_track_prototypes.npz`：每条轨迹的聚合 embedding、可见度和距离矩阵；
 - `kpr_track_pairs.jsonl`：任意两条轨迹的 KPR 距离、时间重叠和可合并性；
-- `kpr_summary.json`：轨迹内外观一致性统计。
+- `kpr_summary.json`：轨迹内外观一致性统计；
+- `identity_map.jsonl`：原始 MOTIP `track_id` 到规范 `person_id` 的映射；
+- `identities.jsonl`：每个人的封面、代表图、时间范围和身份档案；
+- `identity_archive_manifest.json`：给编排器/前端读取的产物索引；
+- `identity_media/samples/`：每个 KPR 样本的紧裁剪和带框上下文图；
+- `identity_media/identities/Pxxxx/`：人物封面与代表图。
+
+`archive_no_merge` 模式中一条原始轨迹对应一个确定的 `person_id`，例如 Track 7
+对应 `P0007`；其他轨迹是否通过过滤不会改变这个编号。这是身份归档，不会自动
+合并轨迹，也不会虚构姓名。封面选择综合检测分数、可见部位、清晰度、人物尺寸
+和到轨迹 prototype 的距离；保存的
+`archive_quality_score` 是透明的展示质量启发式，不是身份置信度。
 
 距离已按官方 Demo 归一化到约 `[0, 1]`：越接近 0，外观越像；但它不是概率。
 同时存在的两个人默认不能合并，所以只有不重叠、间隔不超过 90 帧的轨迹才标记
@@ -301,6 +376,36 @@ python -m pipeline.identity.run_kpr_reid \
 KPR 解决的是“两个轨迹是否可能属于同一个人”，不是直接输出球员姓名。要得到
 真实身份，还需要建立带姓名或球衣号码标签的 gallery，再把轨迹原型与 gallery
 特征比较。
+
+### 6.4 把动作结果归档到人物
+
+动作识别和 KPR 可以并行运行。两者都完成后，在任意包含本项目代码的 Python
+环境中执行 CPU-only join，无需重新加载模型：
+
+```bash
+python -m pipeline.identity.link_events \
+  --actions /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/actions.jsonl \
+  --identity-map /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/identity_archive/identity_map.jsonl \
+  --output /root/autodl-tmp/outputs/basket_cut/pipeline/VIDEO/actions_with_identity.jsonl \
+  --overwrite
+```
+
+输出保留原 `track_id`，并增加 `raw_track_id`、`person_id`、`identity_label` 和
+`identity_status`，为后续按人物剪辑和检索事件提供稳定接口。默认丢弃没有人物
+映射的动作记录；需要保留时添加 `--allow-unmapped`。
+
+独立渲染结果时可以显示规范人物 ID：
+
+```bash
+python -m pipeline.visualization.render_results \
+  --input VIDEO.mp4 \
+  --tracks tracks.jsonl \
+  --actions actions_with_identity.jsonl \
+  --identity-map identity_archive/identity_map.jsonl \
+  --output result_with_identity.mp4 \
+  --show-top-candidate \
+  --overwrite
+```
 
 ## 同步到云服务器
 

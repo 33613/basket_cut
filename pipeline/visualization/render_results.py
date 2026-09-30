@@ -21,6 +21,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--tracks", required=True, type=Path)
     parser.add_argument("--actions", type=Path)
+    parser.add_argument(
+        "--identity-map",
+        type=Path,
+        help="Optional identity_map.jsonl produced by KPR archive mode",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--max-action-gap", type=int, default=4)
     parser.add_argument("--show-top-candidate", action="store_true")
@@ -50,6 +55,18 @@ def load_actions(path: Path | None) -> dict[int, list[dict[str, Any]]]:
     return dict(grouped)
 
 
+def load_identity_map(path: Path | None) -> dict[int, dict[str, Any]]:
+    if path is None:
+        return {}
+    mappings: dict[int, dict[str, Any]] = {}
+    for value in read_jsonl(path):
+        track_id = int(value["raw_track_id"])
+        if track_id in mappings:
+            raise ValueError(f"Duplicate identity mapping for track {track_id}")
+        mappings[track_id] = value
+    return mappings
+
+
 def run(args: argparse.Namespace) -> None:
     input_path = args.input.expanduser().resolve()
     output_path = args.output.expanduser().resolve()
@@ -60,6 +77,7 @@ def run(args: argparse.Namespace) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tracks = load_tracks(args.tracks)
     actions = load_actions(args.actions)
+    identities = load_identity_map(args.identity_map)
 
     capture = cv2.VideoCapture(str(input_path))
     if not capture.isOpened():
@@ -89,7 +107,18 @@ def run(args: argparse.Namespace) -> None:
                 x1, y1, x2, y2 = (int(value) for value in track.bbox_xyxy)
                 color = color_for(track.track_id)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                labels = [f"ID {track.track_id} det {track.det_score:.2f}"]
+                identity = identities.get(track.track_id)
+                if identity is None:
+                    identity_text = f"T{track.track_id}"
+                else:
+                    person_id = str(identity["person_id"])
+                    identity_label = identity.get("identity_label")
+                    identity_text = (
+                        f"{person_id} {identity_label} / T{track.track_id}"
+                        if identity_label
+                        else f"{person_id} / T{track.track_id}"
+                    )
+                labels = [f"{identity_text} det {track.det_score:.2f}"]
                 action = nearest_action(
                     actions.get(track.track_id, []),
                     frame_idx,
