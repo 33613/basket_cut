@@ -26,13 +26,14 @@ video.mp4
   负责模型调用和单模块业务逻辑，不解析命令行，不负责可视化。
 - `contracts/`：跨模块稳定数据契约，包括 `tracks.jsonl` 等 JSON/JSONL
   的读写和结构校验。
-- `workflows/`：应用级编排；组合核心模块、分析和产物，也是未来 Web
-  后端应调用的入口。
+- `workflows/`：应用级编排；组合核心模块、分析和产物。
 - `cli/`：所有命令行入口；只做参数解析、调用 workflow/service 和
   JSON 结果输出。
 - `analysis/`：辅助分析能力，目前包含轨迹评估和结果可视化；不属于
   三个模型模块。
 - `tools/`：数据集与模型权重的下载、校验等开发工具。
+- `web/`：研究调试台的 FastAPI 后端和无框架前端；通过独立子进程
+  调用三个模型环境。
 - `configs/`：项目接入层的配置文件。
 
 依赖方向保持单向：
@@ -40,12 +41,13 @@ video.mp4
 ```text
 cli -> workflows -> pipeline
                  -> analysis
+web -> cli subprocesses / artifact readers
 pipeline / workflows / analysis -> contracts
 tools 独立负责准备外部资源
 ```
 
-`pipeline` 不反向依赖 `cli`、`workflows` 或 `analysis`。数据、权重、运行结果
-保存在 `/root/autodl-tmp`，不提交到 Git。当前不包含 Web 前后端代码。
+`pipeline` 不反向依赖 `cli`、`workflows`、`analysis` 或 `web`。数据、
+权重、运行结果保存在 `/root/autodl-tmp`，不提交到 Git。
 
 ## 1. 导出 MOTIP 轨迹
 
@@ -434,6 +436,52 @@ python -m cli.render_results \
   --show-top-candidate \
   --overwrite
 ```
+
+## 7. 启动可视化研究调试台
+
+`web/` 是一个面向当前研究进度的检查界面，不是只展示最终视频的
+演示页。它保留并展示：
+
+- 多视频拖拽上传和单 GPU 顺序队列；
+- MOTIP 轨迹、KPR 人物档案、动作结果和最终叠加视频；
+- 每个阶段的执行状态、完整命令、实时日志和原始 JSONL；
+- 以人物图片为入口的片段内事件索引和跨片段汇总视图。
+
+Web 进程不导入三个模型环境，而是分别调用
+`/root/autodl-tmp/envs/{motip,kpr,mmaction2}/bin/python`，所以不会把它们的
+依赖强行安装到一起。首次在 AutoDL 上创建轻量 Web 环境：
+
+```bash
+cd /root/autodl-tmp/project/basket_cut
+
+conda create -p /root/autodl-tmp/envs/basket-web python=3.10 -y
+conda activate /root/autodl-tmp/envs/basket-web
+pip install -r requirements-web.txt
+
+uvicorn web.backend.app:app \
+  --host 0.0.0.0 \
+  --port 6006
+```
+
+在 AutoDL 实例的“自定义服务”中映射 `6006` 端口后，即可用本地浏览器
+打开。也可以通过 SSH 端口转发把服务器的 `127.0.0.1:6006` 转到
+本机同名端口。长时运行时建议把 `uvicorn` 放到 `screen` 会话中。
+
+默认模型和环境路径与本 README 中的 AutoDL 目录一致。不一致时可以在
+启动前设置：
+
+```bash
+export BASKET_MOTIP_PYTHON=/path/to/motip/bin/python
+export BASKET_KPR_PYTHON=/path/to/kpr/bin/python
+export BASKET_ACTION_PYTHON=/path/to/mmaction2/bin/python
+export BASKET_MOTIP_CHECKPOINT=/path/to/motip.pth
+export BASKET_KPR_CHECKPOINT=/path/to/kpr.pth.tar
+export BASKET_ACTION_CHECKPOINT=/path/to/slowfast.pth
+```
+
+当前 `archive_no_merge` 生成的 `Pxxxx` 仅在单个片段内有效。页面会汇总
+不同片段的人物与事件，但会明确标记为 `CLIP-LOCAL IDs`，在 KPR 距离
+校准或真实球员 gallery 接入前，不会自动把两个片段中的人判为同一人。
 
 ## 同步到云服务器
 

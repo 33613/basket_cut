@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>CourtVision Lab · Basketball Video Intelligence</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="CourtVision Lab">
+        <span class="brand-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+        <span>
+          <strong>CourtVision</strong>
+          <small>RESEARCH LAB</small>
+        </span>
+      </a>
+      <div class="topbar-center">
+        <span class="eyebrow">BASKETBALL VIDEO INTELLIGENCE</span>
+        <span class="topbar-separator"></span>
+        <span id="projectTitle">实验工作台</span>
+      </div>
+      <div class="system-state" id="systemState">
+        <span class="state-dot"></span>
+        <span>正在连接服务</span>
+      </div>
+    </header>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-heading">
+          <div>
+            <span class="eyebrow">WORKSPACES</span>
+            <h2>实验记录</h2>
+          </div>
+          <button class="icon-button" id="newProjectButton" title="新建实验">＋</button>
+        </div>
+        <div id="projectList" class="project-list"></div>
+
+        <div class="sidebar-note">
+          <span class="note-index">01</span>
+          <div>
+            <strong>面向检查，而非包装</strong>
+            <p>保留轨迹、身份、动作、阈值和日志，错误也应该被看见。</p>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <section class="upload-section panel" id="uploadSection">
+          <div class="section-copy">
+            <span class="eyebrow">INPUT / SHORT CLIPS</span>
+            <h1>把比赛片段放到这里</h1>
+            <p>支持一次拖入多个短视频。每个片段独立处理，结果在同一个实验中汇总。</p>
+          </div>
+          <div class="drop-zone" id="dropZone" tabindex="0" role="button">
+            <input id="fileInput" type="file" accept="video/*,.mkv,.avi" multiple hidden />
+            <div class="upload-orbit"><span>＋</span></div>
+            <strong>拖拽视频到此处</strong>
+            <span>或点击选择 MP4 / MOV / MKV / AVI</span>
+            <button class="secondary-button" id="selectFilesButton">选择视频</button>
+          </div>
+          <div class="upload-progress hidden" id="uploadProgress">
+            <div><span id="uploadLabel">正在上传</span><strong id="uploadPercent">0%</strong></div>
+            <div class="progress-track"><span id="uploadBar"></span></div>
+          </div>
+        </section>
+
+        <section class="workspace hidden" id="workspace">
+          <div class="clip-strip-wrap panel">
+            <div class="strip-header">
+              <div>
+                <span class="eyebrow">CLIP QUEUE</span>
+                <h3>视频片段</h3>
+              </div>
+              <div class="strip-actions">
+                <button class="ghost-button" id="batchRunButton">▶ 批量处理</button>
+                <button class="ghost-button" id="addMoreButton">＋ 添加片段</button>
+              </div>
+            </div>
+            <div id="clipStrip" class="clip-strip"></div>
+          </div>
+
+          <section class="inspector" id="inspector">
+            <div class="inspector-header panel">
+              <div class="clip-heading">
+                <span class="status-pill" id="clipStatus">UPLOADED</span>
+                <h2 id="clipTitle">选择一个片段</h2>
+                <p id="clipMeta">—</p>
+              </div>
+              <div class="run-actions">
+                <button class="run-button" id="runFullButton">
+                  <span class="play-symbol">▶</span>
+                  <span><small>RUN PIPELINE</small>处理完整流程</span>
+                </button>
+                <button class="control-button" id="optionsButton">参数</button>
+              </div>
+            </div>
+
+            <div class="options-panel panel hidden" id="optionsPanel">
+              <div class="option-grid">
+                <label>测试帧数<input id="maxFrames" type="number" min="1" placeholder="完整视频" /></label>
+                <label>跟踪检测阈值<input id="trackingThreshold" type="number" min="0" max="1" step="0.05" value="0.30" /></label>
+                <label>KPR 每轨迹采样<input id="identitySamples" type="number" min="1" max="64" value="8" /></label>
+                <label>KPR 检测阈值<input id="identityThreshold" type="number" min="0" max="1" step="0.05" value="0.50" /></label>
+                <label>动作阈值<input id="actionThreshold" type="number" min="0" max="1" step="0.05" value="0.20" /></label>
+                <label class="checkbox-label"><input id="forceRun" type="checkbox" /><span>强制重跑已有阶段</span></label>
+              </div>
+              <div class="module-buttons">
+                <button data-target="tracking">只跑追踪</button>
+                <button data-target="identity">运行身份归档</button>
+                <button data-target="action">运行动作识别</button>
+                <button data-target="final">重新生成结果视频</button>
+              </div>
+            </div>
+
+            <div class="stage-rail panel" id="stageRail">
+              <div class="stage" data-stage="tracking"><span>01</span><div><small>MOTIP</small><strong>人物追踪</strong></div><i></i></div>
+              <div class="stage" data-stage="identity"><span>02</span><div><small>KPR</small><strong>身份归档</strong></div><i></i></div>
+              <div class="stage" data-stage="action"><span>03</span><div><small>SLOWFAST</small><strong>动作识别</strong></div><i></i></div>
+              <div class="stage" data-stage="link"><span>04</span><div><small>CONTRACT</small><strong>人物事件连接</strong></div><i></i></div>
+              <div class="stage" data-stage="render"><span>05</span><div><small>OUTPUT</small><strong>结果渲染</strong></div></div>
+            </div>
+
+            <div class="inspection-grid">
+              <section class="video-panel panel">
+                <div class="panel-toolbar">
+                  <div class="view-switcher" id="viewSwitcher">
+                    <button data-view="source" class="active">原视频</button>
+                    <button data-view="tracking">轨迹</button>
+                    <button data-view="final">最终叠加</button>
+                  </div>
+                  <span id="videoModeLabel">SOURCE VIDEO</span>
+                </div>
+                <div class="video-stage">
+                  <video id="resultVideo" controls playsinline preload="metadata"></video>
+                  <div class="video-empty" id="videoEmpty">
+                    <div class="court-icon"><span></span></div>
+                    <strong>该阶段还没有可播放视频</strong>
+                    <p>运行对应模块后，这里会显示可视化结果。</p>
+                  </div>
+                </div>
+              </section>
+
+              <aside class="metrics-panel panel">
+                <div class="panel-title">
+                  <div><span class="eyebrow">QUICK READ</span><h3>本片段概览</h3></div>
+                  <span class="live-badge">LIVE</span>
+                </div>
+                <div class="metrics-grid" id="metricsGrid"></div>
+                <div class="confidence-note">
+                  <span>!</span>
+                  <p><strong>分数不是同一种置信度。</strong> det 是检测分数，KPR 是距离，动作数字才是类别分数。</p>
+                </div>
+              </aside>
+            </div>
+
+            <section class="detail-panel panel">
+              <nav class="tabs" id="tabs">
+                <button data-tab="tracking" class="active">轨迹检查</button>
+                <button data-tab="identity">人物档案</button>
+                <button data-tab="events">人物事件索引</button>
+                <button data-tab="raw">原始数据</button>
+                <button data-tab="logs">运行日志</button>
+              </nav>
+              <div class="tab-content" id="tabContent"></div>
+            </section>
+          </section>
+
+          <section class="project-index panel" id="projectIndex">
+            <div class="panel-title">
+              <div><span class="eyebrow">ACROSS CLIPS</span><h3>跨片段人物事件视图</h3></div>
+              <span class="scope-badge">CLIP-LOCAL IDs</span>
+            </div>
+            <p class="scope-warning">当前先汇总各片段的人物档案与事件；尚未校准的 KPR 距离不会被自动当成跨片段同一人。</p>
+            <div id="crossClipGrid" class="cross-clip-grid"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
