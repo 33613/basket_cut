@@ -6,9 +6,11 @@
 video.mp4
   -> MOTIP tracking
   -> tracks.jsonl
-  -> KPR track identity evidence
-  -> action backend
-  -> actions.jsonl
+       |-> KPR identity archive ---------|
+       |-> MMAction2 action predictions -|
+  -> actions_with_identity.jsonl
+  -> MMAction2 temporal adapter
+  -> events.jsonl [id, event, start, end, raw_score]
 ```
 
 ## 目录与职责
@@ -32,6 +34,8 @@ video.mp4
 - `analysis/`：辅助分析能力，目前包含轨迹评估和结果可视化；不属于
   三个模型模块。
 - `tools/`：数据集与模型权重的下载、校验等开发工具。
+- `adapters/`：第三方输出到项目稳定契约的转换；当前包含 MMAction2 稀疏
+  动作预测点到时间事件的聚合，不属于三个模型基线。
 - `web/`：研究调试台的 FastAPI 后端和无框架前端；通过独立子进程
   调用三个模型环境。
 - `configs/`：项目接入层的配置文件。
@@ -40,11 +44,15 @@ video.mp4
 
 ```text
 cli -> workflows -> pipeline
+                 -> adapters
                  -> analysis
 web -> cli subprocesses / artifact readers
-pipeline / workflows / analysis -> contracts
+pipeline / adapters / workflows / analysis -> contracts
 tools 独立负责准备外部资源
 ```
+
+时间事件构建、MultiSports 参考数据转换和产品评估见
+[`docs/EVENTS_EVALUATION.md`](docs/EVENTS_EVALUATION.md)。
 
 `pipeline` 不反向依赖 `cli`、`workflows`、`analysis` 或 `web`。数据、
 权重、运行结果保存在 `/root/autodl-tmp`，不提交到 Git。

@@ -104,6 +104,107 @@ class TrackRecord:
         return data
 
 
+@dataclass(frozen=True)
+class EventRecord:
+    """One product-facing temporal event.
+
+    ``start`` is inclusive and ``end`` is exclusive, both measured in source
+    video seconds.  The public contract intentionally keeps the five fields
+    requested by the product (``id``, ``event``, ``start``, ``end`` and
+    ``raw_score``); the remaining fields are traceability evidence used by the
+    evaluator and the research dashboard.
+    """
+
+    video_id: str
+    event_id: str
+    identity_id: str
+    event: str
+    start: float
+    end: float
+    raw_score: float
+    start_frame: int
+    end_frame: int
+    raw_track_ids: tuple[int, ...] = ()
+    support_count: int = 0
+    source: str = "mmaction2_temporal_aggregation"
+
+    def __post_init__(self) -> None:
+        if not self.video_id:
+            raise ValueError("video_id must not be empty")
+        if not self.event_id:
+            raise ValueError("event_id must not be empty")
+        if not self.identity_id:
+            raise ValueError("id must not be empty")
+        if not self.event:
+            raise ValueError("event must not be empty")
+        start = _finite_number(self.start, "start")
+        end = _finite_number(self.end, "end")
+        if start < 0 or end <= start:
+            raise ValueError(
+                f"Expected a positive half-open interval, got [{start}, {end})"
+            )
+        object.__setattr__(self, "start", start)
+        object.__setattr__(self, "end", end)
+        score = _finite_number(self.raw_score, "raw_score")
+        if not 0.0 <= score <= 1.0:
+            raise ValueError(f"raw_score must be in [0, 1], got {score}")
+        object.__setattr__(self, "raw_score", score)
+        if self.start_frame < 0 or self.end_frame < self.start_frame:
+            raise ValueError(
+                "Expected inclusive frame bounds with 0 <= start_frame <= "
+                f"end_frame, got {self.start_frame}, {self.end_frame}"
+            )
+        if self.support_count < 0:
+            raise ValueError("support_count must be non-negative")
+        normalized_track_ids = tuple(
+            sorted({int(value) for value in self.raw_track_ids})
+        )
+        if any(value < 0 for value in normalized_track_ids):
+            raise ValueError("raw_track_ids must be non-negative")
+        object.__setattr__(self, "raw_track_ids", normalized_track_ids)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "EventRecord":
+        data = dict(value)
+        if "identity_id" not in data:
+            identity_id = data.pop("id", None)
+            if identity_id is None:
+                identity_id = data.pop("person_id", None)
+            data["identity_id"] = identity_id
+        data["raw_track_ids"] = tuple(data.get("raw_track_ids", ()))
+        allowed = {
+            "video_id",
+            "event_id",
+            "identity_id",
+            "event",
+            "start",
+            "end",
+            "raw_score",
+            "start_frame",
+            "end_frame",
+            "raw_track_ids",
+            "support_count",
+            "source",
+        }
+        return cls(**{key: item for key, item in data.items() if key in allowed})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "video_id": self.video_id,
+            "event_id": self.event_id,
+            "id": self.identity_id,
+            "event": self.event,
+            "start": self.start,
+            "end": self.end,
+            "raw_score": self.raw_score,
+            "start_frame": self.start_frame,
+            "end_frame": self.end_frame,
+            "raw_track_ids": list(self.raw_track_ids),
+            "support_count": self.support_count,
+            "source": self.source,
+        }
+
+
 def read_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
     with Path(path).open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
