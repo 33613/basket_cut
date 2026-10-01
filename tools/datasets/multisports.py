@@ -15,6 +15,80 @@ OFFICIALLY_UNEVALUATED_LABELS = {
     "basketball_jump_ball",
 }
 
+# The newer split-specific Hugging Face annotations (for example
+# ``data/test/multisports_test.pkl``) omit the label vocabulary that was
+# embedded in the original ``multisports_GT.pkl``.  Tube dictionaries still
+# use the same official zero-based class indices, so keep the published
+# vocabulary here as a deterministic fallback.
+OFFICIAL_MULTISPORTS_LABELS = (
+    "aerobic push up",
+    "aerobic explosive push up",
+    "aerobic explosive support",
+    "aerobic leg circle",
+    "aerobic helicopter",
+    "aerobic support",
+    "aerobic v support",
+    "aerobic horizontal support",
+    "aerobic straight jump",
+    "aerobic illusion",
+    "aerobic bent leg(s) jump",
+    "aerobic pike jump",
+    "aerobic straddle jump",
+    "aerobic split jump",
+    "aerobic scissors leap",
+    "aerobic kick jump",
+    "aerobic off axis jump",
+    "aerobic butterfly jump",
+    "aerobic split",
+    "aerobic turn",
+    "aerobic balance turn",
+    "volleyball serve",
+    "volleyball block",
+    "volleyball first pass",
+    "volleyball defend",
+    "volleyball protect",
+    "volleyball second pass",
+    "volleyball adjust",
+    "volleyball save",
+    "volleyball second attack",
+    "volleyball spike",
+    "volleyball dink",
+    "volleyball no offensive attack",
+    "football shoot",
+    "football long pass",
+    "football short pass",
+    "football through pass",
+    "football cross",
+    "football dribble",
+    "football trap",
+    "football throw",
+    "football diving",
+    "football tackle",
+    "football steal",
+    "football clearance",
+    "football block",
+    "football press",
+    "football aerial duels",
+    "basketball pass",
+    "basketball drive",
+    "basketball dribble",
+    "basketball 3-point shot",
+    "basketball 2-point shot",
+    "basketball free throw",
+    "basketball block",
+    "basketball offensive rebound",
+    "basketball defensive rebound",
+    "basketball pass steal",
+    "basketball dribble steal",
+    "basketball interfere shot",
+    "basketball pick-and-roll defensive",
+    "basketball sag",
+    "basketball screen",
+    "basketball pass-inbound",
+    "basketball save",
+    "basketball jump ball",
+)
+
 
 @dataclass(frozen=True)
 class MultiSportsReferenceOptions:
@@ -35,7 +109,7 @@ def canonical_label(value: str) -> str:
 def _load_pickle(path: Path) -> dict[str, Any]:
     # MultiSports publishes its annotations as a Python pickle.  Pickles can
     # execute code while loading, so this adapter is intentionally limited to
-    # the official multisports_GT.pkl downloaded from MCG-NJU.
+    # official MultiSports pickle files downloaded from MCG-NJU.
     with path.open("rb") as handle:
         value = pickle.load(handle)
     if not isinstance(value, dict):
@@ -43,12 +117,35 @@ def _load_pickle(path: Path) -> dict[str, Any]:
     return value
 
 
+def _resolve_labels(ground_truth: dict[str, Any]) -> tuple[list[str], str]:
+    embedded = ground_truth.get("labels")
+    if embedded is not None:
+        labels = [str(value) for value in embedded]
+        source = "annotation"
+    else:
+        labels = list(OFFICIAL_MULTISPORTS_LABELS)
+        source = "official_fallback"
+
+    tube_indices = {
+        int(label_index)
+        for video_tubes in ground_truth.get("gttubes", {}).values()
+        for label_index in video_tubes
+    }
+    if tube_indices and max(tube_indices) >= len(labels):
+        raise ValueError(
+            "Annotation contains a class index outside the known MultiSports "
+            f"vocabulary: max={max(tube_indices)}, labels={len(labels)}"
+        )
+    return labels, source
+
+
 def list_multisports_videos(
     annotation: Path, *, label_prefix: str = "basketball"
 ) -> list[str]:
     """List videos containing at least one action with the selected prefix."""
     ground_truth = _load_pickle(annotation.expanduser().resolve())
-    labels = [canonical_label(str(value)) for value in ground_truth["labels"]]
+    resolved_labels, _ = _resolve_labels(ground_truth)
+    labels = [canonical_label(value) for value in resolved_labels]
     prefix = canonical_label(label_prefix)
     selected = []
     for video_name, video_tubes in ground_truth["gttubes"].items():
@@ -79,7 +176,7 @@ def prepare_multisports_reference(
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ground_truth = _load_pickle(annotation_path)
-    labels = [str(value) for value in ground_truth["labels"]]
+    labels, labels_source = _resolve_labels(ground_truth)
     tubes_by_video = ground_truth["gttubes"]
 
     missing = [video for video in options.videos if video not in tubes_by_video]
@@ -168,6 +265,7 @@ def prepare_multisports_reference(
         "videos": list(options.videos),
         "fps": options.fps,
         "label_prefix": options.label_prefix,
+        "labels_source": labels_source,
         "event_count": len(records),
         "skipped_non_target_tubes": skipped_labels,
         "skipped_officially_unevaluated_tubes": skipped_unevaluated_tubes,
