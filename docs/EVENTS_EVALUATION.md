@@ -77,17 +77,21 @@ MultiSports 在 Hugging Face 上是需接受 CC BY-NC 4.0 条款的 gated 数据
 
 ```bash
 hf auth login
-hf download MCG-NJU/SportsAction multisports_GT.pkl \
+hf download MCG-NJU/SportsAction data/trainval/multisports_GT.pkl \
   --repo-type dataset \
   --local-dir /root/autodl-tmp/data/basket_cut/MultiSports
 ```
+
+不要使用 `data/test/multisports_test.pkl`：官方 test split 不公开动作真值，
+所以该文件没有 `gttubes`。本项目使用 trainval 包中带真值的 validation 列表。
 
 先查看可用篮球视频 key：
 
 ```bash
 python -m cli.prepare_multisports_reference \
-  --annotation /root/autodl-tmp/data/basket_cut/MultiSports/multisports_GT.pkl \
+  --annotation /root/autodl-tmp/data/basket_cut/MultiSports/data/trainval/multisports_GT.pkl \
   --list-videos \
+  --split validation \
   --limit 30
 ```
 
@@ -95,7 +99,7 @@ python -m cli.prepare_multisports_reference \
 
 ```bash
 python -m cli.prepare_multisports_reference \
-  --annotation /root/autodl-tmp/data/basket_cut/MultiSports/multisports_GT.pkl \
+  --annotation /root/autodl-tmp/data/basket_cut/MultiSports/data/trainval/multisports_GT.pkl \
   --video 'basketball/VIDEO_KEY' \
   --output /root/autodl-tmp/data/basket_cut/MultiSports/VIDEO_KEY.reference_events.jsonl \
   --overwrite

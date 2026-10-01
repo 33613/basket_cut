@@ -30,6 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fps", type=float, default=25.0)
     parser.add_argument("--label-prefix", default="basketball")
     parser.add_argument(
+        "--split",
+        choices=("all", "train", "validation"),
+        default="all",
+        help=(
+            "Video split used by --list-videos. MultiSports calls the public "
+            "validation list test_videos internally."
+        ),
+    )
+    parser.add_argument(
         "--include-unevaluated-labels",
         action="store_true",
         help=(
@@ -53,11 +62,17 @@ def main() -> None:
         if args.limit <= 0:
             raise ValueError("--limit must be positive")
         videos = list_multisports_videos(
-            args.annotation, label_prefix=args.label_prefix
+            args.annotation,
+            label_prefix=args.label_prefix,
+            split=args.split,
         )
         print(
             json.dumps(
-                {"video_count": len(videos), "videos": videos[: args.limit]},
+                {
+                    "split": args.split,
+                    "video_count": len(videos),
+                    "videos": videos[: args.limit],
+                },
                 ensure_ascii=False,
                 indent=2,
             )

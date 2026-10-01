@@ -14,6 +14,7 @@ OFFICIALLY_UNEVALUATED_LABELS = {
     "basketball_save",
     "basketball_jump_ball",
 }
+VIDEO_SPLITS = ("all", "train", "validation")
 
 # The newer split-specific Hugging Face annotations (for example
 # ``data/test/multisports_test.pkl``) omit the label vocabulary that was
@@ -139,16 +140,63 @@ def _resolve_labels(ground_truth: dict[str, Any]) -> tuple[list[str], str]:
     return labels, source
 
 
+def _require_tubes(
+    ground_truth: dict[str, Any], annotation_path: Path
+) -> dict[str, Any]:
+    tubes = ground_truth.get("gttubes")
+    if not isinstance(tubes, dict):
+        keys = ", ".join(sorted(str(key) for key in ground_truth))
+        raise ValueError(
+            f"{annotation_path} has no gttubes ground truth (keys: {keys}). "
+            "The official data/test annotation contains no public action GT; "
+            "download data/trainval/multisports_GT.pkl instead."
+        )
+    return tubes
+
+
+def _flatten_video_names(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        return [str(value)]
+    names: list[str] = []
+    for item in value:
+        names.extend(_flatten_video_names(item))
+    return names
+
+
+def _videos_for_split(
+    ground_truth: dict[str, Any],
+    tubes_by_video: dict[str, Any],
+    split: str,
+) -> list[str]:
+    if split not in VIDEO_SPLITS:
+        raise ValueError(f"split must be one of {VIDEO_SPLITS}, got {split!r}")
+    if split == "all":
+        return sorted(str(name) for name in tubes_by_video)
+    key = "train_videos" if split == "train" else "test_videos"
+    names = _flatten_video_names(ground_truth.get(key))
+    if not names:
+        raise ValueError(f"Annotation does not contain a non-empty {key!r} split")
+    return sorted(name for name in names if name in tubes_by_video)
+
+
 def list_multisports_videos(
-    annotation: Path, *, label_prefix: str = "basketball"
+    annotation: Path,
+    *,
+    label_prefix: str = "basketball",
+    split: str = "all",
 ) -> list[str]:
     """List videos containing at least one action with the selected prefix."""
-    ground_truth = _load_pickle(annotation.expanduser().resolve())
+    annotation_path = annotation.expanduser().resolve()
+    ground_truth = _load_pickle(annotation_path)
+    tubes_by_video = _require_tubes(ground_truth, annotation_path)
     resolved_labels, _ = _resolve_labels(ground_truth)
     labels = [canonical_label(value) for value in resolved_labels]
     prefix = canonical_label(label_prefix)
     selected = []
-    for video_name, video_tubes in ground_truth["gttubes"].items():
+    for video_name in _videos_for_split(ground_truth, tubes_by_video, split):
+        video_tubes = tubes_by_video[video_name]
         if any(
             labels[int(label_index)].startswith(prefix) and len(tubes) > 0
             for label_index, tubes in video_tubes.items()
@@ -176,8 +224,8 @@ def prepare_multisports_reference(
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ground_truth = _load_pickle(annotation_path)
+    tubes_by_video = _require_tubes(ground_truth, annotation_path)
     labels, labels_source = _resolve_labels(ground_truth)
-    tubes_by_video = ground_truth["gttubes"]
 
     missing = [video for video in options.videos if video not in tubes_by_video]
     if missing:
