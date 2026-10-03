@@ -3,10 +3,12 @@ const state = {
   project: null,
   videoId: null,
   detail: null,
-  activeTab: "tracking",
+  activeTab: "events",
   videoView: "source",
   rawKind: "tracks",
   pollTimer: null,
+  personFilter: "",
+  eventFilter: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -36,8 +38,8 @@ function formatBytes(bytes) {
 function formatTime(seconds) {
   const value = Math.max(0, Number(seconds) || 0);
   const minutes = Math.floor(value / 60);
-  const rest = Math.floor(value % 60);
-  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+  const rest = (value % 60).toFixed(2).padStart(5, "0");
+  return `${String(minutes).padStart(2, "0")}:${rest}`;
 }
 
 function toast(title, message = "", type = "") {
@@ -124,6 +126,29 @@ function bindEvents() {
     $("#optionsPanel").classList.toggle("hidden"),
   );
   $("#runFullButton").addEventListener("click", () => runCurrent("full"));
+  $("#importForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = $("#importForm button");
+    button.disabled = true;
+    button.textContent = "正在建立索引…";
+    try {
+      const project = await api("/api/import-results", {
+        method: "POST", body: JSON.stringify({result_dir: $("#importPath").value.trim()}),
+      });
+      await loadProjects();
+      state.videoView = "final";
+      await selectProject(project.project_id);
+      toast("已导入，只读展示", `${project.videos.length} 条视频；没有重跑模型或修改原结果。`);
+    } catch (error) {
+      toast("导入失败", error.message, "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = "导入结果 ↗";
+    }
+  });
+  $("#resultVideo").addEventListener("error", () => {
+    $("#mediaHint").textContent = "视频无法播放：可能是 MP4 编码不受浏览器支持。请在服务器运行 cli.import_web_results --prepare-media，生成 H.264 预览，再刷新页面。";
+  });
   $("#batchRunButton").addEventListener("click", batchRun);
   $$(".module-buttons button").forEach((button) =>
     button.addEventListener("click", () => runCurrent(button.dataset.target)),
@@ -175,6 +200,12 @@ async function selectProject(projectId, preserveVideo = false) {
   try {
     const previousVideo = preserveVideo ? state.videoId : null;
     state.project = await api(`/api/projects/${projectId}`);
+    if (!preserveVideo) state.videoView = state.project.read_only ? "final" : "source";
+    const readOnly = Boolean(state.project.read_only);
+    document.body.classList.toggle("inspection-mode", readOnly);
+    $("#readOnlyBadge").classList.toggle("hidden", !readOnly);
+    $("#batchRunButton").disabled = readOnly;
+    $("#addMoreButton").disabled = readOnly;
     $("#projectTitle").textContent = state.project.name;
     renderProjects();
     renderClipStrip();
@@ -222,8 +253,12 @@ function renderClipStrip() {
 }
 
 async function selectVideo(videoId, resetTab = true) {
+  if (videoId !== state.videoId) {
+    state.personFilter = "";
+    state.eventFilter = "";
+  }
   state.videoId = videoId;
-  if (resetTab) state.activeTab = "tracking";
+  if (resetTab) state.activeTab = "events";
   renderClipStrip();
   await refreshCurrentVideo();
 }
@@ -248,15 +283,21 @@ function renderInspector() {
   const pieces = [formatBytes(video.size_bytes)];
   if (meta) pieces.push(`${meta.width}×${meta.height}`, `${Number(meta.fps).toFixed(2)} FPS`, `${meta.processed_frames} FRAMES`);
   if (video.error) pieces.push(`ERROR: ${video.error}`);
+  if (video.read_only) pieces.push("只读导入 · 原结果未修改");
   $("#clipMeta").textContent = pieces.join("  ·  ");
   $("#clipMeta").classList.toggle("error-text", Boolean(video.error));
   $("#clipStatus").textContent = (video.active_stage || video.status).toUpperCase();
   $("#clipStatus").className = `status-pill ${video.status}`;
-  $("#runFullButton").disabled = active;
+  $("#runFullButton").disabled = active || video.read_only;
+  $("#runFullButton").classList.toggle("hidden", Boolean(video.read_only));
+  $("#optionsButton").classList.toggle("hidden", Boolean(video.read_only));
+  if (video.read_only) $("#optionsPanel").classList.add("hidden");
+  $$(".module-buttons button").forEach((button) => { button.disabled = active || video.read_only; });
+  $("#inspectionDownload").href = `/api/projects/${state.project.project_id}/videos/${state.videoId}/inspection.zip`;
   $("#runFullButton small").textContent = active ? "PIPELINE ACTIVE" : "RUN PIPELINE";
   $("#runFullButton span:last-child").lastChild.textContent = active
     ? ` ${stageName(video.active_stage)}`
-    : "处理完整流程";
+    : video.read_only ? "已导入 · 不重跑" : "处理完整流程";
   renderStageRail(video.stages);
   renderMetrics(artifacts);
   setVideoView(state.videoView, false);
@@ -269,6 +310,7 @@ function stageName(stage) {
     identity: "正在提取身份特征",
     action: "正在识别动作",
     link: "正在连接人物事件",
+    aggregate: "正在聚合事件区间",
     render: "正在渲染结果",
   }[stage] || "等待 GPU 队列";
 }
@@ -286,14 +328,22 @@ function renderMetrics(artifacts) {
   const actions = artifacts.action.index || {};
   const frames = artifacts.tracking.video_meta?.processed_frames;
   const metrics = [
-    ["TRACKS", tracking.track_count ?? "—", "MOTIP raw IDs"],
-    ["PEOPLE", identity.identity_count ?? identity.selected_track_count ?? "—", "clip-local archive"],
-    ["EVENTS", actions.event_count ?? "—", "selected + candidates"],
-    ["FRAMES", frames ?? "—", "processed source"],
+    ["人物轨迹", tracking.track_count ?? "—", "原始 track ID 数量"],
+    ["身份档案", identity.identity_count ?? identity.selected_track_count ?? "—", "片段内档案，不等于真人数"],
+    ["事件区间", artifacts.available.events ? actions.event_count : "—", "聚合结果，不包含低分候选"],
+    ["处理帧数", frames ?? "—", "来源视频帧数"],
   ];
   $("#metricsGrid").innerHTML = metrics
     .map(([label, value, note]) => `<div class="metric-card"><small>${label}</small><strong>${escapeHtml(value)}</strong><span>${escapeHtml(note)}</span></div>`)
     .join("");
+  const evaluation = artifacts.evaluation || {};
+  const idf1 = evaluation.tracking?.headline?.value;
+  const messages = [];
+  if (idf1 != null) messages.push(`轨迹 IDF1 ${(Number(idf1) * 100).toFixed(1)}% · 仅限评估文件声明的范围`);
+  if (!evaluation.events) messages.push("未加载事件评估结果：这里的计数和 raw_score 不是准确率。");
+  if (!artifacts.available.events) messages.push("缺少 events.jsonl：不会把动作预测点冒充事件区间。");
+  if (artifacts.warnings?.length) messages.push(`数据警告 ${artifacts.warnings.length} 条：存在无法解析的事件，当前计数不完整。`);
+  $("#evaluationNote").textContent = messages.join("\n");
 }
 
 function setVideoView(view, rerender = true) {
@@ -304,6 +354,11 @@ function setVideoView(view, rerender = true) {
   if (!state.detail) return;
   const media = state.detail.artifacts.media || {};
   const url = media[view];
+  $("#videoDownload").classList.toggle("hidden", !url);
+  if (url) {
+    $("#videoDownload").href = url;
+    $("#videoDownload").download = `${state.detail.video.filename.replace(/\.[^.]+$/, "")}-${view}.mp4`;
+  }
   const video = $("#resultVideo");
   const empty = $("#videoEmpty");
   $("#videoModeLabel").textContent = `${view.toUpperCase()} VIDEO`;
@@ -311,6 +366,7 @@ function setVideoView(view, rerender = true) {
     empty.classList.add("hidden");
     video.classList.remove("hidden");
     if (video.dataset.url !== url) {
+      $("#mediaHint").textContent = "点击事件时间区间可跳转；end 为不包含的结束时间。预览可能不含音频。";
       video.dataset.url = url;
       video.src = `${url}?v=${encodeURIComponent(state.detail.video.updated_at)}`;
       video.load();
@@ -341,6 +397,7 @@ function renderTab() {
   if (state.activeTab === "tracking") renderTracking();
   else if (state.activeTab === "identity") renderIdentity();
   else if (state.activeTab === "events") renderEvents();
+  else if (state.activeTab === "points") renderActionPoints();
   else if (state.activeTab === "raw") renderRaw();
   else if (state.activeTab === "logs") renderLogs();
 }
@@ -390,16 +447,70 @@ function renderIdentity() {
         <div class="identity-body">
           <div class="identity-head"><strong>${escapeHtml(person.person_id)}</strong><span>TRACK ${escapeHtml(person.raw_track_ids?.join(", "))}</span></div>
           <div class="identity-stats"><span>${escapeHtml(person.sample_count)} samples</span><span>${escapeHtml(person.observation_count)} observations</span><span>${escapeHtml(person.status)}</span></div>
+          <div class="identity-stats"><span>可见部位 ${Number(person.mean_visible_parts || 0).toFixed(1)}</span><span>轨迹内均距 ${person.within_track?.mean_distance == null ? "—" : Number(person.within_track.mean_distance).toFixed(3)}</span></div>
+          <div class="exemplar-strip">${(person.exemplars || []).map((item) => item.crop_url ? `<img src="${escapeHtml(item.crop_url)}" alt="代表帧 ${escapeHtml(item.frame_idx)}" title="frame ${escapeHtml(item.frame_idx)}" loading="lazy" />` : "").join("")}</div>
+          <button class="ghost-button person-events-button" data-person="${escapeHtml(person.person_id)}">查看这个档案的事件 →</button>
         </div>
       </article>`;
     })
     .join("")}</div>`;
+  $$(".person-events-button").forEach((button) => button.addEventListener("click", () => {
+    state.personFilter = button.dataset.person;
+    setTab("events");
+  }));
 }
 
 function renderEvents() {
   const index = state.detail.artifacts.action.index;
+  if (!state.detail.artifacts.available.events) {
+    $("#tabContent").innerHTML = emptyState("尚未生成事件区间", "动作预测点可以在单独的标签页检查；请先运行事件聚合。");
+    return;
+  }
+  const allPeople = index.people || [];
+  const labels = Object.keys(index.label_counts || {});
+  const filters = `<div class="event-filters">
+    <label>人物档案<select id="personFilter" aria-label="人物档案"><option value="">全部档案</option>${allPeople.map((person) => `<option value="${escapeHtml(person.person_id)}" ${state.personFilter === person.person_id ? "selected" : ""}>${escapeHtml(person.person_id)}</option>`).join("")}</select></label>
+    <label>事件类型<select id="eventFilter" aria-label="事件类型"><option value="">全部类型</option>${labels.map((label) => `<option value="${escapeHtml(label)}" ${state.eventFilter === label ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
+    <span>${index.event_count} 个区间 · raw_score 未校准</span>
+  </div>`;
+  const meta = state.detail.artifacts.tracking.video_meta || {};
+  const duration = Math.max(Number(meta.processed_frames || 0) / Number(meta.fps || 1), 0.01);
+  const people = allPeople.filter((person) => !state.personFilter || person.person_id === state.personFilter);
+  const sections = people.map((person) => {
+    const events = person.events.filter((event) => !state.eventFilter || event.event === state.eventFilter);
+    if (!events.length) return "";
+    const displayed = events.slice(0, 300);
+    const image = person.identity?.cover?.crop_url;
+    return `<section class="interval-person">
+      <div class="interval-person-heading">${image ? `<img class="event-avatar" src="${escapeHtml(image)}" alt="${escapeHtml(person.person_id)}" />` : ""}<div><strong>${escapeHtml(person.person_id)}</strong><small>${events.length} 个事件区间 · 原轨迹 ${escapeHtml(person.raw_track_ids.join(", "))}</small></div></div>
+      ${displayed.map((event) => `<button class="interval-row" data-start="${Number(event.start)}" data-end="${Number(event.end)}" title="跳转到 ${Number(event.start).toFixed(2)} 秒">
+        <div><strong>${escapeHtml(event.event.replace(/^basketball_/, ""))}</strong><small>${formatTime(event.start)} → ${formatTime(event.end)}</small></div>
+        <div class="timeline-track"><span style="left:${Math.min(100, Math.max(0, Number(event.start) / duration * 100))}%;width:${Math.min(100, Math.max(0.5, (Number(event.end) - Number(event.start)) / duration * 100))}%"></span></div>
+        <div class="interval-score"><strong>${Number(event.raw_score).toFixed(3)}</strong><small>${Number(event.support_count)} 个支持点 · ${(Number(event.end) - Number(event.start)).toFixed(2)}s</small></div><span>↗</span>
+      </button>`).join("")}
+      ${events.length > displayed.length ? `<p class="scope-warning">只展示前 300 个；完整记录在原始数据与诊断包中。</p>` : ""}
+    </section>`;
+  }).join("");
+  $("#tabContent").innerHTML = filters + (sections || emptyState("没有符合条件的事件", index.event_count ? "清除筛选后再查看。" : "聚合文件存在但没有事件；这不代表视频中没有真实动作。"));
+  ["person", "event"].forEach((kind) => $(`#${kind}Filter`).addEventListener("change", (event) => {
+    state[`${kind}Filter`] = event.target.value;
+    renderEvents();
+  }));
+  $$(".interval-row").forEach((button) => button.addEventListener("click", () => {
+    const media = state.detail.artifacts.media || {};
+    if (!media[state.videoView]) setVideoView(media.source ? "source" : "final", false);
+    const player = $("#resultVideo");
+    const seek = () => { player.currentTime = Number(button.dataset.start); };
+    if (player.readyState >= 1) seek();
+    else player.addEventListener("loadedmetadata", seek, {once: true});
+    $(".video-panel").scrollIntoView({behavior: "smooth", block: "center"});
+  }));
+}
+
+function renderActionPoints() {
+  const index = state.detail.artifacts.action.points;
   if (!index?.people?.length) {
-    $("#tabContent").innerHTML = emptyState("还没有人物事件", "动作结果与身份档案连接后，会按人物排列事件时间、类别和分数。");
+    $("#tabContent").innerHTML = emptyState("还没有动作预测点", "采样点不是事件区间。低于阈值的候选只用于诊断。");
     return;
   }
   $("#tabContent").innerHTML = index.people
@@ -416,7 +527,7 @@ function renderEvents() {
         .join("");
       return `<section class="event-person">
         ${image ? `<img class="event-avatar" src="${escapeHtml(image)}" alt="" loading="lazy" />` : `<div class="event-avatar"></div>`}
-        <div class="event-person-title"><strong>${escapeHtml(person.person_id || `Track ${person.raw_track_ids.join(",")}`)}</strong><span>${person.event_count} events · IDs ${escapeHtml(person.raw_track_ids.join(", "))}</span></div>
+        <div class="event-person-title"><strong>${escapeHtml(person.person_id || `Track ${person.raw_track_ids.join(",")}`)}</strong><span>${person.event_count} points · IDs ${escapeHtml(person.raw_track_ids.join(", "))}</span></div>
         <div class="event-list">${events}</div>
       </section>`;
     })
@@ -424,7 +535,7 @@ function renderEvents() {
 }
 
 async function renderRaw() {
-  const kinds = ["tracks", "identities", "actions", "linked_actions", "pairs"];
+  const kinds = ["events", "tracks", "identities", "actions", "linked_actions", "pairs", "samples", "sampling"];
   $("#tabContent").innerHTML = `
     <div class="raw-toolbar">${kinds.map((kind) => `<button data-kind="${kind}" class="${state.rawKind === kind ? "active" : ""}">${kind}</button>`).join("")}</div>
     <pre class="code-view">Loading ${escapeHtml(state.rawKind)}…</pre>`;
@@ -535,6 +646,10 @@ async function batchRun() {
 }
 
 async function uploadFiles(files) {
+  if (state.project?.read_only) {
+    toast("当前实验为只读导入", "请用左侧 ＋ 新建实验，再上传需要重跑的视频。", "error");
+    return;
+  }
   const videos = files.filter((file) => file.type.startsWith("video/") || /\.(mp4|mov|m4v|avi|mkv|webm)$/i.test(file.name));
   if (!videos.length) {
     toast("没有可上传的视频", "请选择常见视频格式。", "error");

@@ -8,12 +8,15 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from contracts.schema import EventRecord
+
 
 def load_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -98,12 +101,82 @@ def action_index(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def temporal_event_index(
+    path: Path, video_id: str | None
+) -> tuple[dict[str, Any], list[str]]:
+    """Index actual intervals, never promote below-threshold action points."""
+    people: dict[str, dict[str, Any]] = {}
+    counts: Counter[str] = Counter()
+    warnings = []
+    if path.is_file():
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = EventRecord.from_dict(json.loads(line))
+                    if video_id and record.video_id != video_id:
+                        raise ValueError(
+                            "event video_id differs from tracking metadata"
+                        )
+                except (ValueError, TypeError, KeyError) as exc:
+                    warnings.append(f"events.jsonl:{line_number}: {exc}")
+                    continue
+                event = record.to_dict()
+                person = people.setdefault(
+                    record.identity_id,
+                    {
+                        "person_id": record.identity_id,
+                        "raw_track_ids": set(),
+                        "events": [],
+                        "event_count": 0,
+                        "labels": Counter(),
+                    },
+                )
+                person["raw_track_ids"].update(record.raw_track_ids)
+                person["events"].append(event)
+                person["event_count"] += 1
+                person["labels"][record.event] += 1
+                counts[record.event] += 1
+    result = []
+    for person in people.values():
+        person["raw_track_ids"] = sorted(person["raw_track_ids"])
+        person["labels"] = dict(person["labels"])
+        person["events"].sort(
+            key=lambda item: (item["start"], item["end"], item["event_id"])
+        )
+        result.append(person)
+    result.sort(key=lambda item: (-item["event_count"], item["person_id"]))
+    return {
+        "kind": "temporal_events",
+        "person_count": len(result),
+        "event_count": sum(item["event_count"] for item in result),
+        "label_counts": dict(counts.most_common()),
+        "people": result,
+    }, warnings
+
+
+def final_video_path(output: Path) -> Path | None:
+    return next(
+        (
+            output / path
+            for path in (
+                "visualization/result_web.mp4",
+                "visualization/result.mp4",
+                "result.mp4",
+            )
+            if (output / path).is_file()
+        ),
+        None,
+    )
+
+
 def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
     output = Path(video["output_dir"])
     tracking = output / "tracking"
     identity = output / "identity"
     action = output / "action"
-    visualization = output / "visualization"
+    meta = load_json(tracking / "video_meta.json")
 
     identities = read_jsonl(identity / "identities.jsonl")
     identity_by_id = {
@@ -114,24 +187,27 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
         action_path = action / "actions.jsonl"
     actions = read_jsonl(action_path)
     indexed_actions = action_index(actions)
-    for person in indexed_actions["people"]:
-        archive = identity_by_id.get(str(person.get("person_id")))
-        person["identity"] = archive
+    indexed_events, warnings = temporal_event_index(
+        action / "events.jsonl", (meta or {}).get("video_id")
+    )
+    for index in (indexed_actions, indexed_events):
+        for person in index["people"]:
+            person["identity"] = identity_by_id.get(str(person.get("person_id")))
 
     available = {
         "source": Path(video["source_path"]).is_file(),
         "tracks_video": (tracking / "tracks_vis.mp4").is_file(),
-        "final_video": (visualization / "result_web.mp4").is_file()
-        or (visualization / "result.mp4").is_file(),
+        "final_video": final_video_path(output) is not None,
         "tracks": (tracking / "tracks.jsonl").is_file(),
         "identities": bool(identities),
         "actions": bool(actions),
+        "events": (action / "events.jsonl").is_file(),
     }
     return {
         "available": available,
         "tracking": {
             "summary": load_json(tracking / "track_summary.json"),
-            "video_meta": load_json(tracking / "video_meta.json"),
+            "video_meta": meta,
         },
         "identity": {
             "summary": load_json(identity / "kpr_summary.json")
@@ -144,8 +220,15 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
             "identity_link_summary": load_json(
                 action / "actions_with_identity.summary.json"
             ),
-            "index": indexed_actions,
+            "points": indexed_actions,
+            "index": indexed_events,
+            "event_summary": load_json(action / "events.summary.json"),
         },
+        "evaluation": {
+            "tracking": load_json(output / "analysis/tracking_metrics.json"),
+            "events": load_json(output / "analysis/event_metrics.json"),
+        },
+        "warnings": warnings,
     }
 
 

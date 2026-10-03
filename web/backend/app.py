@@ -6,18 +6,21 @@ import mimetypes
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from web.backend.artifacts import (
     collect_video_artifacts,
+    final_video_path,
     project_people_index,
     read_jsonl,
 )
+from web.backend.imports import import_results, within_root
+from web.backend.inspection import build_inspection_bundle
 from web.backend.runner import PipelineRunner
 from web.backend.settings import WebSettings
 from web.backend.store import ProjectStore, safe_slug
@@ -42,13 +45,18 @@ app.mount(
 
 
 class ProjectCreate(BaseModel):
-    name: Optional[str] = Field(default=None, max_length=120)
+    name: str | None = Field(default=None, max_length=120)
+
+
+class ResultsImport(BaseModel):
+    result_dir: str = Field(min_length=1, max_length=2048)
+    name: str | None = Field(default=None, max_length=120)
 
 
 class RunOptions(BaseModel):
     target: Literal["tracking", "identity", "action", "final", "full"] = "full"
     force: bool = False
-    max_frames: Optional[int] = Field(default=None, ge=1, le=100000)
+    max_frames: int | None = Field(default=None, ge=1, le=100000)
     tracking_det_threshold: float = Field(default=0.3, ge=0, le=1)
     identity_samples: int = Field(default=8, ge=1, le=64)
     identity_min_det_score: float = Field(default=0.5, ge=0, le=1)
@@ -81,10 +89,7 @@ def safe_child(base: Path, relative: str) -> Path:
 
 
 def artifact_url(project_id: str, video_id: str, relative: str) -> str:
-    return (
-        f"/api/projects/{project_id}/videos/{video_id}/artifacts/"
-        f"{relative}"
-    )
+    return f"/api/projects/{project_id}/videos/{video_id}/artifacts/{relative}"
 
 
 def decorate_artifacts(
@@ -102,14 +107,20 @@ def decorate_artifacts(
         "final": None,
     }
     output = Path(video["output_dir"])
-    if (output / "visualization/result_web.mp4").is_file():
+    final = final_video_path(output)
+    if final:
         media["final"] = artifact_url(
-            project_id, video_id, "visualization/result_web.mp4"
+            project_id, video_id, final.relative_to(output).as_posix()
         )
-    elif (output / "visualization/result.mp4").is_file():
-        media["final"] = artifact_url(
-            project_id, video_id, "visualization/result.mp4"
-        )
+    cache = Path(video["media_cache_dir"]) if video.get("media_cache_dir") else None
+    if cache:
+        for kind in media:
+            if (cache / f"{kind}.mp4").is_file():
+                media[kind] = (
+                    f"/api/projects/{project_id}/videos/{video_id}/media/{kind}"
+                )
+    if not available["source"]:
+        media["source"] = None
 
     def decorate_identity(identity: dict[str, Any] | None) -> None:
         if not identity:
@@ -118,9 +129,7 @@ def decorate_artifacts(
         crop = cover.get("crop_path")
         context = cover.get("context_path")
         if crop:
-            cover["crop_url"] = artifact_url(
-                project_id, video_id, f"identity/{crop}"
-            )
+            cover["crop_url"] = artifact_url(project_id, video_id, f"identity/{crop}")
         if context:
             cover["context_url"] = artifact_url(
                 project_id, video_id, f"identity/{context}"
@@ -134,8 +143,9 @@ def decorate_artifacts(
 
     for identity in artifacts["identity"]["people"]:
         decorate_identity(identity)
-    for person in artifacts["action"]["index"]["people"]:
-        decorate_identity(person.get("identity"))
+    for key in ("index", "points"):
+        for person in artifacts["action"][key]["people"]:
+            decorate_identity(person.get("identity"))
     artifacts["media"] = media
     return artifacts
 
@@ -174,6 +184,16 @@ def list_projects() -> list[dict[str, Any]]:
     return store.list_projects()
 
 
+@app.post("/api/import-results")
+def import_existing_results(request: ResultsImport) -> dict[str, Any]:
+    try:
+        return import_results(settings, store, Path(request.result_dir), request.name)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/projects/{project_id}")
 def project_detail(project_id: str) -> dict[str, Any]:
     try:
@@ -188,12 +208,17 @@ def project_detail(project_id: str) -> dict[str, Any]:
 @app.post("/api/projects/{project_id}/videos")
 async def upload_videos(
     project_id: str,
-    files: list[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
 ) -> dict[str, Any]:
     try:
-        store.get_project(project_id)
+        project = store.get_project(project_id)
     except FileNotFoundError as exc:
         raise not_found(exc) from exc
+    if project.get("read_only"):
+        raise HTTPException(
+            status_code=409,
+            detail="Imported experiments are read-only. Create a new experiment to upload videos.",
+        )
     if not files:
         raise HTTPException(status_code=400, detail="No video files supplied")
 
@@ -245,9 +270,7 @@ async def upload_videos(
 @app.get("/api/projects/{project_id}/videos/{video_id}")
 def video_detail(project_id: str, video_id: str) -> dict[str, Any]:
     video = get_video(project_id, video_id)
-    artifacts = decorate_artifacts(
-        project_id, video, collect_video_artifacts(video)
-    )
+    artifacts = decorate_artifacts(project_id, video, collect_video_artifacts(video))
     return {
         "video": video,
         "artifacts": artifacts,
@@ -314,11 +337,46 @@ def artifact_file(project_id: str, video_id: str, relative: str) -> FileResponse
     return FileResponse(path, filename=None)
 
 
+@app.get("/api/projects/{project_id}/videos/{video_id}/media/{kind}")
+def cached_media(
+    project_id: str, video_id: str, kind: Literal["source", "tracking", "final"]
+) -> FileResponse:
+    video = get_video(project_id, video_id)
+    if not video.get("media_cache_dir"):
+        raise HTTPException(status_code=404, detail="No preview cache")
+    cache = within_root(Path(video["media_cache_dir"]), settings.output_root)
+    return FileResponse(safe_child(cache, f"{kind}.mp4"), media_type="video/mp4")
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/inspection.zip")
+def inspection_bundle(project_id: str, video_id: str) -> Response:
+    try:
+        content = build_inspection_bundle(get_video(project_id, video_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(
+        content,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_slug(video_id)}-inspection.zip"',
+        },
+    )
+
+
 @app.get("/api/projects/{project_id}/videos/{video_id}/records/{kind}")
 def artifact_records(
     project_id: str,
     video_id: str,
-    kind: Literal["tracks", "identities", "actions", "linked_actions", "pairs"],
+    kind: Literal[
+        "tracks",
+        "identities",
+        "actions",
+        "linked_actions",
+        "pairs",
+        "events",
+        "samples",
+        "sampling",
+    ],
     limit: int = Query(default=200, ge=1, le=2000),
 ) -> dict[str, Any]:
     video = get_video(project_id, video_id)
@@ -329,6 +387,9 @@ def artifact_records(
         "actions": output / "action/actions.jsonl",
         "linked_actions": output / "action/actions_with_identity.jsonl",
         "pairs": output / "identity/kpr_track_pairs.jsonl",
+        "events": output / "action/events.jsonl",
+        "samples": output / "identity/kpr_samples.jsonl",
+        "sampling": output / "identity/kpr_track_sampling.jsonl",
     }
     path = mapping[kind]
     return {

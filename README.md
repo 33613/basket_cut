@@ -456,6 +456,10 @@ python -m cli.render_results \
 `web/` 是一个面向当前研究进度的检查界面，不是只展示最终视频的
 演示页。它保留并展示：
 
+**已有命令行结果无需重跑。** 亮色检查界面支持只读导入、人物图片索引、
+真实事件时间区间、视频跳转和诊断包下载。操作见
+[已有结果可视化与 SSH 访问](docs/WEB_INSPECTION.md)。
+
 - 多视频拖拽上传和单 GPU 顺序队列；
 - MOTIP 轨迹、KPR 人物档案、动作结果和最终叠加视频；
 - 每个阶段的执行状态、完整命令、实时日志和原始 JSONL；
@@ -473,13 +477,13 @@ conda activate /root/autodl-tmp/envs/basket-web
 pip install -r requirements-web.txt
 
 uvicorn web.backend.app:app \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port 6006
 ```
 
-在 AutoDL 实例的“自定义服务”中映射 `6006` 端口后，即可用本地浏览器
-打开。也可以通过 SSH 端口转发把服务器的 `127.0.0.1:6006` 转到
-本机同名端口。长时运行时建议把 `uvicorn` 放到 `screen` 会话中。
+通过 SSH 端口转发把服务器的 `127.0.0.1:6006` 转到本机端口，然后用
+本地浏览器打开。服务没有账号认证，不建议直接暴露公网。
+长时运行时建议把 `uvicorn` 放到 `screen` 会话中。
 
 默认模型和环境路径与本 README 中的 AutoDL 目录一致。不一致时可以在
 启动前设置：

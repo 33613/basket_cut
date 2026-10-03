@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light" />
     <title>CourtVision Lab · Basketball Video Intelligence</title>
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
@@ -18,7 +18,7 @@
         </span>
         <span>
           <strong>CourtVision</strong>
-          <small>RESEARCH LAB</small>
+          <small>VIDEO INSPECTION</small>
         </span>
       </a>
       <div class="topbar-center">
@@ -46,8 +46,8 @@
         <div class="sidebar-note">
           <span class="note-index">01</span>
           <div>
-            <strong>面向检查，而非包装</strong>
-            <p>保留轨迹、身份、动作、阈值和日志，错误也应该被看见。</p>
+            <strong>结果可追溯</strong>
+            <p>原始分数不等于准确率。片段内人物档案不自动合并为跨视频身份。</p>
           </div>
         </div>
       </aside>
@@ -56,8 +56,8 @@
         <section class="upload-section panel" id="uploadSection">
           <div class="section-copy">
             <span class="eyebrow">INPUT / SHORT CLIPS</span>
-            <h1>把比赛片段放到这里</h1>
-            <p>支持一次拖入多个短视频。每个片段独立处理，结果在同一个实验中汇总。</p>
+            <h1>让每个结果<br />都看得见。</h1>
+            <p>检查人物轨迹、身份图片与事件时间区间。已有结果直接导入，不需要重新运行模型。</p>
           </div>
           <div class="drop-zone" id="dropZone" tabindex="0" role="button">
             <input id="fileInput" type="file" accept="video/*,.mkv,.avi" multiple hidden />
@@ -72,6 +72,14 @@
           </div>
         </section>
 
+        <section class="import-section panel" aria-label="导入已有结果">
+          <div><span class="eyebrow">EXISTING RESULTS</span><h3>从服务器导入已完成的实验</h3><p>只建立只读索引，不复制原视频，不修改原结果。</p></div>
+          <form id="importForm">
+            <label for="importPath">服务器结果目录</label>
+            <div class="import-fields"><input id="importPath" required placeholder="/root/autodl-tmp/outputs/basket_cut/你的实验目录" /><button class="import-button" type="submit">导入结果 ↗</button></div>
+          </form>
+        </section>
+
         <section class="workspace hidden" id="workspace">
           <div class="clip-strip-wrap panel">
             <div class="strip-header">
@@ -80,6 +88,7 @@
                 <h3>视频片段</h3>
               </div>
               <div class="strip-actions">
+                <span class="scope-badge hidden" id="readOnlyBadge">已导入 · 只读</span>
                 <button class="ghost-button" id="batchRunButton">▶ 批量处理</button>
                 <button class="ghost-button" id="addMoreButton">＋ 添加片段</button>
               </div>
@@ -95,6 +104,7 @@
                 <p id="clipMeta">—</p>
               </div>
               <div class="run-actions">
+                <a class="ghost-button download-button" id="inspectionDownload" href="#">下载诊断包 ↓</a>
                 <button class="run-button" id="runFullButton">
                   <span class="play-symbol">▶</span>
                   <span><small>RUN PIPELINE</small>处理完整流程</span>
@@ -125,7 +135,8 @@
               <div class="stage" data-stage="identity"><span>02</span><div><small>KPR</small><strong>身份归档</strong></div><i></i></div>
               <div class="stage" data-stage="action"><span>03</span><div><small>SLOWFAST</small><strong>动作识别</strong></div><i></i></div>
               <div class="stage" data-stage="link"><span>04</span><div><small>CONTRACT</small><strong>人物事件连接</strong></div><i></i></div>
-              <div class="stage" data-stage="render"><span>05</span><div><small>OUTPUT</small><strong>结果渲染</strong></div></div>
+              <div class="stage" data-stage="aggregate"><span>05</span><div><small>INTERVALS</small><strong>事件区间聚合</strong></div><i></i></div>
+              <div class="stage" data-stage="render"><span>06</span><div><small>OUTPUT</small><strong>结果渲染</strong></div></div>
             </div>
 
             <div class="inspection-grid">
@@ -137,6 +148,7 @@
                     <button data-view="final">最终叠加</button>
                   </div>
                   <span id="videoModeLabel">SOURCE VIDEO</span>
+                  <a class="video-download hidden" id="videoDownload" href="#" download>下载当前视频 ↓</a>
                 </div>
                 <div class="video-stage">
                   <video id="resultVideo" controls playsinline preload="metadata"></video>
@@ -146,14 +158,16 @@
                     <p>运行对应模块后，这里会显示可视化结果。</p>
                   </div>
                 </div>
+                <p class="media-hint" id="mediaHint">点击事件时间区间可跳转到对应视频位置。</p>
               </section>
 
               <aside class="metrics-panel panel">
                 <div class="panel-title">
                   <div><span class="eyebrow">QUICK READ</span><h3>本片段概览</h3></div>
-                  <span class="live-badge">LIVE</span>
+                  <span class="live-badge">ARTIFACTS</span>
                 </div>
                 <div class="metrics-grid" id="metricsGrid"></div>
+                <div class="evaluation-note" id="evaluationNote"></div>
                 <div class="confidence-note">
                   <span>!</span>
                   <p><strong>分数不是同一种置信度。</strong> det 是检测分数，KPR 是距离，动作数字才是类别分数。</p>
@@ -165,7 +179,8 @@
               <nav class="tabs" id="tabs">
                 <button data-tab="tracking" class="active">轨迹检查</button>
                 <button data-tab="identity">人物档案</button>
-                <button data-tab="events">人物事件索引</button>
+                <button data-tab="events">事件时间区间</button>
+                <button data-tab="points">动作预测点</button>
                 <button data-tab="raw">原始数据</button>
                 <button data-tab="logs">运行日志</button>
               </nav>
@@ -175,7 +190,7 @@
 
           <section class="project-index panel" id="projectIndex">
             <div class="panel-title">
-              <div><span class="eyebrow">ACROSS CLIPS</span><h3>跨片段人物事件视图</h3></div>
+              <div><span class="eyebrow">CLIP ARCHIVES</span><h3>人物图片与事件索引</h3></div>
               <span class="scope-badge">CLIP-LOCAL IDs</span>
             </div>
             <p class="scope-warning">当前先汇总各片段的人物档案与事件；尚未校准的 KPR 距离不会被自动当成跨片段同一人。</p>

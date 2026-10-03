@@ -50,6 +50,10 @@ class PipelineRunner:
             raise ValueError(f"Unknown target {target!r}; expected one of {TARGETS}")
         key = (project_id, video_id)
         with self._lock:
+            if self.store.get_video(project_id, video_id).get("read_only"):
+                raise ValueError(
+                    "Imported results are read-only. Upload a video to a new experiment to rerun it."
+                )
             if self.is_active(project_id, video_id):
                 raise RuntimeError("This video already has a queued or running job")
 
@@ -93,6 +97,8 @@ class PipelineRunner:
             "action": output / "action",
             "actions": output / "action/actions.jsonl",
             "linked_actions": output / "action/actions_with_identity.jsonl",
+            "events": output / "action/events.jsonl",
+            "video_meta": output / "tracking/video_meta.json",
             "visualization": output / "visualization",
             "result": output / "visualization/result.mp4",
             "web_result": output / "visualization/result_web.mp4",
@@ -105,19 +111,18 @@ class PipelineRunner:
             "identity": paths["identity"] / "identity_archive_manifest.json",
             "action": paths["actions"],
             "link": paths["linked_actions"],
+            "aggregate": paths["events"],
             "render": paths["result"],
         }
         return expected[stage].is_file()
 
-    def _plan(
-        self, target: str, paths: dict[str, Path], force: bool
-    ) -> list[str]:
+    def _plan(self, target: str, paths: dict[str, Path], force: bool) -> list[str]:
         requested = {
             "tracking": ["tracking"],
             "identity": ["tracking", "identity"],
             "action": ["tracking", "action"],
-            "final": ["tracking", "link", "render"],
-            "full": ["tracking", "identity", "action", "link", "render"],
+            "final": ["tracking", "link", "aggregate", "render"],
+            "full": ["tracking", "identity", "action", "link", "aggregate", "render"],
         }[target]
         plan = []
         for stage in requested:
@@ -139,11 +144,18 @@ class PipelineRunner:
         plan = self._plan(target, paths, force)
         self._append_log(
             paths["log"],
-            f"\n=== Job {utc_now()} target={target} force={force} "
-            f"plan={plan} ===\n",
+            f"\n=== Job {utc_now()} target={target} force={force} plan={plan} ===\n",
         )
         try:
             for stage in plan:
+                if stage == "aggregate" and not paths["actions"].is_file():
+                    self.store.set_stage(
+                        project_id, video_id, stage, "skipped", return_code=None
+                    )
+                    self._append_log(
+                        paths["log"], "[aggregate] skipped: no action predictions\n"
+                    )
+                    continue
                 if stage == "link" and not (
                     paths["actions"].is_file() and paths["identity_map"].is_file()
                 ):
@@ -209,7 +221,7 @@ class PipelineRunner:
 
             self.store.update_video(project_id, video_id, mark_completed)
             self._append_log(paths["log"], f"=== Completed {utc_now()} ===\n")
-        except Exception as exc:  # Persist failures for polling clients.
+        except Exception as exc:  # noqa: BLE001 -- persist worker failures for polling clients
             error_message = str(exc)
             active = self.store.get_video(project_id, video_id).get("active_stage")
             if active:
@@ -353,6 +365,32 @@ class PipelineRunner:
             if options.get("max_frames"):
                 command.extend(["--max-frames", str(int(options["max_frames"]))])
             return command
+        if stage == "aggregate":
+            self._require(self.settings.motip_python, "MOTIP Python")
+            return [
+                str(self.settings.motip_python),
+                "-m",
+                "cli.aggregate_events",
+                "--input",
+                str(
+                    paths["linked_actions"]
+                    if paths["linked_actions"].is_file()
+                    else paths["actions"]
+                ),
+                "--video-meta",
+                str(paths["video_meta"]),
+                "--output",
+                str(paths["events"]),
+                "--score-threshold",
+                str(float(options.get("action_threshold", 0.2))),
+                "--max-missing-steps",
+                "1",
+                "--min-support",
+                "1",
+                "--score-reducer",
+                "mean",
+                "--overwrite",
+            ]
         raise ValueError(f"Unknown stage: {stage}")
 
     def _run_command(self, command: list[str], log_path: Path) -> int:

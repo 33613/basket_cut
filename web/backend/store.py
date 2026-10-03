@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STAGE_NAMES = ("tracking", "identity", "action", "link", "render")
+STAGE_NAMES = ("tracking", "identity", "action", "link", "aggregate", "render")
 
 
 def utc_now() -> str:
@@ -59,9 +59,7 @@ class ProjectStore:
                 "updated_at": now,
                 "videos": [],
             }
-            (self.data_root / project_id / "inputs").mkdir(
-                parents=True, exist_ok=True
-            )
+            (self.data_root / project_id / "inputs").mkdir(parents=True, exist_ok=True)
             self._write(manifest)
             return manifest
 
@@ -76,6 +74,17 @@ class ProjectStore:
                 continue
         projects.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
         return projects
+
+    def register_import(self, manifest: dict[str, Any]) -> None:
+        """Only store a Web index; referenced source and result files stay put."""
+        with self._lock:
+            path = self._manifest_path(manifest["project_id"])
+            if path.is_file():
+                existing = self.get_project(manifest["project_id"])
+                if not existing.get("read_only"):
+                    raise ValueError("Cannot replace a writable project with an import")
+                manifest["created_at"] = existing["created_at"]
+            self._write(manifest)
 
     def get_project(self, project_id: str) -> dict[str, Any]:
         path = self._manifest_path(safe_slug(project_id))
@@ -181,7 +190,16 @@ class ProjectStore:
             raise ValueError(f"Unknown stage: {stage}")
 
         def apply(video: dict[str, Any]) -> None:
-            state = video["stages"][stage]
+            state = video["stages"].setdefault(
+                stage,
+                {
+                    "status": "pending",
+                    "started_at": None,
+                    "finished_at": None,
+                    "command": None,
+                    "return_code": None,
+                },
+            )
             state["status"] = status
             state.update(values)
             if status == "running":

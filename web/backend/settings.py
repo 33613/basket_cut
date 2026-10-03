@@ -7,7 +7,7 @@ environments.  It launches each CLI with that environment's Python executable.
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,52 +21,84 @@ def _path_env(name: str, default: str | Path) -> Path:
 @dataclass(frozen=True)
 class WebSettings:
     repository_root: Path = REPOSITORY_ROOT
-    data_root: Path = _path_env(
-        "BASKET_WEB_DATA_ROOT", "/root/autodl-tmp/data/basket_cut/web"
+    data_root: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_WEB_DATA_ROOT", "/root/autodl-tmp/data/basket_cut/web"
+        )
     )
-    output_root: Path = _path_env(
-        "BASKET_WEB_OUTPUT_ROOT", "/root/autodl-tmp/outputs/basket_cut/web"
+    output_root: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_WEB_OUTPUT_ROOT", "/root/autodl-tmp/outputs/basket_cut/web"
+        )
     )
-    motip_python: Path = _path_env(
-        "BASKET_MOTIP_PYTHON", "/root/autodl-tmp/envs/motip/bin/python"
+    import_root: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_WEB_IMPORT_ROOT", "/root/autodl-tmp/outputs/basket_cut"
+        )
     )
-    kpr_python: Path = _path_env(
-        "BASKET_KPR_PYTHON", "/root/autodl-tmp/envs/kpr/bin/python"
+    source_root: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_WEB_SOURCE_ROOT", "/root/autodl-tmp/data/basket_cut"
+        )
     )
-    action_python: Path = _path_env(
-        "BASKET_ACTION_PYTHON", "/root/autodl-tmp/envs/mmaction2/bin/python"
+    motip_python: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_MOTIP_PYTHON", "/root/autodl-tmp/envs/motip/bin/python"
+        )
     )
-    motip_checkpoint: Path = _path_env(
-        "BASKET_MOTIP_CHECKPOINT",
-        "/root/autodl-tmp/models/motip/"
-        "r50_deformable_detr_motip_sportsmot.pth",
+    kpr_python: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_KPR_PYTHON", "/root/autodl-tmp/envs/kpr/bin/python"
+        )
     )
-    kpr_checkpoint: Path = _path_env(
-        "BASKET_KPR_CHECKPOINT",
-        "/root/autodl-tmp/models/kpr/"
-        "kpr_dancetrack_sportsmot_posetrack21_occludedduke_"
-        "market_split0.pth.tar",
+    action_python: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_ACTION_PYTHON", "/root/autodl-tmp/envs/mmaction2/bin/python"
+        )
     )
-    action_checkpoint: Path = _path_env(
-        "BASKET_ACTION_CHECKPOINT",
-        "/root/autodl-tmp/models/action/slowfast_multisports/"
-        "slowfast_kinetics400-pretrained-r50_8xb16-4x16x1-8e_"
-        "multisports-rgb_20230320-af666368.pth",
+    motip_checkpoint: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_MOTIP_CHECKPOINT",
+            "/root/autodl-tmp/models/motip/r50_deformable_detr_motip_sportsmot.pth",
+        )
     )
-    action_config: Path = _path_env(
-        "BASKET_ACTION_CONFIG",
-        REPOSITORY_ROOT
-        / "MMAction2/configs/detection/slowfast/"
-        "slowfast_kinetics400-pretrained-r50_8xb16-4x16x1-8e_"
-        "multisports-rgb.py",
+    kpr_checkpoint: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_KPR_CHECKPOINT",
+            "/root/autodl-tmp/models/kpr/"
+            "kpr_dancetrack_sportsmot_posetrack21_occludedduke_"
+            "market_split0.pth.tar",
+        )
     )
-    action_label_map: Path = _path_env(
-        "BASKET_ACTION_LABEL_MAP",
-        REPOSITORY_ROOT / "MMAction2/tools/data/multisports/label_map.txt",
+    action_checkpoint: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_ACTION_CHECKPOINT",
+            "/root/autodl-tmp/models/action/slowfast_multisports/"
+            "slowfast_kinetics400-pretrained-r50_8xb16-4x16x1-8e_"
+            "multisports-rgb_20230320-af666368.pth",
+        )
     )
-    ffmpeg: str = os.environ.get("BASKET_FFMPEG", "ffmpeg")
-    max_upload_bytes: int = int(
-        os.environ.get("BASKET_MAX_UPLOAD_BYTES", str(4 * 1024**3))
+    action_config: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_ACTION_CONFIG",
+            REPOSITORY_ROOT / "MMAction2/configs/detection/slowfast/"
+            "slowfast_kinetics400-pretrained-r50_8xb16-4x16x1-8e_"
+            "multisports-rgb.py",
+        )
+    )
+    action_label_map: Path = field(
+        default_factory=lambda: _path_env(
+            "BASKET_ACTION_LABEL_MAP",
+            REPOSITORY_ROOT / "MMAction2/tools/data/multisports/label_map.txt",
+        )
+    )
+    ffmpeg: str = field(
+        default_factory=lambda: os.environ.get("BASKET_FFMPEG", "ffmpeg")
+    )
+    max_upload_bytes: int = field(
+        default_factory=lambda: int(
+            os.environ.get("BASKET_MAX_UPLOAD_BYTES", str(4 * 1024**3))
+        )
     )
 
     @property
