@@ -11,25 +11,23 @@ import itertools
 import math
 import shutil
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+from contracts.paths import KPR_FILENAME, model_path
 from contracts.schema import (
     TrackRecord,
     read_jsonl,
     write_json,
     write_jsonl_line,
 )
-from pipeline.identity.kpr_backend import KPRBackend, PROMPT_MODES
-
+from pipeline.identity.kpr_backend import PROMPT_MODES, KPRBackend
 
 DEFAULT_KPR_ROOT = Path("KPR")
 DEFAULT_KPR_CONFIG = Path("configs/kpr/multidataset_sports_test.yaml")
-DEFAULT_KPR_CHECKPOINT = Path(
-    "/root/autodl-tmp/models/kpr/"
-    "kpr_dancetrack_sportsmot_posetrack21_occludedduke_market_split0.pth.tar"
-)
+DEFAULT_KPR_CHECKPOINT = model_path("kpr", KPR_FILENAME)
 GENERATED_FILES = (
     "kpr_track_sampling.jsonl",
     "kpr_sampling_manifest.jsonl",
@@ -315,16 +313,14 @@ def load_selected_crops(
         ok, frame = capture.read()
         if not ok:
             break
-        for record in sorted(by_frame.get(frame_idx, []), key=lambda item: item.track_id):
-            crop, crop_xyxy = padded_crop(
-                frame, record.bbox_xyxy, padding=padding
-            )
+        for record in sorted(
+            by_frame.get(frame_idx, []), key=lambda item: item.track_id
+        ):
+            crop, crop_xyxy = padded_crop(frame, record.bbox_xyxy, padding=padding)
             sample_id = f"track_{record.track_id:04d}_frame_{record.frame_idx:06d}"
             crop_path = media_dir / f"{sample_id}_crop.jpg"
             context_path = media_dir / f"{sample_id}_context.jpg"
-            if not cv2.imwrite(
-                str(crop_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95]
-            ):
+            if not cv2.imwrite(str(crop_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95]):
                 raise RuntimeError(f"Failed to write KPR crop: {crop_path}")
             save_context_image(
                 frame,
@@ -402,9 +398,9 @@ def make_track_prototypes(embeddings, visibility, sample_metadata, torch):
     for track_id in track_ids:
         indices = track_to_indices[track_id]
         track_embeddings = embeddings[indices]
-        track_visibility = visibility[indices].to(
-            dtype=track_embeddings.dtype
-        ).clamp_min(0)
+        track_visibility = (
+            visibility[indices].to(dtype=track_embeddings.dtype).clamp_min(0)
+        )
         weights = track_visibility.unsqueeze(-1)
         denominator = weights.sum(dim=0).clamp_min(1e-12)
         prototype = (track_embeddings * weights).sum(dim=0) / denominator
@@ -696,9 +692,7 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
     )
     embeddings, visibility = backend.extract(samples, batch_size=options.batch_size)
     track_ids, track_to_indices, prototypes, prototype_visibility = (
-        make_track_prototypes(
-            embeddings, visibility, sample_metadata, backend.torch
-        )
+        make_track_prototypes(embeddings, visibility, sample_metadata, backend.torch)
     )
     prototype_distances = backend.distances(
         prototypes, prototypes, prototype_visibility, prototype_visibility
@@ -834,7 +828,9 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
         "tracks": str(tracks_path),
         "backend": "KPR",
         "prompt_mode": options.prompt_mode,
-        "keypoints": str(options.keypoints.expanduser().resolve()) if options.keypoints else None,
+        "keypoints": str(options.keypoints.expanduser().resolve())
+        if options.keypoints
+        else None,
         "config": str(options.config.expanduser().resolve()),
         "checkpoint": str(options.checkpoint.expanduser().resolve()),
         "sample_count": len(sample_metadata),
@@ -858,6 +854,7 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
         output_dir / "identity_archive_manifest.json",
         {
             "schema_version": 1,
+            "video_id": all_records[0].video_id if all_records else None,
             "identity_resolution_mode": "archive_no_merge",
             "prompt_mode": options.prompt_mode,
             "artifacts": {

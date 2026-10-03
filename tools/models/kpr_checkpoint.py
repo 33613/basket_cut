@@ -14,11 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from contracts.paths import KPR_FILENAME, model_path
 
-DEFAULT_CHECKPOINT = Path(
-    "/root/autodl-tmp/models/kpr/"
-    "kpr_dancetrack_sportsmot_posetrack21_occludedduke_market_split0.pth.tar"
-)
+DEFAULT_CHECKPOINT = model_path("kpr", KPR_FILENAME)
 PUBLISHED_SHA256 = "c7f3a74d86a0bb56940b2703508a50f1d3dbee4d755049272ef5caa18457db3f"
 
 
@@ -113,7 +111,9 @@ def inspect_kpr_checkpoint(options: KPRCheckpointOptions) -> dict[str, Any]:
         ):
             non_finite_keys.append(str(key))
 
-    embedded_config = checkpoint.get("config") if isinstance(checkpoint, Mapping) else None
+    embedded_config = (
+        checkpoint.get("config") if isinstance(checkpoint, Mapping) else None
+    )
     result = {
         "valid": bool(
             sha256_matches
@@ -126,7 +126,7 @@ def inspect_kpr_checkpoint(options: KPRCheckpointOptions) -> dict[str, Any]:
         "sha256": actual_sha256,
         "sha256_matches_published_value": sha256_matches,
         "checkpoint_keys": (
-            sorted(str(key) for key in checkpoint.keys())
+            sorted(str(key) for key in checkpoint)
             if isinstance(checkpoint, Mapping)
             else []
         ),

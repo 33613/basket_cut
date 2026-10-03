@@ -208,10 +208,14 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
         "tracking": {
             "summary": load_json(tracking / "track_summary.json"),
             "video_meta": meta,
+            "quality": load_json(output / "quality/quality_summary.json"),
+            "quality_tracks": read_jsonl(output / "quality/quality_tracks.jsonl"),
         },
         "identity": {
-            "summary": load_json(identity / "kpr_summary.json")
+            "summary": load_json(identity / "resolution_summary.json")
+            or load_json(identity / "kpr_summary.json")
             or load_json(identity / "kpr_prepare_summary.json"),
+            "raw_summary": load_json(output / "identity_raw/kpr_summary.json"),
             "manifest": load_json(identity / "identity_archive_manifest.json"),
             "people": identities,
         },
@@ -226,6 +230,7 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
         },
         "evaluation": {
             "tracking": load_json(output / "analysis/tracking_metrics.json"),
+            "identity": load_json(output / "analysis/identity_metrics.json"),
             "events": load_json(output / "analysis/event_metrics.json"),
         },
         "warnings": warnings,

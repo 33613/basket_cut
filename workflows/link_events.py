@@ -30,8 +30,6 @@ def load_identity_map(path: Path) -> dict[int, dict[str, Any]]:
         if track_id in mappings:
             raise ValueError(f"Duplicate identity mapping for track {track_id}")
         mappings[track_id] = value
-    if not mappings:
-        raise ValueError(f"Identity map is empty: {path}")
     return mappings
 
 
@@ -39,6 +37,8 @@ def link_actions_to_people(options: LinkEventsOptions) -> dict[str, Any]:
     actions_path = options.actions.expanduser().resolve()
     identity_map_path = options.identity_map.expanduser().resolve()
     output_path = options.output.expanduser().resolve()
+    if output_path in {actions_path, identity_map_path}:
+        raise ValueError("Linked output cannot overwrite its inputs")
     if output_path.exists() and not options.overwrite:
         raise FileExistsError(
             f"{output_path} already exists; pass --overwrite to replace it"
@@ -55,6 +55,12 @@ def link_actions_to_people(options: LinkEventsOptions) -> dict[str, Any]:
             record_count += 1
             raw_track_id = int(action["track_id"])
             mapping = mappings.get(raw_track_id)
+            if (
+                mapping
+                and mapping.get("video_id")
+                and mapping["video_id"] != action["video_id"]
+            ):
+                raise ValueError("Action and identity mapping video_id differ")
             if mapping is None:
                 unmapped_tracks[raw_track_id] += 1
                 if not options.allow_unmapped:

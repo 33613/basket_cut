@@ -73,10 +73,10 @@
         </section>
 
         <section class="import-section panel" aria-label="导入已有结果">
-          <div><span class="eyebrow">EXISTING RESULTS</span><h3>从服务器导入已完成的实验</h3><p>只建立只读索引，不复制原视频，不修改原结果。</p></div>
+          <div><span class="eyebrow">EXISTING RESULTS</span><h3>导入已完成的实验</h3><p>只建立只读索引，不复制原视频，不修改原结果。</p></div>
           <form id="importForm">
-            <label for="importPath">服务器结果目录</label>
-            <div class="import-fields"><input id="importPath" required placeholder="/root/autodl-tmp/outputs/basket_cut/你的实验目录" /><button class="import-button" type="submit">导入结果 ↗</button></div>
+            <label for="importPath">结果目录</label>
+            <div class="import-fields"><input id="importPath" required placeholder="runtime/outputs/experiment" /><button class="import-button" type="submit">导入结果 ↗</button></div>
           </form>
         </section>
 
@@ -119,6 +119,7 @@
                 <label>跟踪检测阈值<input id="trackingThreshold" type="number" min="0" max="1" step="0.05" value="0.30" /></label>
                 <label>KPR 每轨迹采样<input id="identitySamples" type="number" min="1" max="64" value="8" /></label>
                 <label>KPR 检测阈值<input id="identityThreshold" type="number" min="0" max="1" step="0.05" value="0.50" /></label>
+                <label>身份归并距离<input id="identityMergeDistance" type="number" min="0" step="0.01" placeholder="留空：不自动合并" /></label>
                 <label>动作阈值<input id="actionThreshold" type="number" min="0" max="1" step="0.05" value="0.20" /></label>
                 <label class="checkbox-label"><input id="forceRun" type="checkbox" /><span>强制重跑已有阶段</span></label>
               </div>
@@ -132,11 +133,13 @@
 
             <div class="stage-rail panel" id="stageRail">
               <div class="stage" data-stage="tracking"><span>01</span><div><small>MOTIP</small><strong>人物追踪</strong></div><i></i></div>
-              <div class="stage" data-stage="identity"><span>02</span><div><small>KPR</small><strong>身份归档</strong></div><i></i></div>
-              <div class="stage" data-stage="action"><span>03</span><div><small>SLOWFAST</small><strong>动作识别</strong></div><i></i></div>
-              <div class="stage" data-stage="link"><span>04</span><div><small>CONTRACT</small><strong>人物事件连接</strong></div><i></i></div>
-              <div class="stage" data-stage="aggregate"><span>05</span><div><small>INTERVALS</small><strong>事件区间聚合</strong></div><i></i></div>
-              <div class="stage" data-stage="render"><span>06</span><div><small>OUTPUT</small><strong>结果渲染</strong></div></div>
+              <div class="stage" data-stage="quality"><span>02</span><div><small>AUDIT</small><strong>轨迹质量</strong></div><i></i></div>
+              <div class="stage" data-stage="identity"><span>03</span><div><small>KPR</small><strong>身份特征</strong></div><i></i></div>
+              <div class="stage" data-stage="resolution"><span>04</span><div><small>RESOLVE</small><strong>身份归并</strong></div><i></i></div>
+              <div class="stage" data-stage="action"><span>05</span><div><small>SLOWFAST</small><strong>动作识别</strong></div><i></i></div>
+              <div class="stage" data-stage="link"><span>06</span><div><small>CONTRACT</small><strong>人物事件</strong></div><i></i></div>
+              <div class="stage" data-stage="aggregate"><span>07</span><div><small>INTERVALS</small><strong>事件聚合</strong></div><i></i></div>
+              <div class="stage" data-stage="render"><span>08</span><div><small>OUTPUT</small><strong>结果渲染</strong></div></div>
             </div>
 
             <div class="inspection-grid">

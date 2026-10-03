@@ -60,7 +60,9 @@ def import_results(
         cache = settings.output_root / project_id / "media" / video_id
         expected = {
             "tracking": output / "tracking/tracks.jsonl",
+            "quality": output / "quality/quality_summary.json",
             "identity": output / "identity/identity_archive_manifest.json",
+            "resolution": output / "identity/resolution_summary.json",
             "action": output / "action/actions.jsonl",
             "link": output / "action/actions_with_identity.jsonl",
             "aggregate": output / "action/events.jsonl",
@@ -79,7 +81,11 @@ def import_results(
         }
         stages = {
             stage: {
-                "status": "completed" if expected[stage].is_file() else "pending",
+                "status": "completed"
+                if expected[stage].is_file()
+                else "skipped"
+                if stage in {"quality", "resolution"}
+                else "pending",
                 "started_at": None,
                 "finished_at": None,
                 "command": None,
@@ -87,7 +93,9 @@ def import_results(
             }
             for stage in STAGE_NAMES
         }
-        complete = all(value["status"] == "completed" for value in stages.values())
+        complete = all(
+            value["status"] in {"completed", "skipped"} for value in stages.values()
+        )
         videos.append(
             {
                 "video_id": video_id,

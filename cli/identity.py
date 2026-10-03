@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+from contracts.paths import KPR_FILENAME, model_path
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -23,11 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path(
-            "/root/autodl-tmp/models/kpr/"
-            "kpr_dancetrack_sportsmot_posetrack21_occludedduke_"
-            "market_split0.pth.tar"
-        ),
+        default=model_path("kpr", KPR_FILENAME),
     )
     parser.add_argument("--prompt-mode", choices=("none", "keypoints"), default="none")
     parser.add_argument("--keypoints", type=Path)

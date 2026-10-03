@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from contracts.schema import write_json
 from web.backend.settings import WebSettings
 from web.backend.store import ProjectStore, utc_now
 
@@ -92,6 +95,9 @@ class PipelineRunner:
             "output": output,
             "tracking": output / "tracking",
             "tracks": output / "tracking/tracks.jsonl",
+            "quality": output / "quality",
+            "stable_tracks": output / "quality/tracks.jsonl",
+            "identity_raw": output / "identity_raw",
             "identity": output / "identity",
             "identity_map": output / "identity/identity_map.jsonl",
             "action": output / "action",
@@ -108,26 +114,67 @@ class PipelineRunner:
     def _artifact_exists(self, stage: str, paths: dict[str, Path]) -> bool:
         expected = {
             "tracking": paths["tracks"],
-            "identity": paths["identity"] / "identity_archive_manifest.json",
+            "quality": paths["quality"] / "quality_summary.json",
+            "identity": paths["identity_raw"] / "identity_archive_manifest.json",
+            "resolution": paths["identity"] / "resolution_summary.json",
             "action": paths["actions"],
             "link": paths["linked_actions"],
             "aggregate": paths["events"],
             "render": paths["result"],
         }
-        return expected[stage].is_file()
+        artifact = expected[stage]
+        dependencies = {
+            "quality": [paths["tracks"], paths["video_meta"]],
+            "identity": [paths["stable_tracks"]],
+            "resolution": [paths["stable_tracks"], expected["identity"]],
+            "action": [paths["stable_tracks"]],
+            "link": [paths["actions"], paths["identity_map"]],
+            "aggregate": [
+                paths["linked_actions"]
+                if paths["linked_actions"].is_file()
+                else paths["actions"]
+            ],
+            "render": [paths["stable_tracks"]]
+            + [
+                path
+                for path in (paths["linked_actions"], paths["identity_map"])
+                if path.is_file()
+            ],
+        }
+        return artifact.is_file() and all(
+            dependency.is_file()
+            and dependency.stat().st_mtime_ns <= artifact.stat().st_mtime_ns
+            for dependency in dependencies.get(stage, [])
+        )
 
     def _plan(self, target: str, paths: dict[str, Path], force: bool) -> list[str]:
         requested = {
-            "tracking": ["tracking"],
-            "identity": ["tracking", "identity"],
-            "action": ["tracking", "action"],
-            "final": ["tracking", "link", "aggregate", "render"],
-            "full": ["tracking", "identity", "action", "link", "aggregate", "render"],
+            "tracking": ["tracking", "quality"],
+            "identity": ["tracking", "quality", "identity", "resolution"],
+            "action": ["tracking", "quality", "action"],
+            "final": ["tracking", "quality", "link", "aggregate", "render"],
+            "full": [
+                "tracking",
+                "quality",
+                "identity",
+                "resolution",
+                "action",
+                "link",
+                "aggregate",
+                "render",
+            ],
         }[target]
+        if (
+            target == "final"
+            and (paths["identity_raw"] / "identity_archive_manifest.json").is_file()
+        ):
+            requested.insert(requested.index("link"), "resolution")
         plan = []
+        stale = force
         for stage in requested:
-            if force or not self._artifact_exists(stage, paths):
+            if stale or not self._artifact_exists(stage, paths):
                 plan.append(stage)
+                stale = True
         return plan
 
     def _run_job(
@@ -148,6 +195,20 @@ class PipelineRunner:
         )
         try:
             for stage in plan:
+                if self._write_empty_model_artifacts(stage, paths):
+                    self.store.set_stage(
+                        project_id,
+                        video_id,
+                        stage,
+                        "completed",
+                        command=None,
+                        return_code=0,
+                    )
+                    self._append_log(
+                        paths["log"],
+                        f"[{stage}] no stable tracks: empty output, model not invoked\n",
+                    )
+                    continue
                 if stage == "aggregate" and not paths["actions"].is_file():
                     self.store.set_stage(
                         project_id, video_id, stage, "skipped", return_code=None
@@ -171,6 +232,15 @@ class PipelineRunner:
                         "[link] skipped: action or identity artifact is missing\n",
                     )
                     continue
+                if (
+                    stage in {"link", "aggregate"}
+                    and paths["actions"].is_file()
+                    and paths["stable_tracks"].stat().st_mtime_ns
+                    > paths["actions"].stat().st_mtime_ns
+                ):
+                    raise ValueError(
+                        "Action predictions predate the current quality result; rerun action/full or use cli.refine_results for cached filtering"
+                    )
                 try:
                     command = self._command(stage, paths, options)
                 except Exception:
@@ -276,9 +346,9 @@ class PipelineRunner:
                 "--input",
                 str(paths["source"]),
                 "--tracks",
-                str(paths["tracks"]),
+                str(paths["stable_tracks"]),
                 "--output-dir",
-                str(paths["identity"]),
+                str(paths["identity_raw"]),
                 "--kpr-root",
                 str(self.settings.repository_root / "KPR"),
                 "--config",
@@ -296,6 +366,45 @@ class PipelineRunner:
                 str(float(options.get("identity_min_det_score", 0.5))),
                 "--overwrite",
             ]
+        if stage == "quality":
+            return [
+                sys.executable,
+                "-m",
+                "cli.track_quality",
+                "--tracks",
+                str(paths["tracks"]),
+                "--video-meta",
+                str(paths["video_meta"]),
+                "--output-dir",
+                str(paths["quality"]),
+                "--min-observations",
+                str(options.get("quality_min_observations", 3)),
+                "--min-observed-seconds",
+                str(options.get("quality_min_observed_seconds", 0.1)),
+                "--overwrite",
+            ]
+        if stage == "resolution":
+            command = [
+                sys.executable,
+                "-m",
+                "cli.resolve_identity",
+                "--tracks",
+                str(paths["stable_tracks"]),
+                "--video-meta",
+                str(paths["video_meta"]),
+                "--archive-dir",
+                str(paths["identity_raw"]),
+                "--quality-dir",
+                str(paths["quality"]),
+                "--output-dir",
+                str(paths["identity"]),
+                "--overwrite",
+            ]
+            if options.get("identity_merge_distance") is not None:
+                command.extend(
+                    ["--max-distance", str(options["identity_merge_distance"])]
+                )
+            return command
         if stage == "action":
             self._require(self.settings.action_python, "MMAction2 Python")
             self._require(self.settings.action_checkpoint, "action checkpoint")
@@ -308,7 +417,7 @@ class PipelineRunner:
                 "--input",
                 str(paths["source"]),
                 "--tracks",
-                str(paths["tracks"]),
+                str(paths["stable_tracks"]),
                 "--config",
                 str(self.settings.action_config),
                 "--checkpoint",
@@ -335,7 +444,6 @@ class PipelineRunner:
                 str(paths["identity_map"]),
                 "--output",
                 str(paths["linked_actions"]),
-                "--allow-unmapped",
                 "--overwrite",
             ]
         if stage == "render":
@@ -347,7 +455,7 @@ class PipelineRunner:
                 "--input",
                 str(paths["source"]),
                 "--tracks",
-                str(paths["tracks"]),
+                str(paths["stable_tracks"]),
                 "--output",
                 str(paths["result"]),
                 "--show-top-candidate",
@@ -392,6 +500,50 @@ class PipelineRunner:
                 "--overwrite",
             ]
         raise ValueError(f"Unknown stage: {stage}")
+
+    @staticmethod
+    def _write_empty_model_artifacts(stage: str, paths: dict[str, Path]) -> bool:
+        """An empty quality result is valid, not a model crash or a perfect score."""
+        if (
+            stage not in {"identity", "action"}
+            or not paths["stable_tracks"].is_file()
+            or paths["stable_tracks"].stat().st_size
+        ):
+            return False
+        meta = json.loads(paths["video_meta"].read_text(encoding="utf-8"))
+        if stage == "identity":
+            destination = paths["identity_raw"]
+            destination.mkdir(parents=True, exist_ok=True)
+            for name in (
+                "identities.jsonl",
+                "identity_map.jsonl",
+                "kpr_track_pairs.jsonl",
+                "kpr_samples.jsonl",
+                "kpr_track_sampling.jsonl",
+            ):
+                (destination / name).write_text("", encoding="utf-8")
+            summary = {
+                "video_id": meta["video_id"],
+                "identity_count": 0,
+                "model_invoked": False,
+                "reason": "no_stable_tracks",
+                "identity_resolution_mode": "archive_no_merge",
+            }
+            write_json(destination / "kpr_summary.json", summary)
+            write_json(destination / "identity_archive_manifest.json", summary)
+        else:
+            paths["action"].mkdir(parents=True, exist_ok=True)
+            paths["actions"].write_text("", encoding="utf-8")
+            write_json(
+                paths["action"] / "actions.summary.json",
+                {
+                    "video_id": meta["video_id"],
+                    "model_invoked": False,
+                    "reason": "no_stable_tracks",
+                    "settings": {"predict_stepsize": 8},
+                },
+            )
+        return True
 
     def _run_command(self, command: list[str], log_path: Path) -> int:
         log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,9 +7,13 @@ environments.  It launches each CLI with that environment's Python executable.
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from contracts.paths import KPR_FILENAME, model_path, runtime_root
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
@@ -18,64 +22,57 @@ def _path_env(name: str, default: str | Path) -> Path:
     return Path(os.environ.get(name, str(default))).expanduser().resolve()
 
 
+def _python_env(name: str) -> Path:
+    value = os.environ.get(name, sys.executable)
+    return Path(shutil.which(value) or value).expanduser().resolve()
+
+
 @dataclass(frozen=True)
 class WebSettings:
     repository_root: Path = REPOSITORY_ROOT
     data_root: Path = field(
         default_factory=lambda: _path_env(
-            "BASKET_WEB_DATA_ROOT", "/root/autodl-tmp/data/basket_cut/web"
+            "BASKET_WEB_DATA_ROOT", runtime_root() / "data/web"
         )
     )
     output_root: Path = field(
         default_factory=lambda: _path_env(
-            "BASKET_WEB_OUTPUT_ROOT", "/root/autodl-tmp/outputs/basket_cut/web"
+            "BASKET_WEB_OUTPUT_ROOT", runtime_root() / "outputs/web"
         )
     )
     import_root: Path = field(
         default_factory=lambda: _path_env(
-            "BASKET_WEB_IMPORT_ROOT", "/root/autodl-tmp/outputs/basket_cut"
+            "BASKET_WEB_IMPORT_ROOT", runtime_root() / "outputs"
         )
     )
     source_root: Path = field(
         default_factory=lambda: _path_env(
-            "BASKET_WEB_SOURCE_ROOT", "/root/autodl-tmp/data/basket_cut"
+            "BASKET_WEB_SOURCE_ROOT", runtime_root() / "data"
         )
     )
     motip_python: Path = field(
-        default_factory=lambda: _path_env(
-            "BASKET_MOTIP_PYTHON", "/root/autodl-tmp/envs/motip/bin/python"
-        )
+        default_factory=lambda: _python_env("BASKET_MOTIP_PYTHON")
     )
-    kpr_python: Path = field(
-        default_factory=lambda: _path_env(
-            "BASKET_KPR_PYTHON", "/root/autodl-tmp/envs/kpr/bin/python"
-        )
-    )
+    kpr_python: Path = field(default_factory=lambda: _python_env("BASKET_KPR_PYTHON"))
     action_python: Path = field(
-        default_factory=lambda: _path_env(
-            "BASKET_ACTION_PYTHON", "/root/autodl-tmp/envs/mmaction2/bin/python"
-        )
+        default_factory=lambda: _python_env("BASKET_ACTION_PYTHON")
     )
     motip_checkpoint: Path = field(
         default_factory=lambda: _path_env(
             "BASKET_MOTIP_CHECKPOINT",
-            "/root/autodl-tmp/models/motip/r50_deformable_detr_motip_sportsmot.pth",
+            model_path("motip", "r50_deformable_detr_motip_sportsmot.pth"),
         )
     )
     kpr_checkpoint: Path = field(
         default_factory=lambda: _path_env(
             "BASKET_KPR_CHECKPOINT",
-            "/root/autodl-tmp/models/kpr/"
-            "kpr_dancetrack_sportsmot_posetrack21_occludedduke_"
-            "market_split0.pth.tar",
+            model_path("kpr", KPR_FILENAME),
         )
     )
     action_checkpoint: Path = field(
         default_factory=lambda: _path_env(
             "BASKET_ACTION_CHECKPOINT",
-            "/root/autodl-tmp/models/action/slowfast_multisports/"
-            "slowfast_kinetics400-pretrained-r50_8xb16-4x16x1-8e_"
-            "multisports-rgb_20230320-af666368.pth",
+            model_path("action", "slowfast_multisports.pth"),
         )
     )
     action_config: Path = field(

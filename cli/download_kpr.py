@@ -6,12 +6,14 @@ import argparse
 import json
 from pathlib import Path
 
+from contracts.paths import runtime_root
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="multidataset-sports")
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("/root/autodl-tmp/models/kpr")
+        "--output-dir", type=Path, default=runtime_root() / "models/kpr"
     )
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--force-download", action="store_true")

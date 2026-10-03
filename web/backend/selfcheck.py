@@ -320,6 +320,83 @@ class DashboardSelfCheck(unittest.TestCase):
         plan = runner._plan("full", paths, True)
         self.assertLess(plan.index("link"), plan.index("aggregate"))
         self.assertLess(plan.index("aggregate"), plan.index("render"))
+        self.assertLess(plan.index("quality"), plan.index("identity"))
+        self.assertLess(plan.index("resolution"), plan.index("link"))
+        command = runner._command("resolution", paths, {})
+        self.assertNotIn("--max-distance", command)
+        self.assertIn(
+            "--max-distance",
+            runner._command("resolution", paths, {"identity_merge_distance": 0.2}),
+        )
+
+    def test_new_artifacts_and_quality_reach_dashboard(self) -> None:
+        video = self.imported()["videos"][0]
+        output = Path(video["output_dir"])
+        write_json(
+            output / "quality/quality_summary.json",
+            {"raw_track_count": 2, "retained_track_count": 1},
+        )
+        write_jsonl(
+            output / "quality/quality_tracks.jsonl",
+            [{"track_id": 0, "status": "accepted"}],
+        )
+        write_json(
+            output / "identity/resolution_summary.json",
+            {"identity_count": 1, "human_confirmed_people": 1},
+        )
+        artifacts = collect_video_artifacts(video)
+        self.assertEqual(artifacts["tracking"]["quality"]["raw_track_count"], 2)
+        self.assertEqual(artifacts["identity"]["summary"]["human_confirmed_people"], 1)
+        self.assertIn(
+            "quality/quality_summary.json",
+            zipfile.ZipFile(io.BytesIO(build_inspection_bundle(video))).namelist(),
+        )
+
+    def test_empty_quality_result_does_not_invoke_models(self) -> None:
+        from adapters.mmaction2.temporal_events import (
+            TemporalAggregationOptions,
+            aggregate_action_points,
+        )
+        from pipeline.identity.resolution import ResolutionOptions, resolve_identities
+        from workflows.link_events import LinkEventsOptions, link_actions_to_people
+
+        video = self.imported()["videos"][0]
+        paths = PipelineRunner._paths(video)
+        paths["quality"].mkdir()
+        paths["stable_tracks"].write_text("")
+        self.assertTrue(PipelineRunner._write_empty_model_artifacts("identity", paths))
+        self.assertTrue(PipelineRunner._write_empty_model_artifacts("action", paths))
+        resolve_identities(
+            ResolutionOptions(
+                paths["stable_tracks"],
+                paths["video_meta"],
+                paths["identity_raw"],
+                paths["identity"],
+                overwrite=True,
+            )
+        )
+        link_actions_to_people(
+            LinkEventsOptions(
+                paths["actions"],
+                paths["identity_map"],
+                paths["linked_actions"],
+                overwrite=True,
+            )
+        )
+        result = aggregate_action_points(
+            TemporalAggregationOptions(
+                paths["linked_actions"],
+                paths["events"],
+                video_meta=paths["video_meta"],
+                overwrite=True,
+            )
+        )
+        self.assertEqual(result["event_count"], 0)
+        self.assertFalse(
+            json.loads((paths["action"] / "actions.summary.json").read_text())[
+                "model_invoked"
+            ]
+        )
 
     def test_http_import_detail_raw_media_export_and_read_only(self) -> None:
         from fastapi.testclient import TestClient

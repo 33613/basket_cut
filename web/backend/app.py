@@ -60,6 +60,11 @@ class RunOptions(BaseModel):
     tracking_det_threshold: float = Field(default=0.3, ge=0, le=1)
     identity_samples: int = Field(default=8, ge=1, le=64)
     identity_min_det_score: float = Field(default=0.5, ge=0, le=1)
+    identity_merge_distance: float | None = Field(
+        default=None, ge=0, allow_inf_nan=False
+    )
+    quality_min_observations: int = Field(default=3, ge=1)
+    quality_min_observed_seconds: float = Field(default=0.1, ge=0, allow_inf_nan=False)
     prompt_mode: Literal["none"] = "none"
     action_threshold: float = Field(default=0.2, ge=0, le=1)
     action_min_det_score: float = Field(default=0.3, ge=0, le=1)
@@ -376,6 +381,9 @@ def artifact_records(
         "events",
         "samples",
         "sampling",
+        "quality",
+        "quality_observations",
+        "resolution",
     ],
     limit: int = Query(default=200, ge=1, le=2000),
 ) -> dict[str, Any]:
@@ -390,8 +398,13 @@ def artifact_records(
         "events": output / "action/events.jsonl",
         "samples": output / "identity/kpr_samples.jsonl",
         "sampling": output / "identity/kpr_track_sampling.jsonl",
+        "quality": output / "quality/quality_tracks.jsonl",
+        "quality_observations": output / "quality/quality_observations.jsonl",
+        "resolution": output / "identity/resolution_pairs.jsonl",
     }
     path = mapping[kind]
+    if kind in {"pairs", "samples", "sampling"} and not path.is_file():
+        path = output / "identity_raw" / path.name
     return {
         "kind": kind,
         "path": str(path),

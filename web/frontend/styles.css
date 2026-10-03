@@ -292,8 +292,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .strip-actions { align-items: center; }
 .workspace, .inspector { grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .workspace > *, .inspector > * { min-width: 0; }
-.stage-rail { grid-template-columns: repeat(6, 1fr); }
-.clip-progress { grid-template-columns: repeat(6, 1fr); }
+.stage-rail { grid-template-columns: repeat(4, 1fr); row-gap: 15px; }
+.clip-progress { grid-template-columns: repeat(8, 1fr); }
 .identity-stats { flex-wrap: wrap; gap: 7px 12px; font-size: 10px; line-height: 1.5; }
 .exemplar-strip { display: flex; gap: 6px; overflow-x: auto; padding-top: 12px; }
 .exemplar-strip img { height: 60px; width: 34px; object-fit: contain; background: var(--bg-soft); border-radius: 5px; }

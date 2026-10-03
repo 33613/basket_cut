@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from contracts.paths import runtime_root
 from tools.datasets.shot import DEFAULT_REPO_ID, DEFAULT_REVISION, DEFAULT_SAMPLE
 
 
@@ -18,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/root/autodl-tmp/data/basket_cut/SHOT"),
+        default=runtime_root() / "data/SHOT",
     )
     parser.add_argument(
         "--sample",

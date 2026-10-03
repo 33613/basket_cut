@@ -6,15 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from contracts.paths import runtime_root
 from tools.models.kpr_checkpoint import PUBLISHED_SHA256, sha256_file
-
 
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "multidataset-sports": {
         "repo_id": "trackinglaboratory/keypoint_promptable_reid",
         "filename": (
-            "kpr_dancetrack_sportsmot_posetrack21_occludedduke_"
-            "market_split0.pth.tar"
+            "kpr_dancetrack_sportsmot_posetrack21_occludedduke_market_split0.pth.tar"
         ),
         "sha256": PUBLISHED_SHA256,
         "training_sources": [
@@ -33,7 +32,7 @@ MODEL_SPECS: dict[str, dict[str, Any]] = {
 @dataclass(frozen=True)
 class KPRDownloadOptions:
     model: str = "multidataset-sports"
-    output_dir: Path = Path("/root/autodl-tmp/models/kpr")
+    output_dir: Path = runtime_root() / "models/kpr"
     list_only: bool = False
     force_download: bool = False
 

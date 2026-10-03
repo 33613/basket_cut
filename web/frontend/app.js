@@ -147,7 +147,7 @@ function bindEvents() {
     }
   });
   $("#resultVideo").addEventListener("error", () => {
-    $("#mediaHint").textContent = "视频无法播放：可能是 MP4 编码不受浏览器支持。请在服务器运行 cli.import_web_results --prepare-media，生成 H.264 预览，再刷新页面。";
+    $("#mediaHint").textContent = "视频无法播放：可能是 MP4 编码不受浏览器支持。运行 cli.import_web_results --prepare-media 生成 H.264 预览后，再刷新页面。";
   });
   $("#batchRunButton").addEventListener("click", batchRun);
   $$(".module-buttons button").forEach((button) =>
@@ -307,7 +307,9 @@ function renderInspector() {
 function stageName(stage) {
   return {
     tracking: "正在追踪人物",
+    quality: "正在检查轨迹质量",
     identity: "正在提取身份特征",
+    resolution: "正在归并人物档案",
     action: "正在识别动作",
     link: "正在连接人物事件",
     aggregate: "正在聚合事件区间",
@@ -327,8 +329,9 @@ function renderMetrics(artifacts) {
   const identity = artifacts.identity.summary || {};
   const actions = artifacts.action.index || {};
   const frames = artifacts.tracking.video_meta?.processed_frames;
+  const quality = artifacts.tracking.quality;
   const metrics = [
-    ["人物轨迹", tracking.track_count ?? "—", "原始 track ID 数量"],
+    ["人物轨迹", quality ? `${quality.raw_track_count} → ${quality.retained_track_count}` : tracking.track_count ?? "—", quality ? "原始 → 有时序支持的轨迹（非准确率）" : "原始 track ID 数量"],
     ["身份档案", identity.identity_count ?? identity.selected_track_count ?? "—", "片段内档案，不等于真人数"],
     ["事件区间", artifacts.available.events ? actions.event_count : "—", "聚合结果，不包含低分候选"],
     ["处理帧数", frames ?? "—", "来源视频帧数"],
@@ -340,6 +343,10 @@ function renderMetrics(artifacts) {
   const idf1 = evaluation.tracking?.headline?.value;
   const messages = [];
   if (idf1 != null) messages.push(`轨迹 IDF1 ${(Number(idf1) * 100).toFixed(1)}% · 仅限评估文件声明的范围`);
+  const identityF1 = evaluation.identity?.headline?.value;
+  if (identityF1 != null) messages.push(`身份归并 F1 ${(Number(identityF1) * 100).toFixed(1)}% · 仅限独立标注的轨迹对`);
+  if (quality) messages.push(`质量检查：${quality.tentative_track_count} 条证据不足，${quality.review_track_count} 条需复核；未确认的档案不能当成真人数。`);
+  if (identity.missing_archive_tracks?.length) messages.push(`身份缺失：${identity.missing_archive_tracks.length} 条稳定轨迹没有 KPR 档案，其动作未写入人物事件。`);
   if (!evaluation.events) messages.push("未加载事件评估结果：这里的计数和 raw_score 不是准确率。");
   if (!artifacts.available.events) messages.push("缺少 events.jsonl：不会把动作预测点冒充事件区间。");
   if (artifacts.warnings?.length) messages.push(`数据警告 ${artifacts.warnings.length} 条：存在无法解析的事件，当前计数不完整。`);
@@ -407,7 +414,8 @@ function emptyState(title, detail) {
 }
 
 function renderTracking() {
-  const summary = state.detail.artifacts.tracking.summary;
+  const tracking = state.detail.artifacts.tracking;
+  const summary = tracking.quality_tracks?.length ? {tracks: tracking.quality_tracks} : tracking.summary;
   if (!summary?.tracks?.length) {
     $("#tabContent").innerHTML = emptyState("还没有轨迹结果", "先运行人物追踪模块，轨迹覆盖率和检测分数会出现在这里。");
     return;
@@ -416,6 +424,7 @@ function renderTracking() {
     .map((track) => `
       <tr>
         <td><strong>T${escapeHtml(track.track_id)}</strong></td>
+        <td>${escapeHtml(track.status || "raw")}<small>${escapeHtml((track.reasons || []).join(", "))}</small></td>
         <td>${escapeHtml(track.start_frame)} – ${escapeHtml(track.end_frame)}</td>
         <td>${escapeHtml(track.observations)}</td>
         <td>${Number(track.duration_s).toFixed(2)} s</td>
@@ -425,7 +434,7 @@ function renderTracking() {
     .join("");
   $("#tabContent").innerHTML = `
     <table class="data-table">
-      <thead><tr><th>RAW ID</th><th>FRAME SPAN</th><th>OBSERVATIONS</th><th>DURATION</th><th>COVERAGE</th><th>MEAN DET</th></tr></thead>
+      <thead><tr><th>RAW ID</th><th>QUALITY</th><th>FRAME SPAN</th><th>OBSERVATIONS</th><th>DURATION</th><th>COVERAGE</th><th>MEAN DET</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
 }
@@ -446,6 +455,7 @@ function renderIdentity() {
         <div class="identity-image">${image}</div>
         <div class="identity-body">
           <div class="identity-head"><strong>${escapeHtml(person.person_id)}</strong><span>TRACK ${escapeHtml(person.raw_track_ids?.join(", "))}</span></div>
+          ${person.identity_label ? `<p>${escapeHtml(person.identity_label)}</p>` : ""}
           <div class="identity-stats"><span>${escapeHtml(person.sample_count)} samples</span><span>${escapeHtml(person.observation_count)} observations</span><span>${escapeHtml(person.status)}</span></div>
           <div class="identity-stats"><span>可见部位 ${Number(person.mean_visible_parts || 0).toFixed(1)}</span><span>轨迹内均距 ${person.within_track?.mean_distance == null ? "—" : Number(person.within_track.mean_distance).toFixed(3)}</span></div>
           <div class="exemplar-strip">${(person.exemplars || []).map((item) => item.crop_url ? `<img src="${escapeHtml(item.crop_url)}" alt="代表帧 ${escapeHtml(item.frame_idx)}" title="frame ${escapeHtml(item.frame_idx)}" loading="lazy" />` : "").join("")}</div>
@@ -468,10 +478,11 @@ function renderEvents() {
   }
   const allPeople = index.people || [];
   const labels = Object.keys(index.label_counts || {});
+  const filteredCount = allPeople.filter(person => !state.personFilter || person.person_id === state.personFilter).reduce((sum, person) => sum + person.events.filter(event => !state.eventFilter || event.event === state.eventFilter).length, 0);
   const filters = `<div class="event-filters">
     <label>人物档案<select id="personFilter" aria-label="人物档案"><option value="">全部档案</option>${allPeople.map((person) => `<option value="${escapeHtml(person.person_id)}" ${state.personFilter === person.person_id ? "selected" : ""}>${escapeHtml(person.person_id)}</option>`).join("")}</select></label>
     <label>事件类型<select id="eventFilter" aria-label="事件类型"><option value="">全部类型</option>${labels.map((label) => `<option value="${escapeHtml(label)}" ${state.eventFilter === label ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
-    <span>${index.event_count} 个区间 · raw_score 未校准</span>
+    <span>筛选 ${filteredCount} / 总 ${index.event_count} 个区间 · raw_score 未校准</span>
   </div>`;
   const meta = state.detail.artifacts.tracking.video_meta || {};
   const duration = Math.max(Number(meta.processed_frames || 0) / Number(meta.fps || 1), 0.01);
@@ -535,7 +546,7 @@ function renderActionPoints() {
 }
 
 async function renderRaw() {
-  const kinds = ["events", "tracks", "identities", "actions", "linked_actions", "pairs", "samples", "sampling"];
+  const kinds = ["events", "tracks", "quality", "quality_observations", "identities", "resolution", "actions", "linked_actions", "pairs", "samples", "sampling"];
   $("#tabContent").innerHTML = `
     <div class="raw-toolbar">${kinds.map((kind) => `<button data-kind="${kind}" class="${state.rawKind === kind ? "active" : ""}">${kind}</button>`).join("")}</div>
     <pre class="code-view">Loading ${escapeHtml(state.rawKind)}…</pre>`;
@@ -605,6 +616,7 @@ function runPayload(target) {
     tracking_det_threshold: Number($("#trackingThreshold").value),
     identity_samples: Number($("#identitySamples").value),
     identity_min_det_score: Number($("#identityThreshold").value),
+    identity_merge_distance: $("#identityMergeDistance").value.trim() ? Number($("#identityMergeDistance").value) : null,
     prompt_mode: "none",
     action_threshold: Number($("#actionThreshold").value),
     action_min_det_score: 0.3,

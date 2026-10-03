@@ -8,10 +8,11 @@ never downloads the complete dataset unless ``--profile full`` is requested.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
+from contracts.paths import runtime_root
 
 DEFAULT_REPO_ID = "muyu111/basketball"
 DEFAULT_REVISION = "shotdatasets"
@@ -22,7 +23,7 @@ DEFAULT_SAMPLE = "view1/Drive_Dunk/ATLvsNJ-10-view1-3"
 class ShotDownloadOptions:
     repo_id: str = DEFAULT_REPO_ID
     revision: str = DEFAULT_REVISION
-    output_dir: Path = Path("/root/autodl-tmp/data/basket_cut/SHOT")
+    output_dir: Path = runtime_root() / "data/SHOT"
     samples: tuple[str, ...] = ()
     max_samples: int | None = None
     profile: str = "tracking-eval"
@@ -33,8 +34,7 @@ def normalize_sample_path(value: str) -> str:
     normalized = value.strip().strip("/")
     if len(Path(normalized).parts) < 3:
         raise ValueError(
-            "A SHOT sample path must look like view/tactic/sample-name, got "
-            f"{value!r}"
+            f"A SHOT sample path must look like view/tactic/sample-name, got {value!r}"
         )
     return normalized
 

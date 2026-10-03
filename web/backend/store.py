@@ -11,7 +11,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STAGE_NAMES = ("tracking", "identity", "action", "link", "aggregate", "render")
+STAGE_NAMES = (
+    "tracking",
+    "quality",
+    "identity",
+    "resolution",
+    "action",
+    "link",
+    "aggregate",
+    "render",
+)
 
 
 def utc_now() -> str:
