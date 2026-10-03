@@ -263,14 +263,13 @@ def evaluate_tracks(options: TrackingEvaluationOptions) -> dict[str, Any]:
         for item in prediction_all
         if max_frames is None or item.frame_idx < max_frames
     ]
-    if not reference:
-        raise ValueError(f"No valid reference observations found in {reference_path}")
-    if not prediction:
-        raise ValueError(f"No valid predictions found in {prediction_path}")
-
     reference_frames = group_by_frame(reference)
     prediction_frames = group_by_frame(prediction)
-    frame_indices = sorted(set(reference_frames) | set(prediction_frames))
+    observed_frames = set(reference_frames) | set(prediction_frames)
+    frame_count = max_frames if max_frames is not None else max(observed_frames, default=-1) + 1
+    if frame_count <= 0:
+        raise ValueError("Empty GT and predictions require --max-frames or video_meta to define the evaluated range")
+    frame_indices = range(frame_count)
     accumulator = mm.MOTAccumulator(auto_id=True)
     for frame_idx in frame_indices:
         gt = reference_frames.get(frame_idx, [])
@@ -305,6 +304,7 @@ def evaluate_tracks(options: TrackingEvaluationOptions) -> dict[str, Any]:
     )
 
     result = {
+        "headline": {"name": "idf1", "value": metrics.get("idf1")},
         "sequence": sequence_name,
         "reference": {
             "path": str(reference_path),
@@ -324,6 +324,8 @@ def evaluate_tracks(options: TrackingEvaluationOptions) -> dict[str, Any]:
             "max_frames": max_frames,
             "frame_limit_source": frame_limit_source,
             "video_meta": str(video_meta_path) if video_meta_path else None,
+            "range_only": max_frames is not None,
+            "note": "Scores describe only the declared frame range, not unseen frames or ReID retrieval accuracy.",
             "reference_observations_ignored_after_limit": (
                 len(reference_all) - len(reference)
             ),

@@ -54,6 +54,12 @@ tools 独立负责准备外部资源
 时间事件构建、MultiSports 参考数据转换和产品评估见
 [`docs/EVENTS_EVALUATION.md`](docs/EVENTS_EVALUATION.md)。
 
+评估计分可在无卡模式独立自检：`python -m cli.check_evaluation`。
+安装 `requirements-eval.txt` 后加 `--with-tracking` 验证 IDF1/串 ID/空轨迹。
+多视频验收使用 `cli.evaluate_event_batch`：按清单汇总 TP/FP/FN，失败视频不会
+被静默跳过。人物位置 F1 不代表 KPR 身份检索准确率，完整操作见上面的文档。
+AutoDL 换机与数据安全检查见 [`docs/AUTODL_MIGRATION.md`](docs/AUTODL_MIGRATION.md)。
+
 `pipeline` 不反向依赖 `cli`、`workflows`、`analysis` 或 `web`。数据、
 权重、运行结果保存在 `/root/autodl-tmp`，不提交到 Git。
 

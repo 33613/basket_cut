@@ -290,6 +290,12 @@ def prepare_multisports_reference(
                         "actor_tube": actor_tube,
                         "identity_scope": "event_tube",
                         "label_index": label_index,
+                        "reference_video_meta": {
+                            "fps": options.fps,
+                            "frame_count": int(ground_truth["nframes"][video_name]),
+                            "height": int(ground_truth["resolution"][video_name][0]),
+                            "width": int(ground_truth["resolution"][video_name][1]),
+                        },
                     }
                 )
                 records.append(event)
