@@ -22,6 +22,7 @@ from web.backend.artifacts import (
 from web.backend.imports import import_results, within_root
 from web.backend.inspection import build_inspection_bundle
 from web.backend.runner import PipelineRunner
+from web.backend.evidence import EvidenceJobs, evidence_root
 from web.backend.reviews import collect_review, save_review, project_reviews, review_bundle
 from analysis.evaluation.track_review import merge_review
 from contracts.tracks import load_tracks
@@ -36,6 +37,7 @@ settings.ensure_directories()
 store = ProjectStore(settings.data_root, settings.output_root)
 store.recover_interrupted_jobs()
 runner = PipelineRunner(settings, store)
+evidence_jobs = EvidenceJobs(settings, store)
 
 app = FastAPI(
     title="CourtVision Lab",
@@ -73,6 +75,8 @@ class RunOptions(BaseModel):
     prompt_mode: Literal["none"] = "none"
     action_threshold: float = Field(default=0.2, ge=0, le=1)
     action_min_det_score: float = Field(default=0.3, ge=0, le=1)
+    jersey_ocr: bool = False
+    allow_ocr_download: bool = False
 
 
 class ReviewSave(BaseModel):
@@ -137,29 +141,37 @@ def decorate_artifacts(
     if not available["source"]:
         media["source"] = None
 
-    def decorate_identity(identity: dict[str, Any] | None) -> None:
+    def decorate_identity(identity: dict[str, Any] | None, prefix: str = 'identity') -> None:
         if not identity:
             return
         cover = identity.get("cover") or {}
         crop = cover.get("crop_path")
         context = cover.get("context_path")
         if crop:
-            cover["crop_url"] = artifact_url(project_id, video_id, f"identity/{crop}")
+            cover["crop_url"] = artifact_url(project_id, video_id, f"{prefix}/{crop}")
         if context:
             cover["context_url"] = artifact_url(
-                project_id, video_id, f"identity/{context}"
+                project_id, video_id, f"{prefix}/{context}"
             )
         for exemplar in identity.get("exemplars") or []:
             path = exemplar.get("crop_path")
             if path:
                 exemplar["crop_url"] = artifact_url(
-                    project_id, video_id, f"identity/{path}"
+                    project_id, video_id, f"{prefix}/{path}"
                 )
         for source in identity.get("source_tracks") or []:
-            decorate_identity(source)
+            decorate_identity(source, prefix)
+        for candidate in (identity.get('jersey') or {}).get('candidates', []):
+            for evidence in candidate.get('evidence', []):
+                path = evidence.get('crop_path')
+                if path:
+                    evidence['crop_url'] = artifact_url(project_id, video_id,
+                        f"{artifacts['identity']['raw_media_prefix']}/{path}")
 
     for identity in artifacts["identity"]["people"]:
         decorate_identity(identity)
+    for identity in artifacts['identity']['raw_people']:
+        decorate_identity(identity, artifacts['identity']['raw_media_prefix'])
     for key in ("index", "points"):
         for person in artifacts["action"][key]["people"]:
             decorate_identity(person.get("identity"))
@@ -170,6 +182,7 @@ def decorate_artifacts(
 @app.on_event("shutdown")
 def shutdown_runner() -> None:
     runner.shutdown()
+    evidence_jobs.executor.shutdown(wait=False)
 
 
 @app.get("/", include_in_schema=False)
@@ -246,8 +259,10 @@ def decorate_review(project_id: str, video_id: str, result: dict) -> dict:
     for track in result["index"]["tracks"]:
         for sample in track["samples"]:
             for kind in ("crop", "context"):
-                sample[f"{kind}_url"] = artifact_url(
-                    project_id, video_id, f"analysis/track_review/{sample[kind + '_path']}")
+                relative = sample[kind + '_path']
+                sample[f"{kind}_url"] = (f'/api/projects/{project_id}/videos/{video_id}/review-evidence/{relative}'
+                    if result.get('evidence_origin') == 'cache' else artifact_url(
+                    project_id, video_id, f"analysis/track_review/{relative}"))
     return result
 
 
@@ -278,6 +293,26 @@ def put_track_review(project_id: str, video_id: str, request: ReviewSave) -> dic
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post('/api/projects/{project_id}/videos/{video_id}/review-evidence')
+def prepare_review_evidence(project_id: str, video_id: str) -> dict:
+    video = get_video(project_id, video_id)
+    if runner.is_active(project_id, video_id):
+        raise HTTPException(status_code=409, detail='Wait for model processing to finish')
+    try:
+        return evidence_jobs.submit(project_id, video)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get('/api/projects/{project_id}/videos/{video_id}/review-evidence/{relative:path}')
+def review_evidence_file(project_id: str, video_id: str, relative: str) -> FileResponse:
+    if not relative.startswith('images/'):
+        raise HTTPException(status_code=400, detail='Only evidence images are served here')
+    return FileResponse(safe_child(evidence_root(store, project_id, video_id), relative))
 
 
 @app.get("/api/projects/{project_id}/videos/{video_id}/track-review/{track_id}/observations")
@@ -393,6 +428,8 @@ def run_video(
     request: RunOptions,
 ) -> dict[str, Any]:
     get_video(project_id, video_id)
+    if evidence_jobs.active(project_id, video_id):
+        raise HTTPException(status_code=409, detail='Wait for the active evidence job before changing model outputs')
     payload = request.model_dump() if hasattr(request, "model_dump") else request.dict()
     target = payload.pop("target")
     force = bool(payload.pop("force"))
@@ -487,6 +524,9 @@ def artifact_records(
         "quality",
         "quality_observations",
         "resolution",
+        "raw_identities",
+        "jersey_tracks",
+        "jersey_people",
     ],
     limit: int = Query(default=200, ge=1, le=2000),
 ) -> dict[str, Any]:
@@ -504,6 +544,9 @@ def artifact_records(
         "quality": output / "quality/quality_tracks.jsonl",
         "quality_observations": output / "quality/quality_observations.jsonl",
         "resolution": output / "identity/resolution_pairs.jsonl",
+        "raw_identities": output / "identity_raw/identities.jsonl",
+        "jersey_tracks": output / "identity/jersey_tracks.jsonl",
+        "jersey_people": output / "identity/jersey_people.jsonl",
     }
     path = mapping[kind]
     if kind in {"pairs", "samples", "sampling"} and not path.is_file():

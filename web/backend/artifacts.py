@@ -183,6 +183,24 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
     meta = load_json(tracking / "video_meta.json")
 
     identities = read_jsonl(identity / "identities.jsonl")
+    raw_root = output / 'identity_raw'
+    raw_people = read_jsonl(raw_root / 'identities.jsonl')
+    raw_available = (raw_root / 'identities.jsonl').is_file()
+    legacy_raw = False
+    if not raw_available and (load_json(identity / 'identity_archive_manifest.json') or {}).get('identity_resolution_mode') == 'archive_no_merge':
+        raw_people, raw_available, legacy_raw = [dict(p) for p in identities], True, True
+    jersey_tracks = {int(row['raw_track_id']): row for row in read_jsonl(identity / 'jersey_tracks.jsonl')}
+    jersey_people = {row['person_id']: row for row in read_jsonl(identity / 'jersey_people.jsonl')}
+    jersey_warnings = []
+    for person in raw_people:
+        ids = person.get('raw_track_ids', [])
+        person['jersey'] = jersey_tracks.get(int(ids[0])) if len(ids) == 1 else None
+    for person in identities:
+        number = jersey_people.get(person['person_id'])
+        if number and set(number.get('raw_track_ids', [])) != set(person.get('raw_track_ids', [])):
+            jersey_warnings.append(f"{person['person_id']}: stale jersey evidence excluded; rerun jersey_numbers with the current identity map")
+            number = None
+        person['jersey'] = number
     identity_by_id = {
         str(item.get("person_id")): item for item in identities if item.get("person_id")
     }
@@ -206,6 +224,7 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
     )
     if stale_point_count:
         warnings.append(f"{stale_point_count} stale linked action points excluded; relink current identities")
+    warnings.extend(jersey_warnings)
     for index in (indexed_actions, indexed_events):
         for person in index["people"]:
             person["identity"] = identity_by_id.get(str(person.get("person_id")))
@@ -228,6 +247,12 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
             "quality_tracks": read_jsonl(output / "quality/quality_tracks.jsonl"),
         },
         "identity": {
+            "raw_people": raw_people, "raw_available": raw_available,
+            "raw_media_prefix": 'identity' if legacy_raw else 'identity_raw',
+            "raw_count": len(raw_people) if raw_available else None,
+            "resolved_count": len(identities),
+            "reduction": len(raw_people) - len(identities) if raw_available else None,
+            "jersey_summary": load_json(identity / 'jersey_summary.json'),
             "summary": load_json(identity / "resolution_summary.json")
             or load_json(identity / "kpr_summary.json")
             or load_json(identity / "kpr_prepare_summary.json"),

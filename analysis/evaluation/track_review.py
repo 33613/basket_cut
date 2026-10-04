@@ -160,6 +160,8 @@ def evaluate_review(index: dict, review: dict | None, identity_map: Path | None 
         "warning": "Counts cover labeled pure tracks only. Overlapping spans flag possible duplicate detections; they are not proven sequential fragments. Missing players and mixed-track segments are not counted.",
     }
     archives = None
+    identity_pairs = {"tp": 0, "fp": 0, "fn": 0, "tn": 0, "scored_tracklets": 0,
+                      "missing_mapped_tracklets": [], "f1": None, "precision": None, "recall": None}
     if identity_map is not None:
         predicted, seen = defaultdict(list), set()
         for row in read_jsonl(identity_map):
@@ -191,11 +193,27 @@ def evaluate_review(index: dict, review: dict | None, identity_map: Path | None 
                     "conflict": sum(g["status"] == "conflict" for g in checked),
                     "unverified": sum(g["status"] == "unverified" for g in checked),
                     "warning": "If review labels were used to correct this mapping, this is an acceptance check, not independent model accuracy."}
+        owners = {tid: pid for pid, ids in predicted.items() for tid in ids}
+        truth = {row['raw_track_id']: verdicts[row['raw_track_id']]['identity_label']
+                 for row in retained if verdicts.get(row['raw_track_id'], {}).get('verdict') == 'pure'
+                 and verdicts[row['raw_track_id']].get('scope') == 'full_track'
+                 and verdicts[row['raw_track_id']].get('identity_label')}
+        identity_pairs['scored_tracklets'] = len(truth)
+        identity_pairs['missing_mapped_tracklets'] = sorted(set(truth) - set(owners))
+        for a, b in combinations(truth, 2):
+            expected = truth[a] == truth[b]
+            same = a in owners and b in owners and owners[a] == owners[b]
+            identity_pairs['tp' if expected and same else 'fn' if expected else 'fp' if same else 'tn'] += 1
+        tp, fp, fn = (identity_pairs[k] for k in ('tp', 'fp', 'fn'))
+        identity_pairs.update(f1=2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else None,
+                              precision=tp / (tp + fp) if tp + fp else None,
+                              recall=tp / (tp + fn) if tp + fn else None)
     return {
         "schema_version": 1, "video_id": index["video_id"],
         "fingerprint": index["fingerprint"], "scopes": scopes,
         "quality_available": index.get("quality_available", False),
         "fragmentation": fragmentation, "archives": archives,
+        "identity_pairs": identity_pairs,
         "warning": "Human track audit only: no missing-player recall, box accuracy, action accuracy or cross-clip identity accuracy. Sampled purity is not full-track purity.",
     }
 
@@ -234,9 +252,15 @@ def summarize_reviews(results: list[dict], *, expected_clips: int, failed: list[
             scopes[scope][stage] = pooled
     tracks = sum(r["fragmentation"]["labeled_pure_tracks"] for r in results)
     people = sum(r["fragmentation"]["reviewed_people"] for r in results)
+    pairs = {k: sum(r.get('identity_pairs', {}).get(k, 0) for r in results)
+             for k in ('tp', 'fp', 'fn', 'tn', 'scored_tracklets')}
+    tp, fp, fn = (pairs[k] for k in ('tp', 'fp', 'fn'))
+    pairs.update(f1=2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else None,
+                 precision=tp / (tp + fp) if tp + fp else None,
+                 recall=tp / (tp + fn) if tp + fn else None)
     return {"expected_clips": expected_clips, "completed_clips": len(results),
             "failed_clips": failed, "complete": not failed and len(results) == expected_clips,
-            "completed_subset": {"quality_available": bool(results) and all(r["quality_available"] for r in results), "scopes": scopes, "fragmentation": {
+            "completed_subset": {"identity_pairs": pairs, "quality_available": bool(results) and all(r["quality_available"] for r in results), "scopes": scopes, "fragmentation": {
                 "labeled_pure_tracks": tracks, "reviewed_people": people,
                 "tracks_per_reviewed_person": tracks / people if people else None,
                 "people_with_multiple_track_ids": sum(r["fragmentation"]["people_with_multiple_track_ids"] for r in results),

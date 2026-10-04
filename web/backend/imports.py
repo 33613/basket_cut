@@ -31,11 +31,21 @@ def import_results(
     root = within_root(result_dir, settings.import_root)
     if not root.is_dir():
         raise FileNotFoundError(f"Result directory not found: {root}")
-    directories = (
+    batch = load_json(root / "batch_manifest.json")
+    import_warnings = []
+    if batch is not None:
+        names = [row["name"] for row in batch["clips"]]
+        if len(set(names)) != len(names) or any(Path(name).name != name for name in names):
+            raise ValueError("Invalid clip names in batch manifest")
+        directories = [root / name for name in names]
+        expected_count = len(names)
+    else:
+        directories = (
         [root]
         if (root / "tracking/video_meta.json").is_file()
         else sorted(path for path in root.iterdir() if path.is_dir())
-    )
+        )
+        expected_count = None
     now = utc_now()
     project_id = "import-" + hashlib.sha256(str(root).encode()).hexdigest()[:16]
     videos = []
@@ -43,6 +53,8 @@ def import_results(
         output = within_root(output, root)
         meta_path = output / "tracking/video_meta.json"
         if not meta_path.is_file():
+            if batch is not None:
+                import_warnings.append(f"{output.name}: missing tracking metadata; not browseable yet")
             continue
         # Refuse symlinks to artifacts outside this imported directory, including
         # image symlinks. Routes repeat containment checks when serving files.
@@ -64,6 +76,7 @@ def import_results(
             "review": output / "analysis/track_review/index.json",
             "identity": output / "identity/identity_archive_manifest.json",
             "resolution": output / "identity/resolution_summary.json",
+            "jersey": output / 'identity/jersey_summary.json',
             "action": output / "action/actions.jsonl",
             "link": output / "action/actions_with_identity.jsonl",
             "aggregate": output / "action/events.jsonl",
@@ -85,7 +98,7 @@ def import_results(
                 "status": "completed"
                 if expected[stage].is_file()
                 else "skipped"
-                if stage in {"quality", "resolution", "review"}
+                if stage in {"quality", "resolution", "review", "jersey"}
                 else "pending",
                 "started_at": None,
                 "finished_at": None,
@@ -94,9 +107,15 @@ def import_results(
             }
             for stage in STAGE_NAMES
         }
+        batch_status = load_json(output / "batch_status.json")
         complete = all(
             value["status"] in {"completed", "skipped"} for value in stages.values()
         )
+        status = "completed" if complete else "partial"
+        if batch_status:
+            status = batch_status.get("status", "partial")
+            if status != "completed":
+                import_warnings.append(f"{output.name}: {status}; inspect pipeline.log")
         videos.append(
             {
                 "video_id": video_id,
@@ -107,9 +126,9 @@ def import_results(
                 "size_bytes": source.stat().st_size if source.is_file() else 0,
                 "created_at": now,
                 "updated_at": now,
-                "status": "completed" if complete else "partial",
+                "status": status,
                 "active_stage": None,
-                "error": None,
+                "error": batch_status.get("error") if batch_status else None,
                 "run_options": {},
                 "stages": stages,
                 "read_only": True,
@@ -127,6 +146,8 @@ def import_results(
         "updated_at": now,
         "read_only": True,
         "imported_from": str(root),
+        "expected_video_count": expected_count,
+        "import_warnings": import_warnings,
         "videos": videos,
     }
     store.register_import(manifest)

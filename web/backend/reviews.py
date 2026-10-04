@@ -34,6 +34,11 @@ def collect_review(store, project_id: str, video: dict) -> dict:
     paths = review_paths(video)
     index = review_index(paths["tracks"], paths["video_meta"], paths["quality"])
     evidence = load_json(paths["evidence"])
+    cache = store.output_root / project_id / 'evidence' / video['video_id']
+    cached = load_json(cache / 'index.json')
+    evidence_origin = 'artifacts'
+    if cached and cached.get('fingerprint') == index['fingerprint']:
+        evidence, evidence_origin = cached, 'cache'
     if evidence and evidence.get("fingerprint") == index["fingerprint"]:
         samples = {row["raw_track_id"]: row.get("samples", []) for row in evidence["tracks"]}
         for row in index["tracks"]:
@@ -46,6 +51,8 @@ def collect_review(store, project_id: str, video: dict) -> dict:
     metrics = evaluate_review(index, review,
                               paths["identity_map"] if paths["identity_map"].is_file() else None)
     return {"index": index, "review": review, "metrics": metrics,
+            "evidence_origin": evidence_origin, "evidence_job": load_json(cache / 'job.json'),
+            "evidence_available": bool(evidence and evidence.get('fingerprint') == index['fingerprint']),
             "stale_review": stale, "revision": saved.get("revision") if saved else None,
             "warning": "Review is a separate persistent sidecar. It does not alter tracks, archives or events."}
 

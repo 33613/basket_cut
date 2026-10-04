@@ -196,6 +196,25 @@ class DashboardSelfCheck(unittest.TestCase):
         )
         self.assertEqual(len(result["videos"]), 1)
 
+    def test_batch_manifest_limits_import_and_preserves_failure_counts(self) -> None:
+        write_json(self.run / 'batch_manifest.json', {
+            'clips': [{'name': '1_example(black)'}, {'name': 'missing-video'}]})
+        write_json(self.run / '1_example(black)/batch_status.json', {
+            'status': 'failed', 'error': 'synthetic failure'})
+        manifest = self.imported()
+        self.assertEqual(len(manifest['videos']), 1)  # Ignore old leftovers outside the fixed selection.
+        self.assertEqual(manifest['expected_video_count'], 2)
+        self.assertEqual(manifest['videos'][0]['status'], 'failed')
+        self.assertEqual(len(manifest['import_warnings']), 2)
+
+    def test_stale_jersey_group_not_attached_to_reassigned_archive(self) -> None:
+        video = self.imported()['videos'][0]
+        write_jsonl(Path(video['output_dir']) / 'identity/jersey_people.jsonl', [
+            {'person_id': 'P0000', 'raw_track_ids': [1], 'number': '15'}])
+        artifacts = collect_video_artifacts(video)
+        self.assertIsNone(artifacts['identity']['people'][0]['jersey'])
+        self.assertIn('stale jersey', artifacts['warnings'][0])
+
     def test_idempotent_and_no_original_writes(self) -> None:
         before = {str(p): p.read_bytes() for p in self.run.rglob("*") if p.is_file()}
         first = self.imported()
@@ -272,6 +291,43 @@ class DashboardSelfCheck(unittest.TestCase):
         ):
             prepare_browser_media(self.settings, self.imported())
 
+    def test_raw_and_resolved_archives_are_separate(self):
+        video = self.imported()['videos'][0]
+        output = Path(video['output_dir'])
+        write_jsonl(output / 'identity_raw/identities.jsonl', [
+            {'person_id': 'P0', 'raw_track_ids': [0]}, {'person_id': 'P1', 'raw_track_ids': [1]}])
+        result = collect_video_artifacts(video)['identity']
+        self.assertEqual(result['raw_count'], 2)
+        self.assertEqual(result['resolved_count'], 1)
+        self.assertEqual(result['reduction'], 1)
+        self.assertEqual(result['raw_media_prefix'], 'identity_raw')
+
+    def test_evidence_cache_does_not_write_original_results(self):
+        from web.backend.evidence import EvidenceJobs
+        from web.backend.reviews import collect_review
+        video = self.imported()['videos'][0]
+        project = self.imported()['project_id']
+        before = {str(p): p.read_bytes() for p in self.run.rglob('*') if p.is_file()}
+        jobs = EvidenceJobs(self.settings, self.store)
+        self.addCleanup(lambda: jobs.executor.shutdown(wait=True))
+        def fake(command, **kwargs):
+            destination = Path(command[command.index('--output-dir') + 1])
+            from analysis.evaluation.track_review import review_index
+            from web.backend.reviews import review_paths
+            paths = review_paths(video)
+            index = review_index(paths['tracks'], paths['video_meta'])
+            write_json(destination / 'index.json', index)
+            from subprocess import CompletedProcess
+            return CompletedProcess(command, 0)
+        with patch('web.backend.evidence.subprocess.run', side_effect=fake):
+            jobs.submit(project, video)
+            jobs.futures[(project, video['video_id'])].result(timeout=5)
+        result = collect_review(self.store, project, video)
+        self.assertTrue(result['evidence_available'])
+        self.assertEqual(result['evidence_origin'], 'cache')
+        self.assertEqual(result['evidence_job']['status'], 'completed')
+        self.assertEqual(before, {str(p): p.read_bytes() for p in self.run.rglob('*') if p.is_file()})
+
     def test_merged_archive_without_events_stays_in_project_index(self) -> None:
         from web.backend.artifacts import project_people_index
         manifest = self.imported()
@@ -341,6 +397,9 @@ class DashboardSelfCheck(unittest.TestCase):
         self.assertLess(plan.index("aggregate"), plan.index("render"))
         self.assertLess(plan.index("quality"), plan.index("identity"))
         self.assertLess(plan.index("resolution"), plan.index("link"))
+        numbered = runner._plan('full', paths, True, jersey=True)
+        self.assertLess(numbered.index('resolution'), numbered.index('jersey'))
+        self.assertLess(numbered.index('jersey'), numbered.index('action'))
         command = runner._command("resolution", paths, {})
         self.assertNotIn("--max-distance", command)
         self.assertIn(

@@ -4,6 +4,8 @@ const state = {
   videoId: null,
   detail: null,
   activeTab: "events",
+  identityView: "resolved",
+  configuration: null,
   videoView: "source",
   rawKind: "tracks",
   pollTimer: null,
@@ -76,6 +78,7 @@ async function api(url, options = {}) {
 async function bootstrap() {
   bindEvents();
   try {
+    state.configuration = await api('/api/configuration');
     const health = await api("/api/health");
     const ready = health.configuration?.ready;
     $("#systemState").classList.add(ready ? "ready" : "error");
@@ -96,6 +99,11 @@ async function bootstrap() {
     await createProject("篮球视频实验");
   }
   startPolling();
+  $('#systemState').addEventListener('click', () => {
+    const config = state.configuration.settings;
+    const missing = Object.entries(state.configuration.readiness.paths).filter(([, v]) => !v.exists).map(([key, v]) => `${key}: ${v.path}`).join('\n');
+    alert(`实验索引目录：${config.output_root}\n允许导入：${config.import_root}\n原视频根目录：${config.source_root}\n复核截图 Python：${config.review_python}\n\n缺失配置：\n${missing || '无'}\n\n模型路径不完整不妨碍浏览已有结果。记录持久保存在索引目录，重启需读取同一目录。`);
+  });
 }
 
 function bindEvents() {
@@ -231,6 +239,11 @@ async function selectProject(projectId, preserveVideo = false) {
     renderProjects();
     renderClipStrip();
     renderCrossClipIndex();
+    const importWarnings = state.project.import_warnings || [];
+    $('#importWarnings').classList.toggle('hidden', importWarnings.length === 0);
+    $('#importWarnings').textContent = importWarnings.length
+      ? `本批次计划 ${state.project.expected_video_count ?? '未知'} 条，当前可浏览 ${state.project.videos.length} 条。${importWarnings.join('；')}`
+      : '';
     const videos = state.project.videos || [];
     $("#workspace").classList.toggle("hidden", videos.length === 0);
     if (videos.length) {
@@ -341,6 +354,7 @@ function stageName(stage) {
     quality: "正在检查轨迹质量",
     identity: "正在提取身份特征",
     resolution: "正在归并人物档案",
+    jersey: '正在读取号码候选',
     action: "正在识别动作",
     link: "正在连接人物事件",
     aggregate: "正在聚合事件区间",
@@ -364,7 +378,7 @@ function renderMetrics(artifacts) {
   const quality = artifacts.tracking.quality;
   const metrics = [
     ["人物轨迹", quality ? `${quality.raw_track_count} → ${quality.retained_track_count}` : tracking.track_count ?? "—", quality ? "原始 → 有时序支持的轨迹（非准确率）" : "原始 track ID 数量"],
-    ["身份档案", identity.identity_count ?? identity.selected_track_count ?? "—", "片段内档案，不等于真人数"],
+    ["身份档案", `${artifacts.identity.raw_count ?? '—'} → ${artifacts.identity.resolved_count}`, "KPR 原始 → 归并档案（不等于真人数）"],
     ["事件区间", artifacts.available.events ? actions.event_count : "—", "聚合结果，不包含低分候选"],
     ["处理帧数", frames ?? "—", "来源视频帧数"],
   ];
@@ -462,7 +476,7 @@ function renderTracking() {
   const rows = summary.tracks
     .map((track) => `
       <tr>
-        <td><strong>T${escapeHtml(track.track_id)}</strong></td>
+        <td><strong>T${escapeHtml(track.track_id)}</strong><button class="ghost-button track-review-link" data-track="${escapeHtml(track.track_id)}">复核此轨迹</button></td>
         <td>${escapeHtml(track.status || "raw")}<small>${escapeHtml((track.reasons || []).join(", "))}</small></td>
         <td>${escapeHtml(track.start_frame)} – ${escapeHtml(track.end_frame)}</td>
         <td>${escapeHtml(track.observations)}</td>
@@ -476,20 +490,43 @@ function renderTracking() {
       <thead><tr><th>RAW ID</th><th>QUALITY</th><th>FRAME SPAN</th><th>OBSERVATIONS</th><th>DURATION</th><th>COVERAGE</th><th>MEAN DET</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+  $$('.track-review-link').forEach(button => button.addEventListener('click', () => openTrackReview(Number(button.dataset.track))));
+}
+
+async function openTrackReview(tid) {
+  setTab('review');
+  if (state.activeTab !== 'review') return;
+  await renderReview();
+  document.querySelector(`.review-card[data-track="${tid}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+
+function jerseyBadge(person) {
+  const jersey = person.jersey;
+  if (person.identity_label) return `<p class="jersey-badge">人工标签：${escapeHtml(person.identity_label)}</p>`;
+  if (!jersey) return '<p class="archive-warning">号码未运行 / 无证据</p>';
+  const text = jersey.number != null ? `号码候选 #${jersey.number} · 未人工确认` : jersey.status === 'conflict' ? '号码读数冲突 · 不能作为身份' : '号码不确定 / 不可读';
+  const evidence = (jersey.candidates || []).map(candidate => `<div><strong>#${escapeHtml(candidate.number)}</strong> · ${candidate.support_frames} 个独立帧 · raw_score ${Number(candidate.mean_raw_score).toFixed(3)}<div class="exemplar-strip">${candidate.evidence.map(row => row.crop_url ? `<a href="${escapeHtml(row.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(row.crop_url)}" alt="号码证据帧 ${row.frame_idx}" loading="lazy" /></a>` : '').join('')}</div></div>`).join('');
+  return `<p class="jersey-badge ${jersey.status === 'conflict' ? 'error-text' : ''}">${escapeHtml(text)}</p>${evidence ? `<details><summary>号码识别证据</summary>${evidence}</details>` : ''}`;
 }
 
 function renderIdentity() {
-  const people = state.detail.artifacts.identity.people || [];
+  const identity = state.detail.artifacts.identity;
+  const raw = state.identityView === 'raw';
+  const people = raw ? identity.raw_people || [] : identity.people || [];
+  const rawTracks = state.detail.artifacts.tracking.quality?.raw_track_count ?? state.detail.artifacts.tracking.summary?.track_count ?? '—';
+  const retained = state.detail.artifacts.tracking.quality?.retained_track_count ?? '未检查';
+  const toolbar = `<div class="archive-comparison"><div><h3>轨迹 → 身份档案 → 归并档案</h3><p>原始轨迹 ${rawTracks} · 质量保留 ${retained} · KPR 原始档案 ${identity.raw_count ?? '旧结果未保留'} · 归并后 ${identity.resolved_count} · 归并减少 ${identity.reduction ?? '未知'}。数量减少不是正确率；没有设置归并距离或人工确认时可能不减少。</p></div><div class="archive-switch"><button class="${raw ? 'active' : ''}" data-archive-view="raw">原始身份档案</button><button class="${raw ? '' : 'active'}" data-archive-view="resolved">归并后人物档案</button></div></div>`;
   if (!people.length) {
-    $("#tabContent").innerHTML = emptyState("还没有人物档案", "KPR 完成后会展示封面、代表帧和轨迹内一致性。这里不会自动虚构球员姓名。");
+    $("#tabContent").innerHTML = toolbar + emptyState("还没有这一类档案", raw ? "旧结果可能没有保留 identity_raw。不会把归并后的档案假装成原始档案。" : "请先运行 KPR 与人物归并。");
+    bindArchiveSwitch();
     return;
   }
-  $("#tabContent").innerHTML = `<div class="identity-grid">${people
+  $("#tabContent").innerHTML = toolbar + `<div class="identity-grid">${people
     .map((person) => {
       const cover = person.cover || {};
-      const events = state.detail.artifacts.action.index.people.find((p) => p.person_id === person.person_id)?.event_count || 0;
+      const events = raw ? null : state.detail.artifacts.action.index.people.find((p) => p.person_id === person.person_id)?.event_count || 0;
       const status = {human_confirmed: "人工确认归并", auto_merged: "模型候选归并 · 待验证", needs_review: "有风险 · 需复核", unresolved: "未确认身份", unlabeled: "未确认身份"}[person.status] || person.status;
-      const audit = state.detail.artifacts.evaluation.track_review?.archives?.groups.find((group) => group.person_id === person.person_id);
+      const audit = raw ? null : state.detail.artifacts.evaluation.track_review?.archives?.groups.find((group) => group.person_id === person.person_id);
       const auditText = audit ? {conflict: "复核发现混人 / 错误归并，不能作为真人档案使用", consistent: "当前来源轨迹完整复核一致（不是独立模型准确率）", unverified: "仍有来源轨迹未完整复核"}[audit.status] : "尚无真人一致性复核";
       const image = cover.crop_url
         ? `<img src="${escapeHtml(cover.crop_url)}" alt="${escapeHtml(person.person_id)}" loading="lazy" />`
@@ -498,21 +535,30 @@ function renderIdentity() {
         <div class="identity-image">${image}</div>
         <div class="identity-body">
           <div class="identity-head"><strong>${escapeHtml(person.person_id)}</strong><span>TRACK ${escapeHtml(person.raw_track_ids?.join(", "))}</span></div>
-          ${person.identity_label ? `<p>${escapeHtml(person.identity_label)}</p>` : ""}
-          <div class="identity-stats"><span>${escapeHtml(status)}</span><span>${events} 个事件区间</span><span>${person.raw_track_ids?.length || 1} 条来源轨迹</span></div>
+          ${jerseyBadge(person)}
+          <div class="identity-stats"><span>${escapeHtml(status)}</span><span>${raw ? '原始单轨迹档案' : events + ' 个事件区间'}</span><span>${person.raw_track_ids?.length || 1} 条来源轨迹</span></div>
           <div class="identity-stats"><span>${escapeHtml(person.sample_count)} samples</span><span>${escapeHtml(person.observation_count)} observations</span></div>
           <p class="archive-warning">封面来自 T${escapeHtml(person.representative_raw_track_id ?? cover.raw_track_id ?? person.raw_track_ids?.[0])}，不能证明整份档案始终同人。</p>
           <p class="archive-warning ${audit?.status === "conflict" ? "error-text" : ""}">${escapeHtml(auditText)}</p>
           <div class="exemplar-strip">${(person.exemplars || []).map((item) => item.crop_url ? `<img src="${escapeHtml(item.crop_url)}" alt="T${escapeHtml(item.raw_track_id)} 帧 ${escapeHtml(item.frame_idx)}" title="T${escapeHtml(item.raw_track_id)} / frame ${escapeHtml(item.frame_idx)}" loading="lazy" />` : "").join("")}</div>
-          <details class="archive-sources"><summary>逐条查看来源轨迹 (${person.raw_track_ids?.length || 1})</summary>${(person.source_tracks || []).map((source) => `<div class="archive-source">${source.cover?.crop_url ? `<a href="${escapeHtml(source.cover.context_url || source.cover.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(source.cover.crop_url)}" alt="T${escapeHtml(source.raw_track_id)}" loading="lazy" /></a>` : ""}<div><strong>T${escapeHtml(source.raw_track_id)}</strong><small>${formatTime(source.start)} → ${formatTime(source.end)} · ${escapeHtml(source.observation_count)} 次观测</small><small>${escapeHtml((source.review_reasons || []).join(" / ") || (source.status === "human_confirmed" || audit?.status === "consistent" ? "已人工确认来源同人" : "未人工验证"))}</small></div></div>`).join("") || '<p class="archive-warning">旧档案缺少来源证据，请重跑归并阶段；不会虚构归并后的平均距离。</p>'}</details>
-          <button class="ghost-button person-events-button" data-person="${escapeHtml(person.person_id)}">查看这个档案的事件 →</button>
+          ${raw ? `<p class="archive-warning">轨迹内平均 KPR 距离：${person.within_track?.mean_distance == null ? '无足够采样' : Number(person.within_track.mean_distance).toFixed(3)}。距离不是同人概率，须查看不同时间的观测。</p>` : `<details class="archive-sources"><summary>逐条查看来源轨迹 (${person.raw_track_ids?.length || 1})</summary>${(person.source_tracks || []).map((source) => `<div class="archive-source">${source.cover?.crop_url ? `<a href="${escapeHtml(source.cover.context_url || source.cover.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(source.cover.crop_url)}" alt="T${escapeHtml(source.raw_track_id)}" loading="lazy" /></a>` : ""}<div><strong>T${escapeHtml(source.raw_track_id)}</strong><small>${formatTime(source.start)} → ${formatTime(source.end)} · ${escapeHtml(source.observation_count)} 次观测</small><small>${escapeHtml((source.review_reasons || []).join(" / ") || (source.status === "human_confirmed" || audit?.status === "consistent" ? "已人工确认来源同人" : "未人工验证"))}</small></div></div>`).join("") || '<p class="archive-warning">旧档案缺少来源证据，请重跑归并阶段；不会虚构归并后的平均距离。</p>'}</details>`}
+          ${raw ? `<button class="ghost-button raw-review-link" data-track="${person.raw_track_ids?.[0]}">复核原始轨迹 T${person.raw_track_ids?.[0]} →</button>` : `<button class="ghost-button person-events-button" data-person="${escapeHtml(person.person_id)}">查看这个档案的事件 →</button>`}
         </div>
       </article>`;
     })
     .join("")}</div>`;
+  bindArchiveSwitch();
+  $$('.raw-review-link').forEach(button => button.addEventListener('click', () => openTrackReview(Number(button.dataset.track))));
   $$(".person-events-button").forEach((button) => button.addEventListener("click", () => {
     state.personFilter = button.dataset.person;
     setTab("events");
+  }));
+}
+
+function bindArchiveSwitch() {
+  $$('[data-archive-view]').forEach(button => button.addEventListener('click', () => {
+    state.identityView = button.dataset.archiveView;
+    renderIdentity();
   }));
 }
 
@@ -521,7 +567,7 @@ function reviewSummary(metrics) {
   const fragments = metrics.fragmentation;
   const stableName = metrics.quality_available === false ? "未加载质量报告（同原始范围）" : "质量过滤后";
   const percent = (value) => value == null ? "尚无分母" : `${(value * 100).toFixed(1)}%`;
-  return `完整复核：${full.assessed_tracks}/${full.total_tracks} 条（${percent(full.review_coverage)}）。原始球员轨迹同人率 ${full.pure}/${full.player_tracks_assessed}（${percent(full.pure_track_rate)}），混人 ${full.mixed} 条，非球员 ${full.non_player} 条。\n${stableName}：完整复核 ${stable.assessed_tracks}/${stable.total_tracks} 条，同人率 ${stable.pure}/${stable.player_tracks_assessed}（${percent(stable.pure_track_rate)}），混人 ${stable.mixed} 条。\n仅抽样：同人候选 ${sampled.pure}，已发现混人 ${sampled.mixed}；不能据此声称全轨迹正确。\n身份已标注的完整同人轨迹：${fragments.labeled_pure_tracks} 条 / ${fragments.reviewed_people} 人；多 ID 人物 ${fragments.people_with_multiple_track_ids} 人，额外 ID ${fragments.extra_track_ids} → 当前处理范围 ${fragments.retained_extra_track_ids} 个。未标注、混人、未检出的人不在碎片统计内。`;
+  return `完整复核：${full.assessed_tracks}/${full.total_tracks} 条（${percent(full.review_coverage)}）。原始球员轨迹同人率 ${full.pure}/${full.player_tracks_assessed}（${percent(full.pure_track_rate)}），混人 ${full.mixed} 条，非球员 ${full.non_player} 条。\n${stableName}：完整复核 ${stable.assessed_tracks}/${stable.total_tracks} 条，同人率 ${stable.pure}/${stable.player_tracks_assessed}（${percent(stable.pure_track_rate)}），混人 ${stable.mixed} 条。\n仅抽样：同人候选 ${sampled.pure}，已发现混人 ${sampled.mixed}；不能据此声称全轨迹正确。\n身份已标注的完整同人轨迹：${fragments.labeled_pure_tracks} 条 / ${fragments.reviewed_people} 人；多 ID 人物 ${fragments.people_with_multiple_track_ids} 人，额外 ID ${fragments.extra_track_ids} → 当前处理范围 ${fragments.retained_extra_track_ids} 个。未标注、混人、未检出的人不在碎片统计内。\n归并 F1（仅已完整复核、标注身份的纯轨迹对）：${metrics.identity_pairs?.f1 == null ? "尚无有效分母" : (metrics.identity_pairs.f1 * 100).toFixed(1) + "%"}，错并 ${metrics.identity_pairs?.fp ?? 0} 对，漏并 ${metrics.identity_pairs?.fn ?? 0} 对。人工修正后使用同一标签复测不算独立准确率。`;
 }
 
 async function renderReview() {
@@ -534,14 +580,18 @@ async function renderReview() {
       if (request !== state.reviewRequest || projectId !== state.project?.project_id || videoId !== state.videoId) return;
       state.reviewData = data;
     } catch (error) {
-      if (request === state.reviewRequest && state.activeTab === "review") $("#tabContent").innerHTML = emptyState("复核暂不可用", error.message);
+      if (request === state.reviewRequest && state.activeTab === "review") {
+        $("#tabContent").innerHTML = emptyState("复核数据读取失败", `${error.message}。若提示质量报告不覆盖原始轨迹，请导入未过滤的原始基线，不能用旧过滤副本冒充完整评估。点击右上角查看实际索引和资源目录。`) + '<button class="control-button" id="retryReview">重试加载</button>';
+        $('#retryReview').addEventListener('click', () => { state.reviewData = null; renderReview(); });
+      }
       return;
     }
   }
   if (state.activeTab !== "review") return;
   const data = state.reviewData, byId = Object.fromEntries(data.review.tracks.map((row) => [row.raw_track_id, row]));
   const options = [["unreviewed", "未复核"], ["pure", "同一人"], ["mixed", "混人 / 中途换人"], ["non_player", "非球员 / 误检"], ["uncertain", "看不清 / 不确定"]];
-  $("#tabContent").innerHTML = `<div class="review-toolbar"><div><h3>原始轨迹复核 · 包括已过滤的碎片</h3><p>点“播放区间”查看整条轨迹。只看几张图请保持“仅抽样”。同人轨迹填写相同的队伍＋号码，才可统计同人多 ID；混人轨迹不要整条归给某个号码。</p></div><button class="control-button" id="saveReviewButton">保存复核</button><a class="ghost-button" id="mergeReviewDownload" href="/api/projects/${projectId}/videos/${videoId}/merge-review">导出确认归并 ↓</a></div>
+  $("#tabContent").innerHTML = `<div class="review-toolbar"><div><h3>原始轨迹复核 · 包括已过滤的碎片</h3><p>点“播放区间”查看整条轨迹。只看几张图请保持“仅抽样”。同人轨迹填写相同的队伍＋号码，才可统计同人多 ID；混人轨迹不要整条归给某个号码。</p></div><button class="control-button" id="saveReviewButton">保存复核</button><button class="ghost-button" id="prepareEvidence">生成 / 更新时序截图（CPU）</button><a class="ghost-button" id="mergeReviewDownload" href="/api/projects/${projectId}/videos/${videoId}/merge-review">导出确认归并 ↓</a></div>
+    <div class="evaluation-note">截图状态：${escapeHtml(data.evidence_job?.status || (data.evidence_available ? '已有证据' : '尚未生成'))}。${escapeHtml(data.evidence_job?.error || '')} 无截图仍可播放原始轨迹；生成截图不重新跑模型，也不改变预测。</div>
     ${data.stale_review ? '<div class="evaluation-note error-text">原轨迹已变化，旧复核未计入。请重新核查并保存。</div>' : ""}
     <div class="evaluation-note" id="reviewMetrics">${escapeHtml(reviewSummary(data.metrics))}</div>
     <div class="review-grid">${data.index.tracks.map((track) => {
@@ -562,6 +612,29 @@ async function renderReview() {
   }));
   $$(".review-play").forEach((button) => button.addEventListener("click", () => playReviewTrack(button)));
   $("#saveReviewButton").addEventListener("click", saveTrackReview);
+  $('#prepareEvidence').addEventListener('click', prepareReviewEvidence);
+}
+
+async function prepareReviewEvidence() {
+  if (state.reviewDirty) { toast('请先保存复核', '生成截图不会修改预测，但刷新会丢失尚未保存的表单。', 'error'); return; }
+  const projectId = state.project.project_id, videoId = state.videoId;
+  $('#prepareEvidence').disabled = true;
+  try {
+    await api(`/api/projects/${projectId}/videos/${videoId}/review-evidence`, {method: 'POST', body: '{}'});
+    toast('截图任务已提交', '使用配置的复核 Python，在独立缓存中生成，不修改导入结果。');
+    const poll = async () => {
+      if (projectId !== state.project?.project_id || videoId !== state.videoId) return;
+      try {
+        const data = await api(`/api/projects/${projectId}/videos/${videoId}/track-review`);
+        if (projectId !== state.project?.project_id || videoId !== state.videoId) return;
+        if (!state.reviewDirty) { state.reviewData = data; if (state.activeTab === 'review') renderReview(); }
+        if (['queued', 'running'].includes(data.evidence_job?.status)) setTimeout(poll, 2000);
+        else toast(data.evidence_job?.status === 'completed' ? '时序截图已生成' : '截图生成失败', data.evidence_job?.error || '', data.evidence_job?.status === 'completed' ? '' : 'error');
+      } catch (error) { toast('截图状态读取失败', error.message, 'error'); }
+    };
+    setTimeout(poll, 1000);
+  } catch (error) { toast('无法生成截图', error.message, 'error'); }
+  finally { if (projectId === state.project?.project_id && videoId === state.videoId && $('#prepareEvidence')) $('#prepareEvidence').disabled = false; }
 }
 
 function clearReviewOverlay() {
@@ -726,7 +799,7 @@ function renderActionPoints() {
 }
 
 async function renderRaw() {
-  const kinds = ["events", "tracks", "quality", "quality_observations", "identities", "resolution", "actions", "linked_actions", "pairs", "samples", "sampling"];
+  const kinds = ["events", "tracks", "quality", "quality_observations", "raw_identities", "identities", "jersey_tracks", "jersey_people", "resolution", "actions", "linked_actions", "pairs", "samples", "sampling"];
   $("#tabContent").innerHTML = `
     <div class="raw-toolbar">${kinds.map((kind) => `<button data-kind="${kind}" class="${state.rawKind === kind ? "active" : ""}">${kind}</button>`).join("")}</div>
     <pre class="code-view">Loading ${escapeHtml(state.rawKind)}…</pre>`;
@@ -792,6 +865,8 @@ function runPayload(target) {
   return {
     target,
     force: $("#forceRun").checked,
+    jersey_ocr: $('#jerseyOcr').checked,
+    allow_ocr_download: $('#allowOcrDownload').checked,
     max_frames: maxFrames ? Number(maxFrames) : null,
     tracking_det_threshold: Number($("#trackingThreshold").value),
     identity_samples: Number($("#identitySamples").value),

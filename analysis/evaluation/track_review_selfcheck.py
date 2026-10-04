@@ -103,6 +103,20 @@ class TrackReviewChecks(unittest.TestCase):
         self.assertEqual(exported["assignments"], [{"raw_track_ids": [2], "identity_label": "white#15"}])
         self.assertEqual(exported["blocked_track_ids"], [3])
 
+    def test_identity_pair_f1_counts_false_merge_and_fragments(self):
+        review = self.review([(1, 'pure', 'full_track', 'white#15'),
+                              (2, 'pure', 'full_track', 'white#15'),
+                              (3, 'pure', 'full_track', 'black#8')])
+        mapping = self.root / 'identity_map.jsonl'
+        self.rows(mapping, [{'raw_track_id': tid, 'person_id': pid, 'video_id': 'clip'}
+                            for tid, pid in ((1, 'P1'), (2, 'P2'), (3, 'P1'))])
+        pairs = evaluate_review(self.index, review, mapping)['identity_pairs']
+        self.assertEqual((pairs['tp'], pairs['fp'], pairs['fn']), (0, 1, 1))
+        self.assertEqual(pairs['f1'], 0)
+        self.rows(mapping, [{'raw_track_id': tid, 'person_id': pid, 'video_id': 'clip'}
+                            for tid, pid in ((1, 'P1'), (2, 'P1'), (3, 'P3'))])
+        self.assertEqual(evaluate_review(self.index, review, mapping)['identity_pairs']['f1'], 1)
+
     def test_fingerprint_ignores_deployment_path_but_detects_boxes(self):
         meta = json.loads(self.meta.read_text()); meta["input_path"] = "runtime/clip.mp4"
         write_json(self.meta, meta)

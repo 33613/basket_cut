@@ -384,3 +384,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .event-row { grid-template-columns: 55px 1fr 70px; }
   .event-row > span:last-child { display: none; }
 }
+.archive-comparison { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px; margin-bottom: 22px; border: 1px solid #dce7ee; border-radius: 16px; background: #f3faf8; }
+.archive-comparison p { color: #536b7d; line-height: 1.7; max-width: 800px; }
+.archive-switch { display: flex; gap: 8px; flex-shrink: 0; }
+.archive-switch button { border: 1px solid #cbdde0; background: white; border-radius: 10px; padding: 12px; color: #344d5b; cursor: pointer; }
+.archive-switch button.active { background: #0d8d80; color: white; }
+.jersey-badge { padding: 8px 10px; background: #eaf7f3; border-radius: 8px; color: #166f62; font-weight: 650; }
+#systemState { cursor: pointer; }
+.track-review-link { display: block; margin-top: 5px; font-size: 11px; }
+@media (max-width: 1000px) { .archive-comparison { flex-direction: column; align-items: stretch; } .archive-switch { flex-wrap: wrap; } }

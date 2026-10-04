@@ -10,11 +10,15 @@ from pathlib import Path
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-dir", required=True, type=Path)
+    parser.add_argument('--env-file', type=Path)
     parser.add_argument("--name")
     parser.add_argument(
         "--prepare-media", action="store_true", help="CPU-only H.264 preview conversion"
     )
     args = parser.parse_args()
+    if args.env_file:
+        from cli.serve_web import load_environment
+        load_environment(args.env_file)
     from web.backend.imports import import_results, prepare_browser_media
     from web.backend.settings import WebSettings
     from web.backend.store import ProjectStore
