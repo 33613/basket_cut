@@ -568,6 +568,163 @@ class DashboardSelfCheck(unittest.TestCase):
                 self.assertEqual(response.status_code, 206)
                 self.assertEqual(response.content, b"2345")
 
+    def many_tracks(self, video: dict, count: int = 17) -> None:
+        output = Path(video['output_dir'])
+        base = json.loads((output / 'tracking/tracks.jsonl').read_text().splitlines()[0])
+        write_jsonl(output / 'tracking/tracks.jsonl', [{**base, 'track_id': tid} for tid in range(count)])
+
+    def test_review_page_limits_cards_without_promoting_unreviewed(self) -> None:
+        from web.backend.catalog import catalog, review_page
+        video = self.imported()['videos'][0]
+        self.many_tracks(video)
+        data = catalog.review(self.store, self.imported()['project_id'], video)
+        page = review_page(data, offset=6, limit=6)
+        self.assertEqual([track['raw_track_id'] for track in page['index']['tracks']], list(range(6, 12)))
+        self.assertEqual(page['pagination']['total'], 17)
+        self.assertEqual(page['review']['tracks'], [])
+        self.assertEqual(page['metrics']['scopes']['full_track']['raw']['assessed_tracks'], 0)
+
+    def test_partial_review_save_preserves_hidden_pages_and_revision(self) -> None:
+        from web.backend.reviews import collect_review, save_review
+        video = self.imported()['videos'][0]
+        project = self.imported()['project_id']
+        self.many_tracks(video)
+        data = collect_review(self.store, project, video)
+        first = {**data['review'], 'tracks': [{'raw_track_id': 0, 'verdict': 'pure', 'scope': 'full_track', 'identity_label': 'white#15'}]}
+        saved = save_review(self.store, project, video, first, None, partial=True)
+        next_page = {**data['review'], 'tracks': [{'raw_track_id': 12, 'verdict': 'uncertain', 'scope': 'full_track'}]}
+        second = save_review(self.store, project, video, next_page, saved['revision'], partial=True)
+        self.assertEqual([row['raw_track_id'] for row in second['review']['tracks']], [0, 12])
+        self.assertEqual(second['metrics']['scopes']['full_track']['raw']['assessed_tracks'], 1)
+        self.assertEqual(second['metrics']['scopes']['full_track']['raw']['uncertain'], 1)
+        with self.assertRaisesRegex(RuntimeError, 'another window'):
+            save_review(self.store, project, video, first, saved['revision'], partial=True)
+
+    def test_review_catalog_invalidates_after_save_and_changed_artifacts(self) -> None:
+        from web.backend.catalog import ReviewCatalog
+        from web.backend.reviews import save_review
+        video = self.imported()['videos'][0]
+        project = self.imported()['project_id']
+        index = ReviewCatalog(capacity=2)
+        original = index.review(self.store, project, video)
+        value = {**original['review'], 'tracks': [{'raw_track_id': 0, 'verdict': 'pure', 'scope': 'full_track'}]}
+        saved = save_review(self.store, project, video, value, None, partial=True)
+        self.assertEqual(index.review(self.store, project, video)['revision'], saved['revision'])
+        path = Path(video['output_dir']) / 'tracking/tracks.jsonl'
+        record = json.loads(path.read_text().splitlines()[0])
+        record['bbox_xyxy'] = [110, 100, 210, 300]
+        write_jsonl(path, [record])
+        changed = index.review(self.store, project, video)
+        self.assertTrue(changed['stale_review'])
+        self.assertEqual(changed['review']['tracks'], [])
+
+    def test_queue_uncertain_and_sampled_remain_incomplete(self) -> None:
+        from web.backend.catalog import video_catalog, next_review_video
+        from web.backend.reviews import collect_review, save_review
+        manifest = self.imported()
+        for number, video in enumerate(manifest['videos'][:3]):
+            data = collect_review(self.store, manifest['project_id'], video)
+            row = {'raw_track_id': 0, 'verdict': ['pure', 'pure', 'uncertain'][number],
+                   'scope': ['full_track', 'sampled', 'full_track'][number]}
+            save_review(self.store, manifest['project_id'], video, {**data['review'], 'tracks':[row]}, None)
+        result = video_catalog(self.store, manifest, limit=2)
+        self.assertEqual(len(result['items']), 2)
+        self.assertEqual(result['summary']['review_statuses']['complete'], 1)
+        self.assertEqual(result['summary']['full_assessed'], 1)
+        self.assertEqual(result['summary']['sampled_tracks'], 1)
+        self.assertEqual(result['summary']['uncertain_tracks'], 1)
+        self.assertEqual(result['summary']['remaining_tracks'], 4)
+        remaining = video_catalog(self.store, manifest, status='remaining', limit=20)
+        self.assertEqual(remaining['total'], 4)
+        self.assertEqual(next_review_video(self.store, manifest, manifest['videos'][0]['video_id'])['video_id'], manifest['videos'][1]['video_id'])
+        self.assertEqual(next_review_video(self.store, manifest, status='uncertain')['video_id'], manifest['videos'][2]['video_id'])
+        self.assertEqual(video_catalog(self.store, manifest, q='2_example')['total'], 1)
+
+    def test_queue_missing_results_not_counted_complete_and_empty_not_accurate(self) -> None:
+        from web.backend.catalog import video_catalog
+        manifest = self.imported()
+        manifest['expected_video_count'] = 7
+        output = Path(manifest['videos'][0]['output_dir'])
+        write_jsonl(output / 'tracking/tracks.jsonl', [])
+        write_jsonl(output / 'identity/identity_map.jsonl', [])
+        result = video_catalog(self.store, manifest)
+        self.assertEqual(result['summary']['missing_clips'], 2)
+        self.assertEqual(result['items'][0]['review_status'], 'empty')
+        self.assertNotIn('complete', result['summary']['review_statuses'])
+        self.assertEqual(video_catalog(self.store, manifest, status='failed')['total'], 1)
+
+    def test_unreviewed_saved_row_does_not_count_as_partial_judgment(self) -> None:
+        from web.backend.catalog import video_catalog
+        from web.backend.reviews import collect_review, save_review
+        manifest = self.imported()
+        video = manifest['videos'][0]
+        data = collect_review(self.store, manifest['project_id'], video)
+        save_review(self.store, manifest['project_id'], video, {**data['review'], 'tracks': [
+            {'raw_track_id': 0, 'verdict': 'unreviewed', 'scope': 'sampled', 'note': 'needs check'}]}, None)
+        self.assertEqual(video_catalog(self.store, manifest)['items'][0]['review_status'], 'unreviewed')
+
+    def test_hundred_clip_queue_is_paged_and_warm_cache_skips_track_rescan(self) -> None:
+        from web.backend.catalog import video_catalog, material_catalog
+        settings, run = make_fixture(Path(self.temporary.name) / 'hundred', count=100)
+        store = ProjectStore(settings.data_root, settings.output_root)
+        manifest = import_results(settings, store, run, 'Synthetic 100-clip check')
+        first = video_catalog(store, manifest)
+        self.assertEqual(len(first['items']), 12)
+        self.assertEqual(first['total'], 100)
+        self.assertEqual(first['summary']['available_clips'], 100)
+        self.assertEqual(first['summary']['full_assessed'], 0)
+        with patch('web.backend.catalog.collect_review', side_effect=AssertionError('warm queue must use cache')):
+            second = video_catalog(store, manifest, offset=96)
+        self.assertEqual(len(second['items']), 4)
+        self.assertNotEqual(first['items'][0]['video_id'], second['items'][0]['video_id'])
+        gallery = material_catalog(manifest)
+        self.assertEqual(len(gallery['items']), 18)
+        self.assertEqual(gallery['total'], 100)
+
+    def test_material_catalog_no_event_load_and_clip_local_scope(self) -> None:
+        from web.backend.catalog import material_catalog
+        manifest = self.imported()
+        output = Path(manifest['videos'][0]['output_dir'])
+        write_jsonl(output / 'identity_raw/identities.jsonl', [
+            {'person_id': 'R0000', 'raw_track_ids': [0], 'cover': {'crop_path':'cover.png'}}])
+        before = {str(path): path.read_bytes() for path in self.run.rglob('*') if path.is_file()}
+        with patch('web.backend.artifacts.temporal_event_index', side_effect=AssertionError('should not load events')):
+            result = material_catalog(manifest, limit=2)
+        self.assertEqual(len(result['items']), 2)
+        self.assertEqual(result['total'], 5)
+        self.assertEqual(result['identity_scope'], 'clip_local')
+        self.assertEqual(material_catalog(manifest, view='raw')['total'], 1)
+        self.assertEqual(material_catalog(manifest, q='1_example')['total'], 1)
+        self.assertEqual(before, {str(path): path.read_bytes() for path in self.run.rglob('*') if path.is_file()})
+
+    def test_http_paginated_review_patch_and_compact_project(self) -> None:
+        from fastapi.testclient import TestClient
+        from web.backend import app as module
+        manifest = self.imported()
+        video = manifest['videos'][0]
+        self.many_tracks(video)
+        runner = PipelineRunner(self.settings, self.store)
+        self.addCleanup(runner.shutdown)
+        with patch.object(module, 'store', self.store), patch.object(module, 'runner', runner), TestClient(module.app) as client:
+            project = f"/api/projects/{manifest['project_id']}"
+            base = project + '/videos/' + video['video_id']
+            with patch.object(module, 'project_people_index', side_effect=AssertionError('expensive project scan')):
+                self.assertNotIn('people_index', client.get(project + '?include_people=false').json())
+            queue = client.get(project + '/review-queue?limit=2')
+            self.assertEqual(queue.status_code, 200)
+            self.assertEqual(len(queue.json()['items']), 2)
+            self.assertEqual(client.get(project + '/materials?limit=2').json()['total'], 5)
+            page = client.get(base + '/track-review?offset=6&limit=6').json()
+            self.assertEqual(len(page['index']['tracks']), 6)
+            request = {'review': {**page['review'], 'tracks':[{'raw_track_id': 6, 'verdict':'pure', 'scope':'sampled'}]}, 'expected_revision':None}
+            saved = client.patch(base + '/track-review', json=request)
+            self.assertEqual(saved.status_code, 200)
+            self.assertNotIn('index', saved.json())
+            self.assertEqual(client.patch(base + '/track-review', json=request).status_code, 409)
+            self.assertEqual(client.get(base + '/track-review?status=remaining&limit=6').json()['pagination']['total'], 17)
+            self.assertEqual(client.get(project + '/review-queue?limit=1000').status_code, 422)
+            self.assertEqual(client.get(base + '/track-review?limit=25').status_code, 422)
+
 
 def main() -> None:
     result = unittest.TextTestRunner(verbosity=2).run(

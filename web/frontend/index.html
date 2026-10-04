@@ -53,9 +53,13 @@
       </aside>
 
       <main class="main-content">
+        <section class="inspection-intro hidden" id="inspectionIntro">
+          <div><span class="eyebrow">RESULT INSPECTION</span><h1>批量结果检查</h1><p>从待审视频进入，逐条核查轨迹与人物档案。保存后的复核记录可在下次继续。</p></div>
+          <button class="ghost-button" id="toggleImportButton" aria-expanded="false">导入另一批结果 ＋</button>
+        </section>
         <section class="upload-section panel" id="uploadSection">
           <div class="section-copy">
-            <span class="eyebrow">INPUT / SHORT CLIPS</span>
+            <span class="eyebrow">INPUT / VIDEO MATERIALS</span>
             <h1>让每个结果<br />都看得见。</h1>
             <p>检查人物轨迹、身份图片与事件时间区间。已有结果直接导入，不需要重新运行模型。</p>
           </div>
@@ -72,7 +76,7 @@
           </div>
         </section>
 
-        <section class="import-section panel" aria-label="导入已有结果">
+        <section class="import-section panel" id="importSection" aria-label="导入已有结果">
           <div><span class="eyebrow">EXISTING RESULTS</span><h3>导入已完成的实验</h3><p>只建立只读索引，不复制原视频，不修改原结果。</p></div>
           <form id="importForm">
             <label for="importPath">结果目录</label>
@@ -86,17 +90,26 @@
             <div class="strip-header">
               <div>
                 <span class="eyebrow">CLIP QUEUE</span>
-                <h3>视频片段</h3>
+                <h3>批量审查工作台</h3>
               </div>
               <div class="strip-actions">
                 <span class="scope-badge hidden" id="readOnlyBadge">已导入 · 只读</span>
                 <button class="ghost-button" id="batchRunButton">▶ 批量处理</button>
                 <button class="ghost-button" id="batchReviewButton">复核汇总</button>
+                <button class="control-button" id="nextReviewButton">下一个待复核 →</button>
                 <a class="ghost-button" id="reviewBundleDownload" href="#">导出复核 ↓</a>
                 <button class="ghost-button" id="addMoreButton">＋ 添加片段</button>
               </div>
             </div>
+            <div class="batch-progress" id="batchProgress" aria-live="polite"></div>
+            <div class="queue-controls">
+              <label class="search-field">搜索视频<input id="queueSearch" type="search" placeholder="输入文件名" maxlength="120" /></label>
+              <label>审查队列<select id="queueFilter"><option value="all">全部视频</option><option value="remaining">待完整复核</option><option value="risk">存在告警 / 混人</option><option value="uncertain">存在不确定轨迹</option><option value="complete">已完整复核</option><option value="failed">失败 / 零轨迹 / 无法复核</option></select></label>
+              <button class="ghost-button" id="refreshQueueButton">刷新队列</button>
+              <span class="queue-caveat">进度不是准确率；抽样、不确定仍需检查</span>
+            </div>
             <div id="clipStrip" class="clip-strip"></div>
+            <div class="pagination" id="queuePagination"></div>
             <div id="batchReviewSummary" class="evaluation-note hidden"></div>
           </div>
 
@@ -203,11 +216,13 @@
 
           <section class="project-index panel" id="projectIndex">
             <div class="panel-title">
-              <div><span class="eyebrow">CLIP ARCHIVES</span><h3>人物图片与事件索引</h3></div>
+              <div><span class="eyebrow">PERSON MATERIALS</span><h3>人物素材归档库</h3></div>
               <span class="scope-badge">CLIP-LOCAL IDs</span>
             </div>
             <p class="scope-warning">当前先汇总各片段的人物档案与事件；尚未校准的 KPR 距离不会被自动当成跨片段同一人。</p>
+            <div class="queue-controls"><label class="search-field">搜索素材<input id="materialSearch" type="search" maxlength="120" placeholder="视频名 / 档案 ID / 人工标签 / 号码候选" /></label><label>档案层级<select id="materialView"><option value="resolved">归并后人物档案</option><option value="raw">KPR 原始轨迹档案</option></select></label><span class="queue-caveat">点击图片检查来源；号码候选不是确认身份</span></div>
             <div id="crossClipGrid" class="cross-clip-grid"></div>
+            <div class="pagination" id="materialPagination"></div>
           </section>
         </section>
       </main>

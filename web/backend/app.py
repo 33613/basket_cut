@@ -30,6 +30,7 @@ from web.backend.reviews import review_paths
 from web.backend.artifacts import load_json
 from web.backend.settings import WebSettings
 from web.backend.store import ProjectStore, safe_slug
+from web.backend.catalog import catalog, material_catalog, next_review_video, review_page, video_catalog
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 settings = WebSettings()
@@ -225,14 +226,46 @@ def import_existing_results(request: ResultsImport) -> dict[str, Any]:
 
 
 @app.get("/api/projects/{project_id}")
-def project_detail(project_id: str) -> dict[str, Any]:
+def project_detail(project_id: str, include_people: bool = True) -> dict[str, Any]:
     try:
         manifest = store.get_project(project_id)
     except FileNotFoundError as exc:
         raise not_found(exc) from exc
     result = dict(manifest)
-    result["people_index"] = project_people_index(manifest)
+    if include_people:
+        result["people_index"] = project_people_index(manifest)
     return result
+
+
+@app.get('/api/projects/{project_id}/review-queue')
+def get_review_queue(project_id: str, offset: int = Query(default=0, ge=0),
+                     limit: int = Query(default=12, ge=1, le=50),
+                     status: Literal['all', 'remaining', 'complete', 'risk', 'uncertain', 'failed'] = 'all',
+                     q: str = Query(default='', max_length=120)) -> dict:
+    try:
+        return video_catalog(store, store.get_project(project_id), offset=offset, limit=limit, status=status, q=q)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+
+
+@app.get('/api/projects/{project_id}/next-review')
+def get_next_review(project_id: str, after: str | None = None,
+                    status: Literal['remaining', 'risk', 'uncertain'] = 'remaining',
+                    q: str = Query(default='', max_length=120)) -> dict:
+    try:
+        return next_review_video(store, store.get_project(project_id), after, q=q, status=status)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+
+
+@app.get('/api/projects/{project_id}/materials')
+def get_materials(project_id: str, offset: int = Query(default=0, ge=0),
+                  limit: int = Query(default=18, ge=1, le=50), view: Literal['raw', 'resolved'] = 'resolved',
+                  q: str = Query(default='', max_length=120)) -> dict:
+    try:
+        return material_catalog(store.get_project(project_id), offset=offset, limit=limit, view=view, q=q)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
 
 
 @app.get("/api/projects/{project_id}/track-reviews")
@@ -267,14 +300,37 @@ def decorate_review(project_id: str, video_id: str, result: dict) -> dict:
 
 
 @app.get("/api/projects/{project_id}/videos/{video_id}/track-review")
-def get_track_review(project_id: str, video_id: str) -> dict:
+def get_track_review(project_id: str, video_id: str, offset: int = Query(default=0, ge=0),
+                     limit: int | None = Query(default=None, ge=1, le=24),
+                     status: Literal['all', 'remaining', 'retained', 'filtered', 'risk', 'uncertain', 'full'] = 'all',
+                     q: str = Query(default='', max_length=120)) -> dict:
     video = get_video(project_id, video_id)
     if runner.is_active(project_id, video_id):
         raise HTTPException(status_code=409, detail="Wait for processing to finish before reviewing")
     try:
-        return decorate_review(project_id, video_id, collect_review(store, project_id, video))
+        data = catalog.review(store, project_id, video)
+        if isinstance(limit, int):
+            data = review_page(data, offset=offset, limit=limit, status=status, q=q)
+        return decorate_review(project_id, video_id, data)
     except FileNotFoundError as exc:
         raise not_found(exc) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch('/api/projects/{project_id}/videos/{video_id}/track-review')
+def patch_track_review(project_id: str, video_id: str, request: ReviewSave) -> dict:
+    video = get_video(project_id, video_id)
+    if runner.is_active(project_id, video_id):
+        raise HTTPException(status_code=409, detail='Cannot review a running clip')
+    try:
+        data = save_review(store, project_id, video, request.review, request.expected_revision, partial=True)
+        # A PATCH response stays compact even for long videos; the client reloads its visible page.
+        return {key: data[key] for key in ('metrics', 'revision', 'stale_review', 'warning')}
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

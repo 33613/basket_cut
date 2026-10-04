@@ -3,7 +3,7 @@ const state = {
   project: null,
   videoId: null,
   detail: null,
-  activeTab: "events",
+  activeTab: "identity",
   identityView: "resolved",
   configuration: null,
   videoView: "source",
@@ -18,10 +18,42 @@ const state = {
   reviewRequest: 0,
   overlayRequest: 0,
   overlayAnimation: null,
+  queue: null, queueOffset: 0, queueFilter: 'all', queueSearch: '', queueRequest: 0,
+  materialOffset: 0, materialView: 'resolved', materialSearch: '', materialRequest: 0,
+  reviewOffset: 0, reviewFilter: 'retained', reviewSearch: '', reviewDrafts: new Map(),
+  reviewBaseRevision: null, savingReview: false,
+  identityOffset: 0, identitySearch: '', trackingOffset: 0, eventOffset: 0,
 };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+
+function preferences() {
+  try { return JSON.parse(localStorage.getItem('courtvision.inspection.preferences') || '{}'); }
+  catch (_) { return {}; }
+}
+
+function rememberPosition() {
+  try { localStorage.setItem('courtvision.inspection.preferences', JSON.stringify({
+    projectId: state.project?.project_id, videoId: state.videoId, activeTab: state.activeTab,
+    queueOffset: state.queueOffset, queueFilter: state.queueFilter, queueSearch: state.queueSearch,
+    reviewOffset: state.reviewOffset, reviewSearch: state.reviewSearch,
+    reviewFilter: state.reviewFilter, identityView: state.identityView,
+  })); } catch (_) {}
+}
+
+function pager(id, offset, limit, total, change) {
+  const element = $(`#${id}`);
+  if (!element) return;
+  element.innerHTML = `<span>${total ? offset + 1 : 0}–${Math.min(total, offset + limit)} / ${total}</span><button data-page="prev" ${offset <= 0 ? 'disabled' : ''}>← 上一页</button><button data-page="next" ${offset + limit >= total ? 'disabled' : ''}>下一页 →</button>`;
+  element.querySelector('[data-page="prev"]').addEventListener('click', () => change(Math.max(0, offset - limit)));
+  element.querySelector('[data-page="next"]').addEventListener('click', () => change(offset + limit));
+}
+
+function debounce(handler, delay = 250) {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => handler(...args), delay); };
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -94,7 +126,20 @@ async function bootstrap() {
   }
   await loadProjects();
   if (state.projects.length) {
-    await selectProject(state.projects[0].project_id);
+    const prefs = preferences();
+    state.queueOffset = Math.max(0, Number(prefs.queueOffset) || 0);
+    state.queueFilter = ['all','remaining','complete','risk','uncertain','failed'].includes(prefs.queueFilter) ? prefs.queueFilter : 'all';
+    state.queueSearch = String(prefs.queueSearch || '').slice(0, 120);
+    state.reviewFilter = ['all','remaining','retained','filtered','risk','uncertain','full'].includes(prefs.reviewFilter) ? prefs.reviewFilter : 'retained';
+    state.identityView = prefs.identityView === 'raw' ? 'raw' : 'resolved';
+    const projectId = state.projects.some(p => p.project_id === prefs.projectId) ? prefs.projectId : state.projects[0].project_id;
+    await selectProject(projectId);
+    if (state.project?.videos.some(v => v.video_id === prefs.videoId)) await selectVideo(prefs.videoId, false);
+    if (state.videoId === prefs.videoId) {
+      state.reviewOffset = Math.max(0, Number(prefs.reviewOffset) || 0);
+      state.reviewSearch = String(prefs.reviewSearch || '').slice(0, 120);
+    }
+    if (['identity','review','tracking','events','points','raw','logs'].includes(prefs.activeTab)) setTab(prefs.activeTab);
   } else {
     await createProject("篮球视频实验");
   }
@@ -108,6 +153,11 @@ async function bootstrap() {
 
 function bindEvents() {
   const input = $("#fileInput");
+  $('#toggleImportButton').addEventListener('click', () => {
+    const hidden = $('#importSection').classList.toggle('hidden');
+    $('#toggleImportButton').setAttribute('aria-expanded', String(!hidden));
+    if (!hidden) $('#importPath').focus();
+  });
   $("#selectFilesButton").addEventListener("click", (event) => {
     event.stopPropagation();
     input.click();
@@ -134,6 +184,7 @@ function bindEvents() {
     uploadFiles([...event.dataTransfer.files]),
   );
   $("#newProjectButton").addEventListener("click", async () => {
+    if (state.savingReview) return;
     const name = window.prompt("给这次实验起一个名字", "篮球视频实验");
     if (name !== null) await createProject(name);
   });
@@ -143,6 +194,7 @@ function bindEvents() {
   $("#runFullButton").addEventListener("click", () => runCurrent("full"));
   $("#importForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (state.savingReview) return;
     const button = $("#importForm button");
     button.disabled = true;
     button.textContent = "正在建立索引…";
@@ -166,6 +218,12 @@ function bindEvents() {
   });
   $("#batchRunButton").addEventListener("click", batchRun);
   $("#batchReviewButton").addEventListener("click", loadBatchReview);
+  $('#nextReviewButton').addEventListener('click', nextReviewVideo);
+  $('#refreshQueueButton').addEventListener('click', () => { loadReviewQueue(); renderCrossClipIndex(); });
+  $('#queueFilter').addEventListener('change', event => { state.queueFilter = event.target.value; state.queueOffset = 0; loadReviewQueue(); });
+  $('#queueSearch').addEventListener('input', debounce(event => { state.queueSearch = event.target.value; state.queueOffset = 0; loadReviewQueue(); }));
+  $('#materialView').addEventListener('change', event => { state.materialView = event.target.value; state.materialOffset = 0; renderCrossClipIndex(); });
+  $('#materialSearch').addEventListener('input', debounce(event => { state.materialSearch = event.target.value; state.materialOffset = 0; renderCrossClipIndex(); }));
   window.addEventListener("beforeunload", (event) => {
     if (state.reviewDirty) { event.preventDefault(); event.returnValue = ""; }
   });
@@ -216,15 +274,17 @@ function renderProjects() {
 }
 
 async function selectProject(projectId, preserveVideo = false) {
+  if (state.savingReview) { toast('复核正在保存', '请等待保存完成后再切换实验。'); return; }
   if (state.reviewDirty && !window.confirm("复核尚未保存，确定放弃修改并切换吗？")) return;
   const request = ++state.projectRequest;
   try {
     const previousVideo = preserveVideo ? state.videoId : null;
-    const project = await api(`/api/projects/${projectId}`);
+    const project = await api(`/api/projects/${projectId}?include_people=false`);
     if (request !== state.projectRequest) return;
     state.project = project;
     state.reviewDirty = false;
     state.reviewData = null;
+    state.reviewDrafts.clear();
     state.detail = null;
     state.videoId = null;
     $("#batchReviewSummary").classList.add("hidden");
@@ -232,12 +292,19 @@ async function selectProject(projectId, preserveVideo = false) {
     if (!preserveVideo) state.videoView = state.project.read_only ? "final" : "source";
     const readOnly = Boolean(state.project.read_only);
     document.body.classList.toggle("inspection-mode", readOnly);
+    $('#uploadSection').classList.toggle('hidden', readOnly);
+    $('#inspectionIntro').classList.toggle('hidden', !readOnly);
+    $('#importSection').classList.toggle('hidden', readOnly);
+    $('#toggleImportButton').setAttribute('aria-expanded', 'false');
     $("#readOnlyBadge").classList.toggle("hidden", !readOnly);
     $("#batchRunButton").disabled = readOnly;
     $("#addMoreButton").disabled = readOnly;
     $("#projectTitle").textContent = state.project.name;
     renderProjects();
-    renderClipStrip();
+    state.queue = null;
+    $('#queueFilter').value = state.queueFilter;
+    $('#queueSearch').value = state.queueSearch;
+    await loadReviewQueue();
     renderCrossClipIndex();
     const importWarnings = state.project.import_warnings || [];
     $('#importWarnings').classList.toggle('hidden', importWarnings.length === 0);
@@ -249,7 +316,7 @@ async function selectProject(projectId, preserveVideo = false) {
     if (videos.length) {
       const selected = videos.some((item) => item.video_id === previousVideo)
         ? previousVideo
-        : videos[0].video_id;
+        : state.queue?.items?.[0]?.video_id || videos[0].video_id;
       await selectVideo(selected, false);
     } else {
       state.videoId = null;
@@ -261,46 +328,82 @@ async function selectProject(projectId, preserveVideo = false) {
 }
 
 function renderClipStrip() {
-  const videos = state.project?.videos || [];
+  const videos = state.queue?.items || [];
   $("#clipStrip").innerHTML = videos
     .map((video) => {
-      const stages = Object.values(video.stages || {});
-      const progress = stages
-        .map((stage) => `<i class="${escapeHtml(stage.status)} ${stage.status === "completed" ? "done" : ""}"></i>`)
-        .join("");
+      const label = {unreviewed:'未复核', partial:'部分已复核', complete:'完整复核已完成', uncertain:'不确定', stale:'旧复核已失效', unavailable:'无法复核', processing:'处理中', empty:'零轨迹 · 待核查漏检'}[video.review_status] || video.review_status;
       return `
         <button class="clip-card ${state.videoId === video.video_id ? "active" : ""}"
                 data-video-id="${escapeHtml(video.video_id)}">
           <div class="clip-card-top">
-            <span class="eyebrow">CLIP ${String(videos.indexOf(video) + 1).padStart(2, "0")}</span>
+            <span class="eyebrow">VIDEO ${String(video.ordinal).padStart(3, "0")}</span>
             <i class="mini-status ${escapeHtml(video.status)}"></i>
           </div>
           <strong title="${escapeHtml(video.filename)}">${escapeHtml(video.filename)}</strong>
-          <small>${formatBytes(video.size_bytes)} · ${escapeHtml(video.status.toUpperCase())}</small>
-          <div class="clip-progress">${progress}</div>
+          <small>${formatTime(video.duration_s)} · ${formatBytes(video.size_bytes)} · ${escapeHtml(String(video.status).toUpperCase())}</small>
+          <span class="review-chip ${escapeHtml(video.review_status)} ${video.mixed_tracks ? 'risk' : ''}">${escapeHtml(label)} · ${video.full_assessed}/${video.raw_tracks}</span>
+          <span class="queue-detail">保留 ${video.retained_tracks} · 待完整检查 ${video.remaining_tracks} · 抽样 ${video.sampled_tracks} · 不确定 ${video.uncertain_tracks}<br />告警 ${video.risk_tracks} · 混人 ${video.mixed_tracks} · 档案 ${video.raw_archives ?? '—'} → ${video.resolved_archives}</span>
         </button>`;
     })
     .join("");
+  if (!videos.length) $('#clipStrip').innerHTML = emptyState('没有符合条件的视频', '清除搜索或切换审查队列。');
   $$(".clip-card").forEach((button) =>
     button.addEventListener("click", () => selectVideo(button.dataset.videoId)),
   );
+  if (state.queue) pager('queuePagination', state.queue.offset, state.queue.limit, state.queue.total, offset => { state.queueOffset = offset; loadReviewQueue(); });
+}
+
+async function loadReviewQueue() {
+  if (!state.project) return;
+  const projectId = state.project.project_id, request = ++state.queueRequest;
+  try {
+    const query = new URLSearchParams({offset: state.queueOffset, limit: 12, status: state.queueFilter, q: state.queueSearch});
+    const data = await api(`/api/projects/${projectId}/review-queue?${query}`);
+    if (projectId !== state.project?.project_id || request !== state.queueRequest) return;
+    if (data.total && state.queueOffset >= data.total) { state.queueOffset = Math.floor((data.total - 1) / 12) * 12; return loadReviewQueue(); }
+    state.queue = data;
+    const summary = data.summary, statuses = summary.review_statuses;
+    $('#batchProgress').innerHTML = [[`${statuses.complete || 0} / ${summary.expected_clips}`, '视频完整复核', `可浏览 ${summary.available_clips} · 缺失 ${summary.missing_clips}`], [summary.remaining_tracks, '轨迹待完整检查', `完整已判断 ${summary.full_assessed} / 原始 ${summary.raw_tracks}`], [summary.sampled_tracks, '仅抽样判断', '不能据此声明全轨迹同人'], [summary.uncertain_tracks, '不确定 · 不计正确', `发现混人 ${summary.mixed_tracks} 条`]].map(([value,label,note]) => `<div class="batch-stat"><strong>${value}</strong><span>${label}</span><small>${note}</small></div>`).join('');
+    renderClipStrip(); rememberPosition();
+  } catch (error) { if (projectId === state.project?.project_id) toast('审查队列加载失败', error.message, 'error'); }
+}
+
+async function nextReviewVideo() {
+  if (state.savingReview) return;
+  if (!state.project) return;
+  if (state.reviewDirty) { toast('请先保存复核', '使用“保存并下一条视频”可保存后继续。', 'error'); return; }
+  const projectId = state.project.project_id;
+  try {
+    const status = ['risk', 'uncertain'].includes(state.queueFilter) ? state.queueFilter : 'remaining';
+    const data = await api(`/api/projects/${projectId}/next-review?${new URLSearchParams({after:state.videoId || '', q:state.queueSearch, status})}`);
+    if (projectId !== state.project?.project_id) return;
+    if (!data.video_id) { toast('当前搜索 / 告警筛选范围没有待复核视频', '零轨迹、无法读取和失败视频仍需单独排查漏检或运行问题。'); return; }
+    await selectVideo(data.video_id, false); setTab('review');
+    $('#inspector').scrollIntoView({behavior:'smooth', block:'start'});
+  } catch (error) { toast('无法切换待复核视频', error.message, 'error'); }
 }
 
 async function selectVideo(videoId, resetTab = true) {
+  if (state.savingReview) { toast('复核正在保存', '请等待保存完成后再切换视频。'); return; }
   if (videoId !== state.videoId) {
     if (state.reviewDirty && !window.confirm("复核尚未保存，确定放弃修改并切换片段吗？")) return;
     state.personFilter = "";
     state.eventFilter = "";
     state.reviewData = null;
     state.reviewDirty = false;
+    state.reviewDrafts.clear();
+    state.reviewOffset = 0; state.reviewSearch = ''; state.reviewBaseRevision = null;
+    state.identityOffset = 0; state.identitySearch = ''; state.trackingOffset = 0; state.eventOffset = 0;
     state.detail = null;
     ++state.reviewRequest;
     clearReviewOverlay();
   }
   state.videoId = videoId;
-  if (resetTab) state.activeTab = "events";
+  if (resetTab) state.activeTab = "identity";
+  rememberPosition();
   renderClipStrip();
   await refreshCurrentVideo();
+  if (resetTab && state.videoId === videoId) $('#inspector').scrollIntoView({behavior:'smooth', block:'start'});
 }
 
 async function refreshCurrentVideo() {
@@ -377,7 +480,7 @@ function renderMetrics(artifacts) {
   const frames = artifacts.tracking.video_meta?.processed_frames;
   const quality = artifacts.tracking.quality;
   const metrics = [
-    ["人物轨迹", quality ? `${quality.raw_track_count} → ${quality.retained_track_count}` : tracking.track_count ?? "—", quality ? "原始 → 有时序支持的轨迹（非准确率）" : "原始 track ID 数量"],
+    ["人物轨迹", quality ? `${quality.raw_track_count ?? tracking.track_count ?? '—'} → ${quality.retained_track_count ?? '—'}` : tracking.track_count ?? "—", quality ? "原始 → 有时序支持的轨迹（非准确率）" : "原始 track ID 数量"],
     ["身份档案", `${artifacts.identity.raw_count ?? '—'} → ${artifacts.identity.resolved_count}`, "KPR 原始 → 归并档案（不等于真人数）"],
     ["事件区间", artifacts.available.events ? actions.event_count : "—", "聚合结果，不包含低分候选"],
     ["处理帧数", frames ?? "—", "来源视频帧数"],
@@ -436,12 +539,15 @@ function setVideoView(view, rerender = true) {
 }
 
 function setTab(tab) {
+  if (state.savingReview) return;
   if (state.reviewDirty && tab !== "review") {
     if (!window.confirm("请先保存复核。确定放弃未保存的修改吗？")) return;
     state.reviewDirty = false;
     state.reviewData = null;
+    state.reviewDrafts.clear();
   }
   state.activeTab = tab;
+  rememberPosition();
   $$("#tabs button").forEach((button) =>
     button.classList.toggle("active", button.dataset.tab === tab),
   );
@@ -473,7 +579,8 @@ function renderTracking() {
     $("#tabContent").innerHTML = emptyState("还没有轨迹结果", "先运行人物追踪模块，轨迹覆盖率和检测分数会出现在这里。");
     return;
   }
-  const rows = summary.tracks
+  if (state.trackingOffset >= summary.tracks.length) state.trackingOffset = 0;
+  const rows = summary.tracks.slice(state.trackingOffset, state.trackingOffset + 24)
     .map((track) => `
       <tr>
         <td><strong>T${escapeHtml(track.track_id)}</strong><button class="ghost-button track-review-link" data-track="${escapeHtml(track.track_id)}">复核此轨迹</button></td>
@@ -489,13 +596,15 @@ function renderTracking() {
     <table class="data-table">
       <thead><tr><th>RAW ID</th><th>QUALITY</th><th>FRAME SPAN</th><th>OBSERVATIONS</th><th>DURATION</th><th>COVERAGE</th><th>MEAN DET</th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`;
+    </table><div class="pagination" id="trackingPagination"></div>`;
+  pager('trackingPagination', state.trackingOffset, 24, summary.tracks.length, offset => { state.trackingOffset = offset; renderTracking(); });
   $$('.track-review-link').forEach(button => button.addEventListener('click', () => openTrackReview(Number(button.dataset.track))));
 }
 
 async function openTrackReview(tid) {
-  setTab('review');
-  if (state.activeTab !== 'review') return;
+  if (state.savingReview) return;
+  state.reviewFilter = 'all'; state.reviewSearch = `T${tid}`; state.reviewOffset = 0;
+  state.activeTab = 'review';
   await renderReview();
   document.querySelector(`.review-card[data-track="${tid}"]`)?.scrollIntoView({behavior: 'smooth', block: 'center'});
 }
@@ -512,10 +621,13 @@ function jerseyBadge(person) {
 function renderIdentity() {
   const identity = state.detail.artifacts.identity;
   const raw = state.identityView === 'raw';
-  const people = raw ? identity.raw_people || [] : identity.people || [];
+  const allPeople = raw ? identity.raw_people || [] : identity.people || [];
+  const selected = allPeople.filter(person => !state.identitySearch || `${person.person_id} ${person.identity_label || ''} ${person.raw_track_ids.join(' ')} ${person.jersey?.number ?? ''}`.toLowerCase().includes(state.identitySearch.toLowerCase()));
+  if (state.identityOffset >= selected.length) state.identityOffset = Math.max(0, Math.floor((selected.length - 1) / 12) * 12);
+  const people = selected.slice(state.identityOffset, state.identityOffset + 12);
   const rawTracks = state.detail.artifacts.tracking.quality?.raw_track_count ?? state.detail.artifacts.tracking.summary?.track_count ?? '—';
   const retained = state.detail.artifacts.tracking.quality?.retained_track_count ?? '未检查';
-  const toolbar = `<div class="archive-comparison"><div><h3>轨迹 → 身份档案 → 归并档案</h3><p>原始轨迹 ${rawTracks} · 质量保留 ${retained} · KPR 原始档案 ${identity.raw_count ?? '旧结果未保留'} · 归并后 ${identity.resolved_count} · 归并减少 ${identity.reduction ?? '未知'}。数量减少不是正确率；没有设置归并距离或人工确认时可能不减少。</p></div><div class="archive-switch"><button class="${raw ? 'active' : ''}" data-archive-view="raw">原始身份档案</button><button class="${raw ? '' : 'active'}" data-archive-view="resolved">归并后人物档案</button></div></div>`;
+  const toolbar = `<div class="archive-comparison"><div><h3>人物素材 · 保留每份档案的来源</h3><p>原始轨迹 ${rawTracks} · 质量保留 ${retained} · KPR 原始档案 ${identity.raw_count ?? '旧结果未保留'} → 归并后 ${identity.resolved_count}。数量减少不是正确率；未设置距离或人工确认时可能不减少。封面、时间范围和来源轨迹用于检查素材，不代表真人身份已确认。</p></div><div class="archive-switch"><button class="${raw ? 'active' : ''}" data-archive-view="raw">原始轨迹档案</button><button class="${raw ? '' : 'active'}" data-archive-view="resolved">人物素材档案</button></div></div><div class="queue-controls archive-view-controls"><label class="search-field">查找本视频档案<input id="identitySearch" type="search" value="${escapeHtml(state.identitySearch)}" placeholder="档案 ID / 原轨迹 / 标签 / 号码候选" /></label><span class="queue-caveat">每页 12 份；完整数据仍保留</span></div>`;
   if (!people.length) {
     $("#tabContent").innerHTML = toolbar + emptyState("还没有这一类档案", raw ? "旧结果可能没有保留 identity_raw。不会把归并后的档案假装成原始档案。" : "请先运行 KPR 与人物归并。");
     bindArchiveSwitch();
@@ -546,8 +658,9 @@ function renderIdentity() {
         </div>
       </article>`;
     })
-    .join("")}</div>`;
+    .join("")}</div><div class="pagination" id="identityPagination"></div>`;
   bindArchiveSwitch();
+  pager('identityPagination', state.identityOffset, 12, selected.length, offset => { state.identityOffset = offset; renderIdentity(); });
   $$('.raw-review-link').forEach(button => button.addEventListener('click', () => openTrackReview(Number(button.dataset.track))));
   $$(".person-events-button").forEach((button) => button.addEventListener("click", () => {
     state.personFilter = button.dataset.person;
@@ -556,8 +669,10 @@ function renderIdentity() {
 }
 
 function bindArchiveSwitch() {
+  $('#identitySearch')?.addEventListener('input', debounce(event => { state.identitySearch = event.target.value; state.identityOffset = 0; renderIdentity(); }));
   $$('[data-archive-view]').forEach(button => button.addEventListener('click', () => {
     state.identityView = button.dataset.archiveView;
+    state.identityOffset = 0; rememberPosition();
     renderIdentity();
   }));
 }
@@ -575,10 +690,17 @@ async function renderReview() {
   const request = ++state.reviewRequest;
   if (!state.reviewData) {
     $("#tabContent").innerHTML = emptyState("正在加载复核记录", "先看同一条轨迹的不同时间，再判断是否始终同人。");
+  }
     try {
-      const data = await api(`/api/projects/${projectId}/videos/${videoId}/track-review`);
+      const query = new URLSearchParams({offset:state.reviewOffset, limit:6, status:state.reviewFilter, q:state.reviewSearch});
+      const data = await api(`/api/projects/${projectId}/videos/${videoId}/track-review?${query}`);
       if (request !== state.reviewRequest || projectId !== state.project?.project_id || videoId !== state.videoId) return;
+      if (state.reviewDirty && state.reviewData?.index.fingerprint !== data.index.fingerprint) {
+        toast('原始轨迹已变化', '当前草稿未覆盖新结果。请先导出记录或放弃草稿后重新加载。', 'error'); return;
+      }
+      if (data.pagination.total && state.reviewOffset >= data.pagination.total) { state.reviewOffset = Math.floor((data.pagination.total - 1) / 6) * 6; return renderReview(); }
       state.reviewData = data;
+      if (!state.reviewDirty) state.reviewBaseRevision = data.revision;
     } catch (error) {
       if (request === state.reviewRequest && state.activeTab === "review") {
         $("#tabContent").innerHTML = emptyState("复核数据读取失败", `${error.message}。若提示质量报告不覆盖原始轨迹，请导入未过滤的原始基线，不能用旧过滤副本冒充完整评估。点击右上角查看实际索引和资源目录。`) + '<button class="control-button" id="retryReview">重试加载</button>';
@@ -586,14 +708,15 @@ async function renderReview() {
       }
       return;
     }
-  }
   if (state.activeTab !== "review") return;
   const data = state.reviewData, byId = Object.fromEntries(data.review.tracks.map((row) => [row.raw_track_id, row]));
+  for (const [tid, row] of state.reviewDrafts) byId[tid] = row;
   const options = [["unreviewed", "未复核"], ["pure", "同一人"], ["mixed", "混人 / 中途换人"], ["non_player", "非球员 / 误检"], ["uncertain", "看不清 / 不确定"]];
-  $("#tabContent").innerHTML = `<div class="review-toolbar"><div><h3>原始轨迹复核 · 包括已过滤的碎片</h3><p>点“播放区间”查看整条轨迹。只看几张图请保持“仅抽样”。同人轨迹填写相同的队伍＋号码，才可统计同人多 ID；混人轨迹不要整条归给某个号码。</p></div><button class="control-button" id="saveReviewButton">保存复核</button><button class="ghost-button" id="prepareEvidence">生成 / 更新时序截图（CPU）</button><a class="ghost-button" id="mergeReviewDownload" href="/api/projects/${projectId}/videos/${videoId}/merge-review">导出确认归并 ↓</a></div>
+  $("#tabContent").innerHTML = `<div class="review-toolbar"><div><h3>逐页复核 · 原始轨迹始终保留</h3><p>点“播放区间”查看整条轨迹。只看几张图请保持“仅抽样”。同人轨迹填写相同队伍＋号码；混人轨迹不要整条归给某个号码。分页和筛选不会丢失本视频草稿，也不会自动判断任何轨迹。</p></div><button class="control-button" id="saveReviewButton" ${state.savingReview ? 'disabled' : ''}>${state.reviewDirty ? '保存复核（未保存）' : '保存复核'}</button><button class="control-button" id="saveNextReviewButton" ${state.savingReview ? 'disabled' : ''}>保存并下一条视频 →</button><button class="ghost-button" id="prepareEvidence">生成 / 更新时序截图（CPU）</button><a class="ghost-button ${state.reviewDirty ? 'hidden' : ''}" id="mergeReviewDownload" href="/api/projects/${projectId}/videos/${videoId}/merge-review">导出确认归并 ↓</a></div>
     <div class="evaluation-note">截图状态：${escapeHtml(data.evidence_job?.status || (data.evidence_available ? '已有证据' : '尚未生成'))}。${escapeHtml(data.evidence_job?.error || '')} 无截图仍可播放原始轨迹；生成截图不重新跑模型，也不改变预测。</div>
     ${data.stale_review ? '<div class="evaluation-note error-text">原轨迹已变化，旧复核未计入。请重新核查并保存。</div>' : ""}
-    <div class="evaluation-note" id="reviewMetrics">${escapeHtml(reviewSummary(data.metrics))}</div>
+    <details class="review-summary-details"><summary>查看本视频复核统计及分母定义</summary><div class="evaluation-note" id="reviewMetrics">${escapeHtml(reviewSummary(data.metrics))}</div></details>
+    <div class="review-controls"><div class="queue-controls"><label>轨迹范围<select id="reviewFilter">${[['retained','质量保留轨迹'],['remaining','尚未完整判断'],['all','全部原始轨迹'],['filtered','已过滤碎片'],['risk','自动告警 / 已发现混人'],['uncertain','看不清 / 不确定'],['full','完整判断已完成']].map(([value,label]) => `<option value="${value}" ${state.reviewFilter === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label class="search-field">查找轨迹 / 身份<input id="reviewSearch" type="search" maxlength="120" value="${escapeHtml(state.reviewSearch)}" placeholder="T12 / 白队#15 / 备注" /></label><span class="queue-caveat">完整判断 ${data.metrics.scopes.full_track.raw.assessed_tracks}/${data.pagination.raw_total} · 当前筛选 ${data.pagination.total}</span></div><div class="draft-note" id="reviewDraftCount">${state.reviewDrafts.size ? `${state.reviewDrafts.size} 条修改尚未保存（包含其他页）` : '已保存的数据不会被当前分页覆盖'}</div><div class="pagination" id="reviewPagination"></div></div>
     <div class="review-grid">${data.index.tracks.map((track) => {
       const row = byId[track.raw_track_id] || {verdict: "unreviewed", scope: "sampled"};
       return `<article class="review-card" data-track="${track.raw_track_id}"><div class="review-heading"><strong>T${track.raw_track_id}</strong><span>${track.retained ? "保留" : "已过滤"} · ${track.observation_count} 次观测 · ${formatTime(track.start)} → ${formatTime(track.end)}</span><button class="ghost-button review-play" data-time="${track.start}" data-end="${track.end}">播放区间 ↗</button></div><p class="archive-warning">自动告警：${escapeHtml(track.quality_reasons.join(" / ") || "无告警不等于正确")}</p>
@@ -602,6 +725,7 @@ async function renderReview() {
     }).join("")}</div>`;
   $$(".review-card input, .review-card select").forEach((element) => element.addEventListener("input", () => {
     state.reviewDirty = true;
+    if (!state.reviewDrafts.size) state.reviewBaseRevision = data.revision;
     $("#saveReviewButton").textContent = "保存复核（未保存）";
     $("#mergeReviewDownload").classList.add("hidden");
     if (element.dataset.field === "verdict") {
@@ -609,13 +733,41 @@ async function renderReview() {
       label.disabled = element.value !== "pure";
       if (label.disabled) label.value = "";
     }
+    const card = element.closest('.review-card'), value = field => card.querySelector(`[data-field="${field}"]`).value;
+    const tid = Number(card.dataset.track);
+    state.reviewDrafts.set(tid, {raw_track_id:tid, verdict:value('verdict'), scope:value('scope'), identity_label:value('identity_label') || null, note:value('note')});
+    $('#reviewDraftCount').textContent = `${state.reviewDrafts.size} 条修改尚未保存（包含其他页）`;
   }));
   $$(".review-play").forEach((button) => button.addEventListener("click", () => playReviewTrack(button)));
   $("#saveReviewButton").addEventListener("click", saveTrackReview);
+  $('#saveNextReviewButton').addEventListener('click', async () => { if (await saveTrackReview()) await nextReviewVideo(); });
   $('#prepareEvidence').addEventListener('click', prepareReviewEvidence);
+  $('#reviewFilter').addEventListener('change', event => { state.reviewFilter = event.target.value; state.reviewOffset = 0; rememberPosition(); renderReview(); });
+  $('#reviewSearch').addEventListener('input', debounce(event => { state.reviewSearch = event.target.value; state.reviewOffset = 0; renderReview(); }));
+  pager('reviewPagination', data.pagination.offset, data.pagination.limit, data.pagination.total, offset => { state.reviewOffset = offset; renderReview(); });
+  rememberPosition();
+  syncReviewSaveLock();
+}
+
+function syncReviewSaveLock() {
+  // A page response can rebuild controls during a save. Reapply the lock to
+  // freshly rendered controls instead of only disabling the previous DOM.
+  const controls = $$('.review-card input, .review-card select, #reviewFilter, #reviewSearch, #reviewPagination button, #saveReviewButton, #saveNextReviewButton, #prepareEvidence');
+  for (const element of controls) {
+    if (state.savingReview) {
+      if (!element.hasAttribute('data-save-lock')) {
+        element.dataset.saveLock = element.disabled ? 'disabled' : 'enabled';
+      }
+      element.disabled = true;
+    } else if (element.hasAttribute('data-save-lock')) {
+      element.disabled = element.dataset.saveLock === 'disabled';
+      delete element.dataset.saveLock;
+    }
+  }
 }
 
 async function prepareReviewEvidence() {
+  if (state.savingReview) return;
   if (state.reviewDirty) { toast('请先保存复核', '生成截图不会修改预测，但刷新会丢失尚未保存的表单。', 'error'); return; }
   const projectId = state.project.project_id, videoId = state.videoId;
   $('#prepareEvidence').disabled = true;
@@ -625,7 +777,7 @@ async function prepareReviewEvidence() {
     const poll = async () => {
       if (projectId !== state.project?.project_id || videoId !== state.videoId) return;
       try {
-        const data = await api(`/api/projects/${projectId}/videos/${videoId}/track-review`);
+        const data = await api(`/api/projects/${projectId}/videos/${videoId}/track-review?limit=1`);
         if (projectId !== state.project?.project_id || videoId !== state.videoId) return;
         if (!state.reviewDirty) { state.reviewData = data; if (state.activeTab === 'review') renderReview(); }
         if (['queued', 'running'].includes(data.evidence_job?.status)) setTimeout(poll, 2000);
@@ -683,26 +835,36 @@ async function playReviewTrack(button) {
 }
 
 async function saveTrackReview() {
+  if (state.savingReview) return false;
+  if (!state.reviewDirty) return true;
   const projectId = state.project.project_id, videoId = state.videoId;
   const data = state.reviewData;
-  const tracks = $$(".review-card").map((card) => {
-    const value = (field) => card.querySelector(`[data-field="${field}"]`).value;
-    return {raw_track_id: Number(card.dataset.track), verdict: value("verdict"), scope: value("scope"), identity_label: value("identity_label") || null, note: value("note")};
-  });
-  $("#saveReviewButton").disabled = true;
-  $$(".review-card input, .review-card select").forEach((element) => { element.disabled = true; });
+  const tracks = [...state.reviewDrafts.values()].map(row => ({...row}));
+  const submitted = new Map(tracks.map(row => [row.raw_track_id, JSON.stringify(row)]));
+  state.savingReview = true;
+  syncReviewSaveLock();
   try {
-    const saved = await api(`/api/projects/${projectId}/videos/${videoId}/track-review`, {method: "PUT", body: JSON.stringify({expected_revision: data.revision, review: {...data.review, tracks}})});
+    const saved = await api(`/api/projects/${projectId}/videos/${videoId}/track-review`, {method: "PATCH", body: JSON.stringify({expected_revision: state.reviewBaseRevision, review: {...data.review, tracks}})});
     if (projectId !== state.project?.project_id || videoId !== state.videoId) return;
-    state.reviewData = saved;
-    state.reviewDirty = false;
+    state.reviewData = null;
+    // Never discard a draft which was not part of this exact request.
+    for (const [tid, value] of submitted) {
+      if (JSON.stringify(state.reviewDrafts.get(tid)) === value) state.reviewDrafts.delete(tid);
+    }
+    state.reviewBaseRevision = saved.revision;
+    state.reviewDirty = state.reviewDrafts.size > 0;
     state.detail.artifacts.evaluation.track_review = saved.metrics;
     toast("复核已保存", "刷新或重新打开仍保留；不会改变原模型结果。归并修正需要单独生成新结果。 ");
     await renderReview();
-  } catch (error) { toast("保存失败", error.message, "error"); }
+    await loadReviewQueue();
+    return true;
+  } catch (error) { toast("保存失败 · 草稿仍保留", `${error.message}。如果是另一窗口已保存，请刷新并核对冲突，不要覆盖。`, "error"); return false; }
   finally {
+    state.savingReview = false;
     if (projectId === state.project?.project_id && videoId === state.videoId && $("#saveReviewButton")) {
+      syncReviewSaveLock();
       $("#saveReviewButton").disabled = false;
+      $('#saveNextReviewButton').disabled = false;
       $$(".review-card input, .review-card select").forEach((element) => {
         element.disabled = element.dataset.field === "identity_label" && element.closest(".review-card").querySelector('[data-field="verdict"]').value !== "pure";
       });
@@ -740,10 +902,14 @@ function renderEvents() {
   const meta = state.detail.artifacts.tracking.video_meta || {};
   const duration = Math.max(Number(meta.processed_frames || 0) / Number(meta.fps || 1), 0.01);
   const people = allPeople.filter((person) => !state.personFilter || person.person_id === state.personFilter);
+  if (state.eventOffset >= filteredCount) state.eventOffset = Math.max(0, Math.floor((filteredCount - 1) / 60) * 60);
+  let before = 0;
   const sections = people.map((person) => {
     const events = person.events.filter((event) => !state.eventFilter || event.event === state.eventFilter);
     if (!events.length) return "";
-    const displayed = events.slice(0, 300);
+    const displayed = events.slice(Math.max(0, state.eventOffset - before), Math.max(0, state.eventOffset + 60 - before));
+    before += events.length;
+    if (!displayed.length) return '';
     const image = person.identity?.cover?.crop_url;
     return `<section class="interval-person">
       <div class="interval-person-heading">${image ? `<img class="event-avatar" src="${escapeHtml(image)}" alt="${escapeHtml(person.person_id)}" />` : ""}<div><strong>${escapeHtml(person.person_id)}</strong><small>${events.length} 个事件区间 · 原轨迹 ${escapeHtml(person.raw_track_ids.join(", "))}</small></div></div>
@@ -752,12 +918,13 @@ function renderEvents() {
         <div class="timeline-track"><span style="left:${Math.min(100, Math.max(0, Number(event.start) / duration * 100))}%;width:${Math.min(100, Math.max(0.5, (Number(event.end) - Number(event.start)) / duration * 100))}%"></span></div>
         <div class="interval-score"><strong>${Number(event.raw_score).toFixed(3)}</strong><small>${Number(event.support_count)} 个支持点 · ${(Number(event.end) - Number(event.start)).toFixed(2)}s</small></div><span>↗</span>
       </button>`).join("")}
-      ${events.length > displayed.length ? `<p class="scope-warning">只展示前 300 个；完整记录在原始数据与诊断包中。</p>` : ""}
     </section>`;
   }).join("");
-  $("#tabContent").innerHTML = filters + (sections || emptyState("没有符合条件的事件", index.event_count ? "清除筛选后再查看。" : "聚合文件存在但没有事件；这不代表视频中没有真实动作。"));
+  $("#tabContent").innerHTML = filters + (sections || emptyState("没有符合条件的事件", index.event_count ? "清除筛选后再查看。" : "聚合文件存在但没有事件；这不代表视频中没有真实动作。")) + '<div class="pagination" id="eventPagination"></div>';
+  pager('eventPagination', state.eventOffset, 60, filteredCount, offset => { state.eventOffset = offset; renderEvents(); });
   ["person", "event"].forEach((kind) => $(`#${kind}Filter`).addEventListener("change", (event) => {
     state[`${kind}Filter`] = event.target.value;
+    state.eventOffset = 0;
     renderEvents();
   }));
   $$(".interval-row").forEach((button) => button.addEventListener("click", () => {
@@ -836,28 +1003,34 @@ async function renderLogs() {
   }
 }
 
-function renderCrossClipIndex() {
-  const entries = state.project?.people_index?.entries || [];
-  if (!entries.length) {
-    $("#crossClipGrid").innerHTML = emptyState("等待身份与事件结果", "处理多个片段后，这里会形成跨片段浏览视图。");
-    return;
-  }
+async function renderCrossClipIndex() {
+  if (!state.project) return;
+  const projectId = state.project.project_id, request = ++state.materialRequest;
+  try {
+    const query = new URLSearchParams({offset:state.materialOffset,limit:18,view:state.materialView,q:state.materialSearch});
+    const data = await api(`/api/projects/${projectId}/materials?${query}`);
+    if (projectId !== state.project?.project_id || request !== state.materialRequest) return;
+    if (data.total && state.materialOffset >= data.total) { state.materialOffset = Math.floor((data.total - 1) / 18) * 18; return renderCrossClipIndex(); }
+    const entries = data.items;
   $("#crossClipGrid").innerHTML = entries
     .map((entry) => {
-      const crop = entry.identity?.cover?.crop_path;
+      const crop = entry.cover?.crop_path;
       const url = crop
-        ? `/api/projects/${state.project.project_id}/videos/${entry.video_id}/artifacts/identity/${crop}`
+        ? `/api/projects/${projectId}/videos/${entry.video_id}/artifacts/${entry.media_prefix}/${crop}`
         : null;
-      const topLabel = Object.keys(entry.labels || {})[0] || "no event";
-      return `<article class="cross-card" data-video-id="${escapeHtml(entry.video_id)}">
+      const label = entry.identity_label || (entry.jersey?.number != null ? `号码候选 #${entry.jersey.number}` : '身份尚未确认');
+      return `<button class="cross-card" data-video-id="${escapeHtml(entry.video_id)}" data-person="${escapeHtml(entry.person_id)}">
         ${url ? `<img src="${escapeHtml(url)}" alt="" loading="lazy" />` : `<div class="cross-placeholder">NO IMAGE</div>`}
-        <div><strong>${escapeHtml(entry.person_id || `T${entry.raw_track_ids?.[0]}`)}</strong><span title="${escapeHtml(entry.filename)}">${escapeHtml(entry.filename)}</span><b>${entry.event_count} events · ${escapeHtml(topLabel)}</b></div>
-      </article>`;
+        <div><strong>${escapeHtml(entry.person_id || `T${entry.raw_track_ids?.[0]}`)}</strong><span title="${escapeHtml(entry.filename)}">${escapeHtml(entry.filename)}</span><b>${escapeHtml(label)}</b><small>${entry.raw_track_ids?.length || 0} 条来源轨迹 · 本视频局部档案</small></div>
+      </button>`;
     })
     .join("");
+  if (!entries.length) $('#crossClipGrid').innerHTML = emptyState('尚无符合条件的人物素材', '检查身份模块结果或清除搜索；不需要事件识别才能归档人物素材。');
+  pager('materialPagination', data.offset, data.limit, data.total, offset => { state.materialOffset = offset; renderCrossClipIndex(); });
   $$(".cross-card").forEach((card) =>
-    card.addEventListener("click", () => selectVideo(card.dataset.videoId)),
+    card.addEventListener("click", async () => { await selectVideo(card.dataset.videoId, false); if (state.videoId !== card.dataset.videoId) return; state.identityView = state.materialView; state.identitySearch = card.dataset.person; state.identityOffset = 0; setTab('identity'); $('#inspector').scrollIntoView({behavior:'smooth',block:'start'}); }),
   );
+  } catch (error) { if (projectId === state.project?.project_id) toast('素材索引加载失败', error.message, 'error'); }
 }
 
 function runPayload(target) {
@@ -879,6 +1052,7 @@ function runPayload(target) {
 }
 
 async function runCurrent(target) {
+  if (state.savingReview) return;
   if (state.reviewDirty) { toast("请先保存复核", "处理前保存当前修改，避免轨迹重跑后旧复核失效。", "error"); return; }
   state.reviewData = null;
   if (!state.project || !state.videoId) return;
@@ -895,6 +1069,7 @@ async function runCurrent(target) {
 }
 
 async function batchRun() {
+  if (state.savingReview) return;
   if (state.reviewDirty) { toast("请先保存复核", "批量处理前保存当前修改。", "error"); return; }
   state.reviewData = null;
   const videos = state.project?.videos || [];
@@ -917,6 +1092,7 @@ async function batchRun() {
 }
 
 async function uploadFiles(files) {
+  if (state.savingReview) return;
   if (state.project?.read_only) {
     toast("当前实验为只读导入", "请用左侧 ＋ 新建实验，再上传需要重跑的视频。", "error");
     return;
@@ -980,10 +1156,10 @@ function startPolling() {
     if (!hasActiveJob) return;
     const projectId = state.project.project_id;
     try {
-      const project = await api(`/api/projects/${projectId}`);
+      const project = await api(`/api/projects/${projectId}?include_people=false`);
       if (projectId !== state.project?.project_id) return;
       state.project = project;
-      renderClipStrip();
+      loadReviewQueue();
       renderCrossClipIndex();
       if (state.videoId) await refreshCurrentVideo();
       if (state.activeTab === "logs" && state.detail?.job_active) renderLogs();

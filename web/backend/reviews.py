@@ -57,12 +57,18 @@ def collect_review(store, project_id: str, video: dict) -> dict:
             "warning": "Review is a separate persistent sidecar. It does not alter tracks, archives or events."}
 
 
-def save_review(store, project_id: str, video: dict, value: dict, expected_revision: str | None) -> dict:
+def save_review(store, project_id: str, video: dict, value: dict, expected_revision: str | None,
+                *, partial: bool = False) -> dict:
     with _lock:
         current = collect_review(store, project_id, video)
         if expected_revision != current["revision"]:
             raise RuntimeError("Review changed in another window; reload before saving")
         clean = validate_review(current["index"], value)
+        if partial:
+            # Pagination must not erase verdicts on pages that are not displayed.
+            merged = {row['raw_track_id']: row for row in current['review']['tracks']}
+            merged.update({row['raw_track_id']: row for row in clean['tracks']})
+            clean = validate_review(current['index'], {**clean, 'tracks': list(merged.values())})
         path = sidecar(store, project_id, video["video_id"])
         path.parent.mkdir(parents=True, exist_ok=True)
         clean["revision"] = uuid.uuid4().hex
