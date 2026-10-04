@@ -20,6 +20,7 @@ STAGE_NAMES = (
     "link",
     "aggregate",
     "render",
+    "review",
 )
 
 

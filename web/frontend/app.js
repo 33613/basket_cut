@@ -9,6 +9,13 @@ const state = {
   pollTimer: null,
   personFilter: "",
   eventFilter: "",
+  reviewData: null,
+  reviewDirty: false,
+  projectRequest: 0,
+  detailRequest: 0,
+  reviewRequest: 0,
+  overlayRequest: 0,
+  overlayAnimation: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -150,6 +157,10 @@ function bindEvents() {
     $("#mediaHint").textContent = "视频无法播放：可能是 MP4 编码不受浏览器支持。运行 cli.import_web_results --prepare-media 生成 H.264 预览后，再刷新页面。";
   });
   $("#batchRunButton").addEventListener("click", batchRun);
+  $("#batchReviewButton").addEventListener("click", loadBatchReview);
+  window.addEventListener("beforeunload", (event) => {
+    if (state.reviewDirty) { event.preventDefault(); event.returnValue = ""; }
+  });
   $$(".module-buttons button").forEach((button) =>
     button.addEventListener("click", () => runCurrent(button.dataset.target)),
   );
@@ -197,9 +208,19 @@ function renderProjects() {
 }
 
 async function selectProject(projectId, preserveVideo = false) {
+  if (state.reviewDirty && !window.confirm("复核尚未保存，确定放弃修改并切换吗？")) return;
+  const request = ++state.projectRequest;
   try {
     const previousVideo = preserveVideo ? state.videoId : null;
-    state.project = await api(`/api/projects/${projectId}`);
+    const project = await api(`/api/projects/${projectId}`);
+    if (request !== state.projectRequest) return;
+    state.project = project;
+    state.reviewDirty = false;
+    state.reviewData = null;
+    state.detail = null;
+    state.videoId = null;
+    $("#batchReviewSummary").classList.add("hidden");
+    $("#reviewBundleDownload").href = `/api/projects/${projectId}/track-reviews.zip`;
     if (!preserveVideo) state.videoView = state.project.read_only ? "final" : "source";
     const readOnly = Boolean(state.project.read_only);
     document.body.classList.toggle("inspection-mode", readOnly);
@@ -254,8 +275,14 @@ function renderClipStrip() {
 
 async function selectVideo(videoId, resetTab = true) {
   if (videoId !== state.videoId) {
+    if (state.reviewDirty && !window.confirm("复核尚未保存，确定放弃修改并切换片段吗？")) return;
     state.personFilter = "";
     state.eventFilter = "";
+    state.reviewData = null;
+    state.reviewDirty = false;
+    state.detail = null;
+    ++state.reviewRequest;
+    clearReviewOverlay();
   }
   state.videoId = videoId;
   if (resetTab) state.activeTab = "events";
@@ -265,10 +292,14 @@ async function selectVideo(videoId, resetTab = true) {
 
 async function refreshCurrentVideo() {
   if (!state.project || !state.videoId) return;
+  const projectId = state.project.project_id, videoId = state.videoId;
+  const request = ++state.detailRequest;
   try {
-    state.detail = await api(
-      `/api/projects/${state.project.project_id}/videos/${state.videoId}`,
+    const detail = await api(
+      `/api/projects/${projectId}/videos/${videoId}`,
     );
+    if (request !== state.detailRequest || projectId !== state.project?.project_id || videoId !== state.videoId) return;
+    state.detail = detail;
     renderInspector();
   } catch (error) {
     toast("刷新片段失败", error.message, "error");
@@ -314,6 +345,7 @@ function stageName(stage) {
     link: "正在连接人物事件",
     aggregate: "正在聚合事件区间",
     render: "正在渲染结果",
+    review: "正在准备复核证据",
   }[stage] || "等待 GPU 队列";
 }
 
@@ -354,6 +386,7 @@ function renderMetrics(artifacts) {
 }
 
 function setVideoView(view, rerender = true) {
+  clearReviewOverlay();
   state.videoView = view;
   $$("#viewSwitcher button").forEach((button) =>
     button.classList.toggle("active", button.dataset.view === view),
@@ -389,6 +422,11 @@ function setVideoView(view, rerender = true) {
 }
 
 function setTab(tab) {
+  if (state.reviewDirty && tab !== "review") {
+    if (!window.confirm("请先保存复核。确定放弃未保存的修改吗？")) return;
+    state.reviewDirty = false;
+    state.reviewData = null;
+  }
   state.activeTab = tab;
   $$("#tabs button").forEach((button) =>
     button.classList.toggle("active", button.dataset.tab === tab),
@@ -402,6 +440,7 @@ function renderTab() {
     button.classList.toggle("active", button.dataset.tab === state.activeTab),
   );
   if (state.activeTab === "tracking") renderTracking();
+  else if (state.activeTab === "review") { if (!state.reviewDirty) renderReview(); }
   else if (state.activeTab === "identity") renderIdentity();
   else if (state.activeTab === "events") renderEvents();
   else if (state.activeTab === "points") renderActionPoints();
@@ -448,6 +487,10 @@ function renderIdentity() {
   $("#tabContent").innerHTML = `<div class="identity-grid">${people
     .map((person) => {
       const cover = person.cover || {};
+      const events = state.detail.artifacts.action.index.people.find((p) => p.person_id === person.person_id)?.event_count || 0;
+      const status = {human_confirmed: "人工确认归并", auto_merged: "模型候选归并 · 待验证", needs_review: "有风险 · 需复核", unresolved: "未确认身份", unlabeled: "未确认身份"}[person.status] || person.status;
+      const audit = state.detail.artifacts.evaluation.track_review?.archives?.groups.find((group) => group.person_id === person.person_id);
+      const auditText = audit ? {conflict: "复核发现混人 / 错误归并，不能作为真人档案使用", consistent: "当前来源轨迹完整复核一致（不是独立模型准确率）", unverified: "仍有来源轨迹未完整复核"}[audit.status] : "尚无真人一致性复核";
       const image = cover.crop_url
         ? `<img src="${escapeHtml(cover.crop_url)}" alt="${escapeHtml(person.person_id)}" loading="lazy" />`
         : `<div class="no-image">NO COVER</div>`;
@@ -456,9 +499,12 @@ function renderIdentity() {
         <div class="identity-body">
           <div class="identity-head"><strong>${escapeHtml(person.person_id)}</strong><span>TRACK ${escapeHtml(person.raw_track_ids?.join(", "))}</span></div>
           ${person.identity_label ? `<p>${escapeHtml(person.identity_label)}</p>` : ""}
-          <div class="identity-stats"><span>${escapeHtml(person.sample_count)} samples</span><span>${escapeHtml(person.observation_count)} observations</span><span>${escapeHtml(person.status)}</span></div>
-          <div class="identity-stats"><span>可见部位 ${Number(person.mean_visible_parts || 0).toFixed(1)}</span><span>轨迹内均距 ${person.within_track?.mean_distance == null ? "—" : Number(person.within_track.mean_distance).toFixed(3)}</span></div>
-          <div class="exemplar-strip">${(person.exemplars || []).map((item) => item.crop_url ? `<img src="${escapeHtml(item.crop_url)}" alt="代表帧 ${escapeHtml(item.frame_idx)}" title="frame ${escapeHtml(item.frame_idx)}" loading="lazy" />` : "").join("")}</div>
+          <div class="identity-stats"><span>${escapeHtml(status)}</span><span>${events} 个事件区间</span><span>${person.raw_track_ids?.length || 1} 条来源轨迹</span></div>
+          <div class="identity-stats"><span>${escapeHtml(person.sample_count)} samples</span><span>${escapeHtml(person.observation_count)} observations</span></div>
+          <p class="archive-warning">封面来自 T${escapeHtml(person.representative_raw_track_id ?? cover.raw_track_id ?? person.raw_track_ids?.[0])}，不能证明整份档案始终同人。</p>
+          <p class="archive-warning ${audit?.status === "conflict" ? "error-text" : ""}">${escapeHtml(auditText)}</p>
+          <div class="exemplar-strip">${(person.exemplars || []).map((item) => item.crop_url ? `<img src="${escapeHtml(item.crop_url)}" alt="T${escapeHtml(item.raw_track_id)} 帧 ${escapeHtml(item.frame_idx)}" title="T${escapeHtml(item.raw_track_id)} / frame ${escapeHtml(item.frame_idx)}" loading="lazy" />` : "").join("")}</div>
+          <details class="archive-sources"><summary>逐条查看来源轨迹 (${person.raw_track_ids?.length || 1})</summary>${(person.source_tracks || []).map((source) => `<div class="archive-source">${source.cover?.crop_url ? `<a href="${escapeHtml(source.cover.context_url || source.cover.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(source.cover.crop_url)}" alt="T${escapeHtml(source.raw_track_id)}" loading="lazy" /></a>` : ""}<div><strong>T${escapeHtml(source.raw_track_id)}</strong><small>${formatTime(source.start)} → ${formatTime(source.end)} · ${escapeHtml(source.observation_count)} 次观测</small><small>${escapeHtml((source.review_reasons || []).join(" / ") || (source.status === "human_confirmed" || audit?.status === "consistent" ? "已人工确认来源同人" : "未人工验证"))}</small></div></div>`).join("") || '<p class="archive-warning">旧档案缺少来源证据，请重跑归并阶段；不会虚构归并后的平均距离。</p>'}</details>
           <button class="ghost-button person-events-button" data-person="${escapeHtml(person.person_id)}">查看这个档案的事件 →</button>
         </div>
       </article>`;
@@ -468,6 +514,140 @@ function renderIdentity() {
     state.personFilter = button.dataset.person;
     setTab("events");
   }));
+}
+
+function reviewSummary(metrics) {
+  const full = metrics.scopes.full_track.raw, sampled = metrics.scopes.sampled.raw, stable = metrics.scopes.full_track.retained;
+  const fragments = metrics.fragmentation;
+  const stableName = metrics.quality_available === false ? "未加载质量报告（同原始范围）" : "质量过滤后";
+  const percent = (value) => value == null ? "尚无分母" : `${(value * 100).toFixed(1)}%`;
+  return `完整复核：${full.assessed_tracks}/${full.total_tracks} 条（${percent(full.review_coverage)}）。原始球员轨迹同人率 ${full.pure}/${full.player_tracks_assessed}（${percent(full.pure_track_rate)}），混人 ${full.mixed} 条，非球员 ${full.non_player} 条。\n${stableName}：完整复核 ${stable.assessed_tracks}/${stable.total_tracks} 条，同人率 ${stable.pure}/${stable.player_tracks_assessed}（${percent(stable.pure_track_rate)}），混人 ${stable.mixed} 条。\n仅抽样：同人候选 ${sampled.pure}，已发现混人 ${sampled.mixed}；不能据此声称全轨迹正确。\n身份已标注的完整同人轨迹：${fragments.labeled_pure_tracks} 条 / ${fragments.reviewed_people} 人；多 ID 人物 ${fragments.people_with_multiple_track_ids} 人，额外 ID ${fragments.extra_track_ids} → 当前处理范围 ${fragments.retained_extra_track_ids} 个。未标注、混人、未检出的人不在碎片统计内。`;
+}
+
+async function renderReview() {
+  const projectId = state.project.project_id, videoId = state.videoId;
+  const request = ++state.reviewRequest;
+  if (!state.reviewData) {
+    $("#tabContent").innerHTML = emptyState("正在加载复核记录", "先看同一条轨迹的不同时间，再判断是否始终同人。");
+    try {
+      const data = await api(`/api/projects/${projectId}/videos/${videoId}/track-review`);
+      if (request !== state.reviewRequest || projectId !== state.project?.project_id || videoId !== state.videoId) return;
+      state.reviewData = data;
+    } catch (error) {
+      if (request === state.reviewRequest && state.activeTab === "review") $("#tabContent").innerHTML = emptyState("复核暂不可用", error.message);
+      return;
+    }
+  }
+  if (state.activeTab !== "review") return;
+  const data = state.reviewData, byId = Object.fromEntries(data.review.tracks.map((row) => [row.raw_track_id, row]));
+  const options = [["unreviewed", "未复核"], ["pure", "同一人"], ["mixed", "混人 / 中途换人"], ["non_player", "非球员 / 误检"], ["uncertain", "看不清 / 不确定"]];
+  $("#tabContent").innerHTML = `<div class="review-toolbar"><div><h3>原始轨迹复核 · 包括已过滤的碎片</h3><p>点“播放区间”查看整条轨迹。只看几张图请保持“仅抽样”。同人轨迹填写相同的队伍＋号码，才可统计同人多 ID；混人轨迹不要整条归给某个号码。</p></div><button class="control-button" id="saveReviewButton">保存复核</button><a class="ghost-button" id="mergeReviewDownload" href="/api/projects/${projectId}/videos/${videoId}/merge-review">导出确认归并 ↓</a></div>
+    ${data.stale_review ? '<div class="evaluation-note error-text">原轨迹已变化，旧复核未计入。请重新核查并保存。</div>' : ""}
+    <div class="evaluation-note" id="reviewMetrics">${escapeHtml(reviewSummary(data.metrics))}</div>
+    <div class="review-grid">${data.index.tracks.map((track) => {
+      const row = byId[track.raw_track_id] || {verdict: "unreviewed", scope: "sampled"};
+      return `<article class="review-card" data-track="${track.raw_track_id}"><div class="review-heading"><strong>T${track.raw_track_id}</strong><span>${track.retained ? "保留" : "已过滤"} · ${track.observation_count} 次观测 · ${formatTime(track.start)} → ${formatTime(track.end)}</span><button class="ghost-button review-play" data-time="${track.start}" data-end="${track.end}">播放区间 ↗</button></div><p class="archive-warning">自动告警：${escapeHtml(track.quality_reasons.join(" / ") || "无告警不等于正确")}</p>
+        <div class="review-samples">${track.samples.map((sample) => `<figure><a href="${escapeHtml(sample.context_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(sample.crop_url)}" alt="T${track.raw_track_id} 帧 ${sample.frame_idx}" loading="lazy" /></a><figcaption>${formatTime(sample.timestamp_s)} · f${sample.frame_idx}</figcaption></figure>`).join("") || '<p class="archive-warning">未生成时序截图，仍可播放原视频复核。运行 cli.prepare_track_review 补充证据。</p>'}</div>
+        <div class="review-fields"><label>轨迹是否同人<select data-field="verdict">${options.map(([value, label]) => `<option value="${value}" ${row.verdict === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>检查范围<select data-field="scope"><option value="sampled" ${row.scope === "sampled" ? "selected" : ""}>仅抽样</option><option value="full_track" ${row.scope === "full_track" ? "selected" : ""}>已检查完整轨迹区间</option></select></label><label>片段内真人标签<input data-field="identity_label" maxlength="120" value="${escapeHtml(row.identity_label || "")}" placeholder="如：白队#15" ${row.verdict !== "pure" ? "disabled" : ""} /></label><label>问题备注<input data-field="note" maxlength="1000" value="${escapeHtml(row.note || "")}" placeholder="如：6.3秒换成另一位球员" /></label></div></article>`;
+    }).join("")}</div>`;
+  $$(".review-card input, .review-card select").forEach((element) => element.addEventListener("input", () => {
+    state.reviewDirty = true;
+    $("#saveReviewButton").textContent = "保存复核（未保存）";
+    $("#mergeReviewDownload").classList.add("hidden");
+    if (element.dataset.field === "verdict") {
+      const label = element.closest(".review-card").querySelector('[data-field="identity_label"]');
+      label.disabled = element.value !== "pure";
+      if (label.disabled) label.value = "";
+    }
+  }));
+  $$(".review-play").forEach((button) => button.addEventListener("click", () => playReviewTrack(button)));
+  $("#saveReviewButton").addEventListener("click", saveTrackReview);
+}
+
+function clearReviewOverlay() {
+  ++state.overlayRequest;
+  if (state.overlayAnimation) cancelAnimationFrame(state.overlayAnimation);
+  state.overlayAnimation = null;
+  $("#reviewOverlay")?.classList.add("hidden");
+}
+
+async function playReviewTrack(button) {
+  if (!state.detail.artifacts.media.source) { toast("缺少原视频", "不能进行完整轨迹复核。", "error"); return; }
+  setVideoView("source", false);
+  const request = state.overlayRequest, projectId = state.project.project_id, videoId = state.videoId;
+  const tid = Number(button.closest(".review-card").dataset.track);
+  try {
+    const data = await api(`/api/projects/${projectId}/videos/${videoId}/track-review/${tid}/observations`);
+    if (request !== state.overlayRequest || projectId !== state.project?.project_id || videoId !== state.videoId) return;
+    const boxes = new Map(data.observations.map((row) => [row.frame_idx, row.bbox_xyxy]));
+    const player = $("#resultVideo"), canvas = $("#reviewOverlay"), context = canvas.getContext("2d");
+    const start = Number(button.dataset.time), end = Number(button.dataset.end);
+    canvas.classList.remove("hidden");
+    const draw = () => {
+      if (request !== state.overlayRequest) return;
+      const width = player.clientWidth, height = player.clientHeight;
+      canvas.width = width; canvas.height = height;
+      if (player.currentTime >= end && !player.paused) player.pause();
+      const box = boxes.get(Math.floor(player.currentTime * data.fps + 1e-4));
+      if (box && player.videoWidth && player.currentTime >= start && player.currentTime < end) {
+        const scale = Math.min(width / player.videoWidth, height / player.videoHeight);
+        const dx = (width - player.videoWidth * scale) / 2, dy = (height - player.videoHeight * scale) / 2;
+        context.strokeStyle = "#16c79a"; context.lineWidth = 3;
+        context.strokeRect(dx + box[0] * scale, dy + box[1] * scale, (box[2] - box[0]) * scale, (box[3] - box[1]) * scale);
+        context.font = "bold 15px sans-serif"; context.fillStyle = "#16c79a";
+        context.fillText(`RAW T${tid}`, dx + box[0] * scale, Math.max(18, dy + box[1] * scale - 6));
+      }
+      state.overlayAnimation = requestAnimationFrame(draw);
+    };
+    const seek = () => {
+      if (request !== state.overlayRequest) return;
+      player.currentTime = start; player.play().catch(() => {}); draw();
+    };
+    if (player.readyState >= 1) seek(); else player.addEventListener("loadedmetadata", seek, {once: true});
+    player.scrollIntoView({behavior: "smooth", block: "center"});
+    toast(`正在单独复核原始轨迹 T${tid}`, `${formatTime(start)} → ${formatTime(end)}；没观测的帧不补框，播放结束会暂停。`);
+  } catch (error) { if (request === state.overlayRequest) toast("复核播放失败", error.message, "error"); }
+}
+
+async function saveTrackReview() {
+  const projectId = state.project.project_id, videoId = state.videoId;
+  const data = state.reviewData;
+  const tracks = $$(".review-card").map((card) => {
+    const value = (field) => card.querySelector(`[data-field="${field}"]`).value;
+    return {raw_track_id: Number(card.dataset.track), verdict: value("verdict"), scope: value("scope"), identity_label: value("identity_label") || null, note: value("note")};
+  });
+  $("#saveReviewButton").disabled = true;
+  $$(".review-card input, .review-card select").forEach((element) => { element.disabled = true; });
+  try {
+    const saved = await api(`/api/projects/${projectId}/videos/${videoId}/track-review`, {method: "PUT", body: JSON.stringify({expected_revision: data.revision, review: {...data.review, tracks}})});
+    if (projectId !== state.project?.project_id || videoId !== state.videoId) return;
+    state.reviewData = saved;
+    state.reviewDirty = false;
+    state.detail.artifacts.evaluation.track_review = saved.metrics;
+    toast("复核已保存", "刷新或重新打开仍保留；不会改变原模型结果。归并修正需要单独生成新结果。 ");
+    await renderReview();
+  } catch (error) { toast("保存失败", error.message, "error"); }
+  finally {
+    if (projectId === state.project?.project_id && videoId === state.videoId && $("#saveReviewButton")) {
+      $("#saveReviewButton").disabled = false;
+      $$(".review-card input, .review-card select").forEach((element) => {
+        element.disabled = element.dataset.field === "identity_label" && element.closest(".review-card").querySelector('[data-field="verdict"]').value !== "pure";
+      });
+    }
+  }
+}
+
+async function loadBatchReview() {
+  const projectId = state.project?.project_id;
+  if (!projectId) return;
+  try {
+    const summary = await api(`/api/projects/${projectId}/track-reviews`);
+    if (projectId !== state.project?.project_id) return;
+    const subset = summary.completed_subset;
+    const text = reviewSummary(subset);
+    $("#batchReviewSummary").textContent = `${summary.complete ? "复核数据读取完成" : "数据不完整，以下仅为已读取子集"}：${summary.completed_clips}/${summary.expected_clips} 条视频，${summary.failed_clips.length} 条读取失败。\n${text}\n混人和非球员档案须先修正；这不是漏检召回率或事件准确率。`;
+    $("#batchReviewSummary").classList.remove("hidden");
+  } catch (error) { toast("汇总失败", error.message, "error"); }
 }
 
 function renderEvents() {
@@ -624,6 +804,8 @@ function runPayload(target) {
 }
 
 async function runCurrent(target) {
+  if (state.reviewDirty) { toast("请先保存复核", "处理前保存当前修改，避免轨迹重跑后旧复核失效。", "error"); return; }
+  state.reviewData = null;
   if (!state.project || !state.videoId) return;
   try {
     await api(`/api/projects/${state.project.project_id}/videos/${state.videoId}/run`, {
@@ -638,6 +820,8 @@ async function runCurrent(target) {
 }
 
 async function batchRun() {
+  if (state.reviewDirty) { toast("请先保存复核", "批量处理前保存当前修改。", "error"); return; }
+  state.reviewData = null;
   const videos = state.project?.videos || [];
   if (!videos.length) return;
   let queued = 0;
@@ -721,7 +905,9 @@ function startPolling() {
     if (!hasActiveJob) return;
     const projectId = state.project.project_id;
     try {
-      state.project = await api(`/api/projects/${projectId}`);
+      const project = await api(`/api/projects/${projectId}`);
+      if (projectId !== state.project?.project_id) return;
+      state.project = project;
       renderClipStrip();
       renderCrossClipIndex();
       if (state.videoId) await refreshCurrentVideo();

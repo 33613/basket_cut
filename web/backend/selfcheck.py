@@ -88,6 +88,7 @@ def make_fixture(root: Path, count: int = 5) -> tuple[WebSettings, Path]:
                     "track_id": 0,
                     "bbox_xyxy": [100, 100, 200, 300],
                     "det_score": 0.93,
+                    "category_id": 0,
                 }
             ],
         )
@@ -125,7 +126,7 @@ def make_fixture(root: Path, count: int = 5) -> tuple[WebSettings, Path]:
         )
         write_jsonl(
             output / "identity/identity_map.jsonl",
-            [{"raw_track_id": 0, "person_id": "P0000", "status": "unlabeled"}],
+            [{"video_id": vid, "raw_track_id": 0, "person_id": "P0000", "status": "unlabeled"}],
         )
         actions = [
             {
@@ -270,6 +271,24 @@ class DashboardSelfCheck(unittest.TestCase):
             self.assertRaisesRegex(FileNotFoundError, "ffmpeg"),
         ):
             prepare_browser_media(self.settings, self.imported())
+
+    def test_merged_archive_without_events_stays_in_project_index(self) -> None:
+        from web.backend.artifacts import project_people_index
+        manifest = self.imported()
+        output = Path(manifest["videos"][0]["output_dir"])
+        (output / "action/events.jsonl").write_text("", encoding="utf-8")
+        entries = project_people_index(manifest)["entries"]
+        self.assertEqual(len(entries), 5)
+        self.assertEqual(entries[0]["event_count"], 0)
+
+    def test_changed_identity_map_does_not_show_stale_event_owner(self) -> None:
+        video = self.imported()["videos"][0]
+        output = Path(video["output_dir"])
+        write_jsonl(output / "identity/identity_map.jsonl", [
+            {"video_id": output.name, "raw_track_id": 0, "person_id": "P0099"}])
+        artifacts = collect_video_artifacts(video)
+        self.assertEqual(artifacts["action"]["index"]["event_count"], 0)
+        self.assertIn("ownership", artifacts["warnings"][0])
 
     def test_browser_transcode_cache_only_and_repeat_skip(self) -> None:
         manifest = self.imported()
@@ -439,6 +458,31 @@ class DashboardSelfCheck(unittest.TestCase):
                     len(client.get(base + "/records/events").json()["records"]), 2
                 )
                 self.assertEqual(client.get(base + "/inspection.zip").status_code, 200)
+                # Read-only imports can have a separate persistent audit sidecar.
+                before = (Path(manifest["videos"][0]["output_dir"]) / "tracking/tracks.jsonl").read_bytes()
+                audit = client.get(base + "/track-review")
+                self.assertEqual(audit.status_code, 200)
+                value = audit.json()
+                observations = client.get(base + "/track-review/0/observations")
+                self.assertEqual(observations.status_code, 200)
+                self.assertEqual(observations.json()["observations"][0]["frame_idx"], 0)
+                self.assertEqual(client.get(base + "/track-review/999/observations").status_code, 404)
+                value["review"]["tracks"] = [{"raw_track_id": 0, "verdict": "pure", "scope": "full_track", "identity_label": "white#15"}]
+                saved = client.put(base + "/track-review", json={"review": value["review"], "expected_revision": None})
+                self.assertEqual(saved.status_code, 200)
+                self.assertEqual(client.get(base + "/track-review").json()["metrics"]["scopes"]["full_track"]["raw"]["pure"], 1)
+                self.assertEqual(client.put(base + "/track-review", json={"review": value["review"]}).status_code, 409)
+                self.assertEqual((Path(manifest["videos"][0]["output_dir"]) / "tracking/tracks.jsonl").read_bytes(), before)
+                bundle = client.get(f"/api/projects/{manifest['project_id']}/track-reviews.zip")
+                self.assertEqual(bundle.status_code, 200)
+                from analysis.evaluation.track_review import evaluate_manifest
+                with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
+                    target = self.settings.output_root / "audit-export"
+                    archive.extractall(target)
+                metrics = evaluate_manifest(target / "manifest.json", target / "metrics.json")
+                self.assertTrue(metrics["complete"])
+                self.assertEqual(metrics["expected_clips"], 5)
+                self.assertEqual(metrics["completed_subset"]["scopes"]["full_track"]["raw"]["pure"], 1)
                 self.assertEqual(
                     client.post(base + "/run", json={"target": "full"}).status_code, 409
                 )

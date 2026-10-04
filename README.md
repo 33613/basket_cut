@@ -101,6 +101,8 @@ python -m cli.aggregate_events --input runtime/outputs/demo/action/actions_with_
 
 质量规则、人工确认格式、无推理复用以及初版验收见
 [质量与身份验收](docs/QUALITY_ACCEPTANCE.md)。
+同人/碎片/混人复核、归并档案与 30 条验收流程见
+[短视频轨迹验收](docs/TRACK_REVIEW.md)。
 带真值的数据准备与批量评估见 [评估协议](docs/EVALUATION.md)。
 可以少量调试，但不能仅凭无真值样例或训练域验证集宣称泛化性。
 
@@ -120,6 +122,8 @@ python -m uvicorn web.backend.app:app --host 127.0.0.1 --port 6006
 服务没有账号认证，默认仅监听回环地址，不应直接开放到公网。
 
 网页回归检查：`pip install -r requirements-web-test.txt` 后运行 `python -m cli.check_web`。
+轨迹复核自检：`python -m cli.check_track_review`。完整网页处理会生成按时间排列的
+原始轨迹证据；复核记录单独持久保存，不修改导入的模型输出。
 模型推理及质量规则在实际视频上的效果，需要另做验收；自检不代表模型正确率。
 
 ## 数据与隐私

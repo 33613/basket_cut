@@ -61,6 +61,7 @@ def import_results(
         expected = {
             "tracking": output / "tracking/tracks.jsonl",
             "quality": output / "quality/quality_summary.json",
+            "review": output / "analysis/track_review/index.json",
             "identity": output / "identity/identity_archive_manifest.json",
             "resolution": output / "identity/resolution_summary.json",
             "action": output / "action/actions.jsonl",
@@ -84,7 +85,7 @@ def import_results(
                 "status": "completed"
                 if expected[stage].is_file()
                 else "skipped"
-                if stage in {"quality", "resolution"}
+                if stage in {"quality", "resolution", "review"}
                 else "pending",
                 "started_at": None,
                 "finished_at": None,

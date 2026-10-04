@@ -102,7 +102,7 @@ def action_index(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 
 def temporal_event_index(
-    path: Path, video_id: str | None
+    path: Path, video_id: str | None, owners: dict[int, str] | None = None
 ) -> tuple[dict[str, Any], list[str]]:
     """Index actual intervals, never promote below-threshold action points."""
     people: dict[str, dict[str, Any]] = {}
@@ -119,6 +119,10 @@ def temporal_event_index(
                         raise ValueError(
                             "event video_id differs from tracking metadata"
                         )
+                    if owners is not None and any(
+                        owners.get(tid) != record.identity_id for tid in record.raw_track_ids
+                    ):
+                        raise ValueError("Event ownership differs from current identity map; relink and aggregate cached actions")
                 except (ValueError, TypeError, KeyError) as exc:
                     warnings.append(f"events.jsonl:{line_number}: {exc}")
                     continue
@@ -186,10 +190,22 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
     if not action_path.is_file():
         action_path = action / "actions.jsonl"
     actions = read_jsonl(action_path)
+    map_path = identity / "identity_map.jsonl"
+    owners = {int(row["raw_track_id"]): str(row["person_id"])
+              for row in read_jsonl(map_path)} if map_path.is_file() else None
+    # Do not silently relabel cached action points after archive resolution.
+    stale_point_count = 0
+    if owners is not None and action_path.name == "actions_with_identity.jsonl":
+        current = [row for row in actions if not row.get("person_id") or owners.get(
+            int(row.get("raw_track_id", row.get("track_id", -1)))) == row["person_id"]]
+        stale_point_count = len(actions) - len(current)
+        actions = current
     indexed_actions = action_index(actions)
     indexed_events, warnings = temporal_event_index(
-        action / "events.jsonl", (meta or {}).get("video_id")
+        action / "events.jsonl", (meta or {}).get("video_id"), owners
     )
+    if stale_point_count:
+        warnings.append(f"{stale_point_count} stale linked action points excluded; relink current identities")
     for index in (indexed_actions, indexed_events):
         for person in index["people"]:
             person["identity"] = identity_by_id.get(str(person.get("person_id")))
@@ -242,7 +258,13 @@ def project_people_index(manifest: dict[str, Any]) -> dict[str, Any]:
     entries = []
     for video in manifest.get("videos", []):
         artifacts = collect_video_artifacts(video)
-        for person in artifacts["action"]["index"]["people"]:
+        indexed = {p["person_id"]: p for p in artifacts["action"]["index"]["people"]}
+        for identity in artifacts["identity"]["people"]:
+            pid = identity["person_id"]
+            indexed.setdefault(pid, {"person_id": pid, "identity": identity,
+                                     "raw_track_ids": identity.get("raw_track_ids", []),
+                                     "event_count": 0, "events": [], "labels": {}})
+        for person in indexed.values():
             entries.append(
                 {
                     "video_id": video["video_id"],

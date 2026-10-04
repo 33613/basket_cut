@@ -119,6 +119,12 @@ def resolve_identities(options: ResolutionOptions) -> dict:
         review = json.loads(options.review.read_text(encoding="utf-8"))
         if review.get("video_id") != meta["video_id"]:
             raise ValueError("Review video_id does not match this clip")
+    blocked = review.get("blocked_track_ids", [])
+    if any(type(tid) is not int or tid not in active for tid in blocked) or len(blocked) != len(set(blocked)):
+        raise ValueError("blocked_track_ids requires unique active tracks")
+    for tid in blocked:
+        held.add(tid)
+        held_reasons.setdefault(tid, []).append("human_review_not_safe_to_merge")
     forbidden = set()
     for pair in review.get("cannot_link", []):
         if (
@@ -138,6 +144,8 @@ def resolve_identities(options: ResolutionOptions) -> dict:
         if not label or not ids or len(ids) != len(set(ids)):
             raise ValueError("Manual assignment requires a label and unique track IDs")
         for tid in ids:
+            if tid in blocked:
+                raise ValueError("Cannot assign a whole identity to a review-blocked track")
             if tid not in active or tid in labels:
                 raise ValueError(
                     f"Unknown, excluded, or multiply assigned track: {tid}"
@@ -318,18 +326,41 @@ def resolve_identities(options: ResolutionOptions) -> dict:
                 person["cover"][kind] = copy_media(
                     person["cover"][kind], f"identity_media/{pid}/{kind}.jpg"
                 )
-        exemplars = []
+        exemplars, source_tracks = [], []
         for tid in ids:
+            source_cover = dict(source_people[tid].get("cover") or {})
+            source_cover["raw_track_id"] = tid
+            for kind in ("crop_path", "context_path"):
+                if source_cover.get(kind):
+                    source_cover[kind] = copy_media(
+                        source_cover[kind], f"identity_media/{pid}/T{tid}_{kind}.jpg"
+                    )
+            source = {
+                "raw_track_id": tid,
+                "source_person_id": source_people[tid]["person_id"],
+                "start_frame": grouped[tid][0].frame_idx,
+                "end_frame": grouped[tid][-1].frame_idx,
+                "start": grouped[tid][0].timestamp_s,
+                "end": (grouped[tid][-1].frame_idx + 1) / float(meta["fps"]),
+                "observation_count": len(grouped[tid]),
+                "sample_count": source_people[tid].get("sample_count", 0),
+                "within_track": source_people[tid].get("within_track"),
+                "review_reasons": held_reasons.get(tid, []),
+                "status": "human_confirmed" if tid in labels else "needs_review" if tid in held else "unverified",
+                "cover": source_cover, "exemplars": [],
+            }
             for index, sample in enumerate(source_people[tid].get("exemplars", [])[:2]):
-                if len(exemplars) >= 8:
-                    break
                 item = dict(sample)
                 item["crop_path"] = copy_media(
                     item["crop_path"], f"identity_media/{pid}/T{tid}_{index}.jpg"
                 )
                 item["raw_track_id"] = tid
-                exemplars.append(item)
+                source["exemplars"].append(item)
+                if len(exemplars) < 8:
+                    exemplars.append(item)
+            source_tracks.append(source)
         person["exemplars"] = exemplars
+        person["source_tracks"] = source_tracks
         people.append(person)
         for tid in ids:
             mappings.append(

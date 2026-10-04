@@ -158,6 +158,7 @@ button { color: inherit; }
 .view-switcher button.active { color: var(--text); background: var(--panel-2); box-shadow: 0 2px 8px rgba(0,0,0,.2); }
 .video-stage { aspect-ratio: 16 / 9; background: #020605; position: relative; display: grid; place-items: center; }
 .video-stage video { width: 100%; height: 100%; object-fit: contain; background: #020605; }
+#reviewOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .video-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: radial-gradient(circle, #10211d 0, #040907 65%); }
 .video-empty strong { font-size: 12px; margin-top: 13px; }
 .video-empty p { font-size: 10px; color: var(--quiet); }
@@ -292,8 +293,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .strip-actions { align-items: center; }
 .workspace, .inspector { grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .workspace > *, .inspector > * { min-width: 0; }
-.stage-rail { grid-template-columns: repeat(4, 1fr); row-gap: 15px; }
-.clip-progress { grid-template-columns: repeat(8, 1fr); }
+.stage-rail { grid-template-columns: repeat(3, 1fr); row-gap: 15px; }
+.clip-progress { grid-template-columns: repeat(9, 1fr); }
 .identity-stats { flex-wrap: wrap; gap: 7px 12px; font-size: 10px; line-height: 1.5; }
 .exemplar-strip { display: flex; gap: 6px; overflow-x: auto; padding-top: 12px; }
 .exemplar-strip img { height: 60px; width: 34px; object-fit: contain; background: var(--bg-soft); border-radius: 5px; }
@@ -313,6 +314,27 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .timeline-track { background: #eef2f5; height: 10px; border-radius: 5px; position: relative; overflow: hidden; }
 .timeline-track span { background: #4caa99; position: absolute; height: 100%; border-radius: 5px; }
 .interval-score { text-align: right; font-variant-numeric: tabular-nums; }
+.review-toolbar { display: flex; gap: 16px; align-items: start; flex-wrap: wrap; margin-bottom: 18px; }
+.review-toolbar > div { flex: 1; min-width: 240px; }
+.review-toolbar h3 { margin: 0 0 8px; font-size: 16px; }
+.review-toolbar p, .archive-warning { font-size: 11px; line-height: 1.7; color: var(--muted); }
+.review-grid { display: grid; gap: 18px; margin-top: 18px; }
+.review-card { background: #f8fbfd; border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+.review-heading { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.review-heading span { flex: 1; font-size: 12px; color: var(--muted); }
+.review-samples { display: flex; overflow-x: auto; gap: 14px; padding: 12px 0; }
+.review-samples figure { margin: 0; flex: 0 0 105px; }
+.review-samples img { width: 105px; height: 160px; object-fit: contain; background: #edf2f6; border-radius: 8px; }
+.review-samples figcaption { margin-top: 6px; font-size: 10px; color: var(--muted); }
+.review-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.review-fields label { display: grid; gap: 7px; font-size: 11px; color: var(--muted); }
+.review-fields input, .review-fields select { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px; background: white; color: var(--text); }
+.review-fields input:disabled { background: #eaf0f4; }
+.archive-sources { font-size: 11px; margin-top: 14px; }
+.archive-sources summary { cursor: pointer; color: var(--lime); }
+.archive-source { display: flex; align-items: center; gap: 9px; border-top: 1px solid var(--line); padding: 9px 0; margin-top: 8px; }
+.archive-source img { width: 38px; height: 68px; object-fit: contain; background: #edf2f6; }
+.archive-source small { display: block; margin-top: 5px; color: var(--muted); }
 
 @media (max-width: 1100px) {
   .stage-rail { grid-template-columns: repeat(3, 1fr); row-gap: 15px; }

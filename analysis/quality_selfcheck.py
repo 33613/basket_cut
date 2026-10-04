@@ -152,6 +152,25 @@ class QualityChecks(unittest.TestCase):
         self.prepare([self.track(1, 0), self.track(2, 3)], [(1, 2, 0.01)])
         self.assertEqual(self.r()["identity_count"], 2)
 
+    def test_human_mixed_track_is_blocked_even_with_small_kpr_distance(self):
+        self.prepare([self.track(1, 0), self.track(2, 3)], [(1, 2, 0.01)])
+        review = self.root / "review.json"
+        self.write(review, {"video_id": "v", "blocked_track_ids": [1]})
+        result = self.r(review=review, max_distance=.2)
+        self.assertEqual(result["identity_count"], 2)
+        self.assertIn(1, result["review_track_ids"])
+
+    def test_all_merged_constituents_have_traceable_covers(self):
+        self.prepare([self.track(tid, tid * 3) for tid in range(1, 7)])
+        review = self.root / "review.json"
+        self.write(review, {"video_id": "v", "assignments": [
+            {"raw_track_ids": list(range(1, 7)), "identity_label": "white#15"}]})
+        self.assertEqual(self.r(review=review)["identity_count"], 1)
+        person = list(read_jsonl(self.root / "resolved/identities.jsonl"))[0]
+        self.assertEqual(len(person["source_tracks"]), 6)
+        for source in person["source_tracks"]:
+            self.assertTrue((self.root / "resolved" / source["cover"]["crop_path"]).is_file())
+
     def test_complete_link_prevents_transitive_chain(self):
         self.prepare(
             [self.track(1, 0), self.track(2, 3), self.track(3, 6)],
@@ -433,6 +452,7 @@ class QualityChecks(unittest.TestCase):
         self.assertFalse(result["models_rerun"])
         self.assertEqual(result["actions"]["retained"], 1)
         self.assertEqual((run / "tracking/tracks.jsonl").read_bytes(), original)
+        self.assertEqual((self.root / "refined/tracking/tracks.jsonl").read_bytes(), original)
         self.assertEqual(
             len(list(read_jsonl(self.root / "refined/action/events.jsonl"))), 1
         )

@@ -90,10 +90,13 @@
               <div class="strip-actions">
                 <span class="scope-badge hidden" id="readOnlyBadge">已导入 · 只读</span>
                 <button class="ghost-button" id="batchRunButton">▶ 批量处理</button>
+                <button class="ghost-button" id="batchReviewButton">复核汇总</button>
+                <a class="ghost-button" id="reviewBundleDownload" href="#">导出复核 ↓</a>
                 <button class="ghost-button" id="addMoreButton">＋ 添加片段</button>
               </div>
             </div>
             <div id="clipStrip" class="clip-strip"></div>
+            <div id="batchReviewSummary" class="evaluation-note hidden"></div>
           </div>
 
           <section class="inspector" id="inspector">
@@ -140,6 +143,7 @@
               <div class="stage" data-stage="link"><span>06</span><div><small>CONTRACT</small><strong>人物事件</strong></div><i></i></div>
               <div class="stage" data-stage="aggregate"><span>07</span><div><small>INTERVALS</small><strong>事件聚合</strong></div><i></i></div>
               <div class="stage" data-stage="render"><span>08</span><div><small>OUTPUT</small><strong>结果渲染</strong></div></div>
+              <div class="stage" data-stage="review"><span>09</span><div><small>EVIDENCE</small><strong>复核证据</strong></div></div>
             </div>
 
             <div class="inspection-grid">
@@ -155,6 +159,7 @@
                 </div>
                 <div class="video-stage">
                   <video id="resultVideo" controls playsinline preload="metadata"></video>
+                  <canvas id="reviewOverlay" class="hidden" aria-label="当前原始轨迹的逐帧框"></canvas>
                   <div class="video-empty" id="videoEmpty">
                     <div class="court-icon"><span></span></div>
                     <strong>该阶段还没有可播放视频</strong>
@@ -181,6 +186,7 @@
             <section class="detail-panel panel">
               <nav class="tabs" id="tabs">
                 <button data-tab="tracking" class="active">轨迹检查</button>
+                <button data-tab="review">同人 / 碎片 / 混人复核</button>
                 <button data-tab="identity">人物档案</button>
                 <button data-tab="events">事件时间区间</button>
                 <button data-tab="points">动作预测点</button>

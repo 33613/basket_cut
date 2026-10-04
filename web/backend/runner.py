@@ -108,6 +108,7 @@ class PipelineRunner:
             "visualization": output / "visualization",
             "result": output / "visualization/result.mp4",
             "web_result": output / "visualization/result_web.mp4",
+            "review": output / "analysis/track_review",
             "log": output / "pipeline.log",
         }
 
@@ -121,9 +122,11 @@ class PipelineRunner:
             "link": paths["linked_actions"],
             "aggregate": paths["events"],
             "render": paths["result"],
+            "review": paths["review"] / "index.json",
         }
         artifact = expected[stage]
         dependencies = {
+            "review": [paths["tracks"], paths["video_meta"], paths["quality"] / "quality_tracks.jsonl"],
             "quality": [paths["tracks"], paths["video_meta"]],
             "identity": [paths["stable_tracks"]],
             "resolution": [paths["stable_tracks"], expected["identity"]],
@@ -149,10 +152,10 @@ class PipelineRunner:
 
     def _plan(self, target: str, paths: dict[str, Path], force: bool) -> list[str]:
         requested = {
-            "tracking": ["tracking", "quality"],
-            "identity": ["tracking", "quality", "identity", "resolution"],
-            "action": ["tracking", "quality", "action"],
-            "final": ["tracking", "quality", "link", "aggregate", "render"],
+            "tracking": ["tracking", "quality", "review"],
+            "identity": ["tracking", "quality", "identity", "resolution", "review"],
+            "action": ["tracking", "quality", "action", "review"],
+            "final": ["tracking", "quality", "link", "aggregate", "render", "review"],
             "full": [
                 "tracking",
                 "quality",
@@ -162,6 +165,7 @@ class PipelineRunner:
                 "link",
                 "aggregate",
                 "render",
+                "review",
             ],
         }[target]
         if (
@@ -314,6 +318,13 @@ class PipelineRunner:
     def _command(
         self, stage: str, paths: dict[str, Path], options: dict[str, Any]
     ) -> list[str]:
+        if stage == "review":
+            self._require(self.settings.motip_python, "MOTIP Python (OpenCV)")
+            return [str(self.settings.motip_python), "-m", "cli.prepare_track_review",
+                    "--input", str(paths["source"]), "--tracks", str(paths["tracks"]),
+                    "--video-meta", str(paths["video_meta"]),
+                    "--quality", str(paths["quality"] / "quality_tracks.jsonl"),
+                    "--output-dir", str(paths["review"]), "--overwrite"]
         if stage == "tracking":
             self._require(self.settings.motip_python, "MOTIP Python")
             self._require(self.settings.motip_checkpoint, "MOTIP checkpoint")

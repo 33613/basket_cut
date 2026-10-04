@@ -22,6 +22,11 @@ from web.backend.artifacts import (
 from web.backend.imports import import_results, within_root
 from web.backend.inspection import build_inspection_bundle
 from web.backend.runner import PipelineRunner
+from web.backend.reviews import collect_review, save_review, project_reviews, review_bundle
+from analysis.evaluation.track_review import merge_review
+from contracts.tracks import load_tracks
+from web.backend.reviews import review_paths
+from web.backend.artifacts import load_json
 from web.backend.settings import WebSettings
 from web.backend.store import ProjectStore, safe_slug
 
@@ -68,6 +73,11 @@ class RunOptions(BaseModel):
     prompt_mode: Literal["none"] = "none"
     action_threshold: float = Field(default=0.2, ge=0, le=1)
     action_min_det_score: float = Field(default=0.3, ge=0, le=1)
+
+
+class ReviewSave(BaseModel):
+    review: dict[str, Any]
+    expected_revision: str | None = None
 
 
 def not_found(exc: FileNotFoundError) -> HTTPException:
@@ -145,6 +155,8 @@ def decorate_artifacts(
                 exemplar["crop_url"] = artifact_url(
                     project_id, video_id, f"identity/{path}"
                 )
+        for source in identity.get("source_tracks") or []:
+            decorate_identity(source)
 
     for identity in artifacts["identity"]["people"]:
         decorate_identity(identity)
@@ -208,6 +220,91 @@ def project_detail(project_id: str) -> dict[str, Any]:
     result = dict(manifest)
     result["people_index"] = project_people_index(manifest)
     return result
+
+
+@app.get("/api/projects/{project_id}/track-reviews")
+def get_project_reviews(project_id: str) -> dict[str, Any]:
+    try:
+        return project_reviews(store, store.get_project(project_id))
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+
+
+@app.get("/api/projects/{project_id}/track-reviews.zip")
+def export_project_reviews(project_id: str) -> Response:
+    try:
+        data = review_bundle(store, store.get_project(project_id))
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(data, media_type="application/zip", headers={
+        "Content-Disposition": 'attachment; filename="track_reviews.zip"'})
+
+
+def decorate_review(project_id: str, video_id: str, result: dict) -> dict:
+    for track in result["index"]["tracks"]:
+        for sample in track["samples"]:
+            for kind in ("crop", "context"):
+                sample[f"{kind}_url"] = artifact_url(
+                    project_id, video_id, f"analysis/track_review/{sample[kind + '_path']}")
+    return result
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/track-review")
+def get_track_review(project_id: str, video_id: str) -> dict:
+    video = get_video(project_id, video_id)
+    if runner.is_active(project_id, video_id):
+        raise HTTPException(status_code=409, detail="Wait for processing to finish before reviewing")
+    try:
+        return decorate_review(project_id, video_id, collect_review(store, project_id, video))
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/projects/{project_id}/videos/{video_id}/track-review")
+def put_track_review(project_id: str, video_id: str, request: ReviewSave) -> dict:
+    video = get_video(project_id, video_id)
+    if runner.is_active(project_id, video_id):
+        raise HTTPException(status_code=409, detail="Cannot review a running clip")
+    try:
+        return decorate_review(project_id, video_id, save_review(
+            store, project_id, video, request.review, request.expected_revision))
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/track-review/{track_id}/observations")
+def get_review_observations(project_id: str, video_id: str, track_id: int) -> dict:
+    video = get_video(project_id, video_id)
+    if runner.is_active(project_id, video_id):
+        raise HTTPException(status_code=409, detail="Cannot inspect changing tracks")
+    paths = review_paths(video)
+    try:
+        meta = load_json(paths["video_meta"])
+        grouped = load_tracks(paths["tracks"], meta or {})
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if track_id not in grouped:
+        raise HTTPException(status_code=404, detail="Unknown raw track")
+    return {"fps": meta["fps"], "raw_track_id": track_id,
+            "observations": [{"frame_idx": r.frame_idx, "bbox_xyxy": r.bbox_xyxy}
+                             for r in grouped[track_id]]}
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/merge-review")
+def export_merge_review(project_id: str, video_id: str) -> Response:
+    import json
+    data = get_track_review(project_id, video_id)
+    return Response(json.dumps(merge_review(data["index"], data["review"]), ensure_ascii=False, indent=2),
+                    media_type="application/json", headers={
+                        "Content-Disposition": 'attachment; filename="merge_review.json"'})
 
 
 @app.post("/api/projects/{project_id}/videos")
@@ -276,6 +373,12 @@ async def upload_videos(
 def video_detail(project_id: str, video_id: str) -> dict[str, Any]:
     video = get_video(project_id, video_id)
     artifacts = decorate_artifacts(project_id, video, collect_video_artifacts(video))
+    # Audit consistency belongs next to merged archives, not just on the review tab.
+    if not runner.is_active(project_id, video_id):
+        try:
+            artifacts["evaluation"]["track_review"] = collect_review(store, project_id, video)["metrics"]
+        except (OSError, ValueError, KeyError, TypeError):
+            artifacts["evaluation"]["track_review"] = None
     return {
         "video": video,
         "artifacts": artifacts,

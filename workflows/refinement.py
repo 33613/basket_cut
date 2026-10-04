@@ -15,6 +15,7 @@ from contracts.schema import read_jsonl, write_json, write_jsonl_line
 from pipeline.identity.resolution import ResolutionOptions, resolve_identities
 from pipeline.tracking.quality import QualityOptions, check_track_quality
 from workflows.link_events import LinkEventsOptions, link_actions_to_people
+from analysis.evaluation.track_review import review_index
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,12 @@ def refine_existing_clip(options: RefinementOptions) -> dict:
             raise FileNotFoundError(f"Missing required artifact: {name}")
     if not (raw_identity / "identities.jsonl").is_file():
         raise FileNotFoundError("Missing raw identity archive")
+    if options.review:
+        review = json.loads(options.review.read_text(encoding="utf-8"))
+        if review.get("review_fingerprint"):
+            current = review_index(source / "tracking/tracks.jsonl", meta_path)
+            if current["fingerprint"] != review["review_fingerprint"]:
+                raise ValueError("Merge review does not match the raw source tracks")
     quality = check_track_quality(
         QualityOptions(
             source / "tracking/tracks.jsonl",
@@ -72,7 +79,8 @@ def refine_existing_clip(options: RefinementOptions) -> dict:
     )
     tracking = output / "tracking"
     tracking.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(output / "quality/tracks.jsonl", tracking / "tracks.jsonl")
+    # Raw observations must survive refinement for independent review.
+    shutil.copy2(source / "tracking/tracks.jsonl", tracking / "tracks.jsonl")
     shutil.copy2(meta_path, tracking / "video_meta.json")
     retained_summaries = [
         r
@@ -85,7 +93,7 @@ def refine_existing_clip(options: RefinementOptions) -> dict:
     )
     resolution = resolve_identities(
         ResolutionOptions(
-            tracking / "tracks.jsonl",
+            output / "quality/tracks.jsonl",
             meta_path,
             raw_identity,
             output / "identity",

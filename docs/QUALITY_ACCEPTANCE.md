@@ -1,5 +1,8 @@
 # 质量检查与身份归并
 
+产品验收重点已收敛为同人轨迹、同人多 ID 与混人档案，具体判定、网页复核和
+30 条测试步骤见 [短视频轨迹验收](TRACK_REVIEW.md)。下述自动规则只是辅助检查。
+
 ## 职责与限制
 
 - `pipeline/tracking/quality.py`：短轨迹、逐帧重叠候选、运动突变检查。
@@ -72,7 +75,7 @@ python -m cli.refine_results \
 
 ```bash
 python -m cli.render_results --input runtime/data/clip.mp4 \
-  --tracks runtime/outputs/reviewed/clip/tracking/tracks.jsonl \
+  --tracks runtime/outputs/reviewed/clip/quality/tracks.jsonl \
   --identity-map runtime/outputs/reviewed/clip/identity/identity_map.jsonl \
   --actions runtime/outputs/reviewed/clip/action/actions_with_identity.jsonl \
   --output runtime/outputs/reviewed/clip/result.mp4

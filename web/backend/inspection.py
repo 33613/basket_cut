@@ -43,6 +43,7 @@ DIAGNOSTIC_FILES = (
     "analysis/tracking_events.csv",
     "analysis/event_metrics.json",
     "analysis/identity_metrics.json",
+    "analysis/track_review/index.json",
     "refinement_summary.json",
     "pipeline.log",
 )
