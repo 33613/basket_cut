@@ -152,6 +152,7 @@ async function bootstrap() {
 }
 
 function bindEvents() {
+  bindPersonLibrary();
   const input = $("#fileInput");
   $('#toggleImportButton').addEventListener('click', () => {
     const hidden = $('#importSection').classList.toggle('hidden');
@@ -274,6 +275,7 @@ function renderProjects() {
 }
 
 async function selectProject(projectId, preserveVideo = false) {
+  if (libraryState.editing) { toast('人物库正在更新', '请等待保存完成后再切换实验。'); return; }
   if (state.savingReview) { toast('复核正在保存', '请等待保存完成后再切换实验。'); return; }
   if (state.reviewDirty && !window.confirm("复核尚未保存，确定放弃修改并切换吗？")) return;
   const request = ++state.projectRequest;
@@ -302,6 +304,7 @@ async function selectProject(projectId, preserveVideo = false) {
     $("#projectTitle").textContent = state.project.name;
     renderProjects();
     state.queue = null;
+    resetPersonLibrary();
     $('#queueFilter').value = state.queueFilter;
     $('#queueSearch').value = state.queueSearch;
     await loadReviewQueue();

@@ -47,7 +47,7 @@
           <span class="note-index">01</span>
           <div>
             <strong>结果可追溯</strong>
-            <p>原始分数不等于准确率。片段内人物档案不自动合并为跨视频身份。</p>
+            <p>片段内 ID 与比赛级 ID 分开保留。人物库归并是候选结果，需要核查是否混人。</p>
           </div>
         </div>
       </aside>
@@ -55,7 +55,16 @@
       <main class="main-content">
         <section class="inspection-intro hidden" id="inspectionIntro">
           <div><span class="eyebrow">RESULT INSPECTION</span><h1>批量结果检查</h1><p>从待审视频进入，逐条核查轨迹与人物档案。保存后的复核记录可在下次继续。</p></div>
-          <button class="ghost-button" id="toggleImportButton" aria-expanded="false">导入另一批结果 ＋</button>
+          <div class="library-entry-actions"><button class="primary-button" id="openPersonLibraryButton">比赛人物库 ↗</button><button class="ghost-button" id="toggleImportButton" aria-expanded="false">导入另一批结果 ＋</button></div>
+        </section>
+        <section class="panel person-library-section hidden" id="personLibrarySection" aria-label="比赛级人物库与事件检索">
+          <div class="panel-title library-header"><div><span class="eyebrow">MATCH PERSON LIBRARY</span><h2>一场比赛，按人物查找素材。</h2><p>跨片段 KPR 候选归并 · 原始轨迹与局部档案始终保留</p></div><div class="library-entry-actions"><button class="ghost-button" id="refreshPersonLibrary">刷新人物库</button><button class="secondary-button" id="closePersonLibrary">返回视频检查 →</button></div></div>
+          <div id="personLibrarySummary" class="batch-progress"></div>
+          <p class="scope-warning" id="personLibraryWarning">人物数量减少不是准确率，也不强制归并为10人。事件时间均相对于各自原片段。</p>
+          <div class="queue-controls"><label class="search-field">人物搜索<input id="librarySearch" type="search" maxlength="120" placeholder="比赛级 ID / 球队＋号码标签 / 来源视频名" /></label><label>人物状态<select id="libraryStatus"><option value="all">全部候选人物</option><option value="merged">已跨片段归并</option><option value="singleton">单片段档案</option><option value="needs_review">证据不足 / 待复核</option><option value="manual_grouping">人工归组</option></select></label><button class="ghost-button" id="resetLibraryReview">恢复自动归并</button></div>
+          <div id="personLibraryGrid" class="person-library-grid"></div><div class="pagination" id="personLibraryPagination"></div>
+          <section id="libraryPersonDetail" class="library-person-detail hidden"></section>
+          <section class="library-event-section"><div class="panel-title"><div><span class="eyebrow">PERSON × EVENT → SOURCE CLIP</span><h3>人物事件检索</h3></div><button class="ghost-button" id="libraryAllPeople">查看全部人物事件</button></div><div class="queue-controls"><span id="librarySelectedPerson" class="scope-badge">全部人物</span><label>事件类型<select id="libraryEventType"><option value="">全部事件</option></select></label><label>最低原始分数<input id="libraryMinScore" type="number" min="0" max="1" step="0.05" value="0.2" /></label><label class="search-field">片段搜索<input id="libraryEventSearch" type="search" maxlength="120" placeholder="来源片段文件名" /></label></div><div id="libraryEvents"></div><div class="pagination" id="libraryEventsPagination"></div></section>
         </section>
         <section class="upload-section panel" id="uploadSection">
           <div class="section-copy">
@@ -216,10 +225,10 @@
 
           <section class="project-index panel" id="projectIndex">
             <div class="panel-title">
-              <div><span class="eyebrow">PERSON MATERIALS</span><h3>人物素材归档库</h3></div>
+              <div><span class="eyebrow">CLIP PERSON MATERIALS</span><h3>片段内人物档案</h3></div>
               <span class="scope-badge">CLIP-LOCAL IDs</span>
             </div>
-            <p class="scope-warning">当前先汇总各片段的人物档案与事件；尚未校准的 KPR 距离不会被自动当成跨片段同一人。</p>
+            <p class="scope-warning">这里保留各片段的局部 ID；跨片段候选归并、来源检查和人物事件检索请进入上方“比赛人物库”。</p>
             <div class="queue-controls"><label class="search-field">搜索素材<input id="materialSearch" type="search" maxlength="120" placeholder="视频名 / 档案 ID / 人工标签 / 号码候选" /></label><label>档案层级<select id="materialView"><option value="resolved">归并后人物档案</option><option value="raw">KPR 原始轨迹档案</option></select></label><span class="queue-caveat">点击图片检查来源；号码候选不是确认身份</span></div>
             <div id="crossClipGrid" class="cross-clip-grid"></div>
             <div class="pagination" id="materialPagination"></div>
@@ -229,6 +238,7 @@
     </div>
 
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+    <script src="/assets/person-library.js" defer></script>
     <script src="/assets/app.js" defer></script>
   </body>
 </html>

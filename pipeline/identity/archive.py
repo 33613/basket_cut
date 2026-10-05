@@ -8,6 +8,7 @@ temporally compatible track pairs.  It never rewrites MOTIP IDs automatically.
 from __future__ import annotations
 
 import itertools
+import hashlib
 import math
 import shutil
 from collections import defaultdict
@@ -848,6 +849,18 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
             "probabilities. No MOTIP track IDs were modified."
         ),
         "tracks_summary": track_summaries,
+    }
+    # Feature provenance prevents matching differently trained/prompted spaces.
+    checksum = hashlib.sha256()
+    with options.checkpoint.expanduser().resolve().open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    summary["feature_contract"] = {
+        "schema_version": 1, "checkpoint_sha256": checksum.hexdigest(),
+        "prompt_mode": options.prompt_mode,
+        "test_embeddings": list(backend.cfg.model.kpr.test_embeddings),
+        "part_count": int(prototypes.shape[1]), "feature_dimension": int(prototypes.shape[2]),
+        "distance": "euclidean_sqrt_visibility_mean_div2",
     }
     write_json(output_dir / "kpr_summary.json", summary)
     write_json(

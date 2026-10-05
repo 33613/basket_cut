@@ -8,7 +8,8 @@
 ```
 
 事件输出为 `[id, event, start, end, raw_score]`，时间单位为秒、区间为 `[start, end)`。
-原始分数、OCR 读数、轨迹数量和档案减少量都不是准确率。身份归并只在单视频内进行。
+原始分数、OCR 读数、轨迹数量和档案减少量都不是准确率。
+片段内身份与可选的比赛级候选身份分开保存，不改写原始轨迹。
 
 ## 结构与环境
 
@@ -53,6 +54,44 @@ python -m cli.process_batch --env-file .env \
 每视频保留 `tracking` 原始轨迹、`quality` 过滤轨迹、`identity_raw` 原始档案、
 `identity` 归并档案、`action` 预测与事件、`analysis/track_review` 时序证据。
 单模块参数可用 `python -m cli.tracking --help` 等查看。
+
+## 跨片段人物库与事件检索
+
+同场比赛的批次可以添加 `--cross-clip-distance 0.2`，在所有片段完成后建立
+`library/`。它独立于 `--merge-distance`（片段内归并）；二者都是未校准的
+距离阈值，不是概率。不要把不同比赛混进同一人物库。
+
+```bash
+python -m cli.process_batch --env-file .env \
+  --input-dir runtime/data/match --output-dir runtime/outputs/match100 \
+  --limit 100 --target full --merge-distance 0.2 --cross-clip-distance 0.2
+
+# 只重建跨片段库，不重跑任何模型，也不改片段内结果。
+python -m cli.build_person_library --run-dir runtime/outputs/match100 \
+  --max-distance 0.2 --overwrite
+```
+
+复用 KPR 部位原型与可见性，采用与
+[KPR 官方距离实现](https://github.com/VlSomers/keypoint_promptable_reidentification/blob/main/torchreid/metrics/distance.py)
+一致的可见性加权欧氏距离 / 2。归组使用 complete linkage：所有成员原型都必须
+满足阈值，不沿相似度链无限合并。同片段不同局部档案禁止在比赛级再次归并；
+样本不足、外观不一致、轨迹告警或缺少可比部位时保留独立档案。不会强制输出10个人。
+新 KPR 输出记录 checkpoint 校验和、prompt 模式与特征布局，拒绝混用不同特征空间；
+旧缓存只有在确认权重与设置一致时才显式使用 `--allow-legacy-features`，并保留警告。
+
+`library/people.jsonl` 保存比赛级 `G-*` 候选档案、代表图引用和来源成员；
+`identity_map.jsonl` 保留 `(clip_name, local_person_id, raw_track_ids) → global_person_id`；
+`match_pairs.jsonl` 保存有界的最近候选与匹配证据；`events.jsonl` 输出比赛级
+`id`，同时保留 `local_person_id`、来源事件与片段名。时间仍是原片段内的秒数，
+不会虚构整场时间轴。`library_manifest.json` 记录覆盖、参数、警告和源文件签名。
+缺少任何计划片段、事件引用无效或来源已改变时拒绝静默生成完整人物库。
+
+导入该批次后，网页“比赛人物库”可按人物、事件类型、原始分数和片段名检索，
+点击事件跳转原片段；查看多张来源图、最近匹配距离，拆出误合并成员。
+相同的人工“球队＋号码”标签可归组，但不自动将 OCR 号码当成身份真值。
+人工修正与重新索引保存到网页索引目录的独立 sidecar，不改模型输出，
+有版本冲突和失效检查。恢复自动归并只清空人物库修正，不清空轨迹复核。
+人工归组后的检索是修正后验收，不是独立身份识别准确率。
 
 ## 号码候选（可选）
 
@@ -106,6 +145,7 @@ python -m cli.check_quality
 python -m cli.check_evaluation
 python -m cli.check_track_review
 python -m cli.check_batch
+python -m cli.check_person_library
 python -m cli.check_privacy
 # 网页/API 检查另外安装 requirements-web-test.txt
 python -m cli.check_web

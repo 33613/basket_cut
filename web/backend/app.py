@@ -31,6 +31,7 @@ from web.backend.artifacts import load_json
 from web.backend.settings import WebSettings
 from web.backend.store import ProjectStore, safe_slug
 from web.backend.catalog import catalog, material_catalog, next_review_video, review_page, video_catalog
+from web.backend.person_library import library_catalog, library_person, library_events, edit_library
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 settings = WebSettings()
@@ -83,6 +84,14 @@ class RunOptions(BaseModel):
 class ReviewSave(BaseModel):
     review: dict[str, Any]
     expected_revision: str | None = None
+
+
+class LibraryEdit(BaseModel):
+    operation: Literal["label_group", "detach", "restore", "reset"]
+    expected_revision: str | None = None
+    person_id: str | None = Field(default=None, max_length=80)
+    node_id: str | None = Field(default=None, max_length=80)
+    label: str | None = Field(default=None, max_length=120)
 
 
 def not_found(exc: FileNotFoundError) -> HTTPException:
@@ -266,6 +275,55 @@ def get_materials(project_id: str, offset: int = Query(default=0, ge=0),
         return material_catalog(store.get_project(project_id), offset=offset, limit=limit, view=view, q=q)
     except FileNotFoundError as exc:
         raise not_found(exc) from exc
+
+
+@app.get("/api/projects/{project_id}/person-library")
+def get_person_library(project_id: str, offset: int = Query(default=0, ge=0),
+                       limit: int = Query(default=12, ge=1, le=50),
+                       q: str = Query(default="", max_length=120),
+                       status: Literal["all", "merged", "singleton", "needs_review", "manual_grouping"] = "all"):
+    try:
+        return library_catalog(settings, store, project_id, offset=offset, limit=limit, q=q, status=status)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/person-library/events")
+def get_library_events(project_id: str, person_id: str = Query(default="", max_length=80),
+                       event: str = Query(default="", max_length=120), q: str = Query(default="", max_length=120),
+                       min_score: float = Query(default=0, ge=0, le=1, allow_inf_nan=False),
+                       offset: int = Query(default=0, ge=0), limit: int = Query(default=20, ge=1, le=100)):
+    try:
+        return library_events(settings, store, project_id, person_id=person_id, event=event,
+                              q=q, min_score=min_score, offset=offset, limit=limit)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/person-library/people/{person_id}")
+def get_library_person(project_id: str, person_id: str):
+    try:
+        return library_person(settings, store, project_id, person_id)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/projects/{project_id}/person-library/review")
+def review_person_library(project_id: str, value: LibraryEdit):
+    try:
+        return edit_library(settings, store, project_id, **value.model_dump())
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/projects/{project_id}/track-reviews")
