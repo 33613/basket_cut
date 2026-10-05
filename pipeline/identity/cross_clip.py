@@ -83,6 +83,13 @@ def group_nodes(nodes, track_distances, *, max_distance, assignments=None,
     def held(index):
         return bool(nodes[index].get("hold_reasons")) or nodes[index]["node_id"] in blocked
 
+    def number(index):
+        jersey = nodes[index].get("jersey") or {}
+        return jersey.get("number") if jersey.get("status") == "candidate_consensus" else None
+
+    def numbers(group):
+        return {number(i) for i in group if number(i) is not None}
+
     def combine(a, b, *, manual=False):
         first, second = owner[a], owner[b]
         if first == second:
@@ -91,11 +98,11 @@ def group_nodes(nodes, track_distances, *, max_distance, assignments=None,
         combined = left | right
         clips = [nodes[i]["clip_name"] for i in combined]
         conflict = (len(clips) != len(set(clips)) or any(held(i) for i in combined)
-                    or len(labels(combined)) > 1)
+                    or len(labels(combined)) > 1 or len(numbers(combined)) > 1)
         maximum = float(np.max(distances[np.ix_(list(left), list(right))]))
         if conflict or (not manual and (max_distance is None or maximum > max_distance)):
             if manual:
-                raise ValueError("Manual group conflicts with same-clip or held/mixed archives; inspect local tracks first")
+                raise ValueError("Manual group conflicts with same-clip, held/mixed archives or jersey numbers; inspect local tracks first")
             return False
         groups[first] = combined
         del groups[second]
@@ -135,6 +142,8 @@ def group_nodes(nodes, track_distances, *, max_distance, assignments=None,
             reasons.append("different_local_archives_in_same_clip")
         if held(a) or held(b):
             reasons.append("archive_held_for_review")
+        if number(a) is not None and number(b) is not None and number(a) != number(b):
+            reasons.append("different_reliable_jersey_numbers")
         if assignments.get(nodes[a]["node_id"]) and assignments.get(nodes[b]["node_id"]):
             if assignments[nodes[a]["node_id"]] != assignments[nodes[b]["node_id"]]:
                 reasons.append("different_manual_labels")

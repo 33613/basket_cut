@@ -103,6 +103,53 @@ python -m cli.build_person_library --run-dir runtime/outputs/match100 \
 保留读数、位置和图片证据。不是训练好的球衣号码模型，也不能证明整条轨迹同人。
 相同号码可能属于不同球队，OCR 永远不直接改写或归并身份。
 
+## 专用球衣号码基线（JNR）
+
+[Single-Stage Uncertainty-Aware Jersey Number Recognition in Soccer](https://github.com/lukaszgrad/uncertainty-jnr)
+提供 ViT-S / ViT-B 的 SoccerNet 权重。先用 ViT-S；论文最佳模型未公开，
+足球测试准确率不能当作篮球准确率。该上游采用 CC-BY-SA-4.0，使用或分发须遵守许可。
+适配器不修改上游源码，不安装其训练/云日志依赖。独立 Python 3.11 环境：
+
+```bash
+conda create -p ./runtime/envs/jnr python=3.11 pip -y
+conda activate ./runtime/envs/jnr
+python -m pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu124
+python -m pip install -r requirements-jnr.txt
+git clone https://github.com/lukaszgrad/uncertainty-jnr.git UncertaintyJNR
+git -C UncertaintyJNR checkout f19d9cb90e1a67d5ffe44acbf69fb348fe6525e7
+python -m cli.download_jnr --model vit-small --output-dir runtime/models/jnr
+python -m cli.inspect_jnr --device cuda
+```
+
+在 `.env` 配置 `BASKET_JNR_PYTHON`、`BASKET_JNR_ROOT`、`BASKET_JNR_CONFIG`、
+`BASKET_JNR_CHECKPOINT`。直接调用 `cli.inspect_jnr` / `cli.jersey_jnr` 不自动加载
+`.env`，自定义资源路径请用命令参数；批处理加载 `.env`。
+权重默认安全加载、严格匹配所有层。只有确认来自作者的文件，且安全加载确实拒绝
+训练元数据时，才加 `--trust-checkpoint`（批量为 `--jnr-trust-checkpoint`）。
+Google Drive 下载失败时从作者链接下载后传入 `--checkpoint`，不要找不明镜像。
+
+```bash
+python -m cli.process_batch --env-file .env \
+  --input-dir runtime/data/smoke5 --output-dir runtime/outputs/jnr5 \
+  --limit 5 --target full --jersey-jnr --merge-distance 0.2 --cross-clip-distance 0.2
+```
+
+复用 KPR 时序采样的人物原图，按作者的躯干裁剪、缩放和归一化运行模型。
+这不是为号码可读性专门选帧；侧面、遮挡、框内多人的样本可能无法读号。
+保存 `identity/jersey_{readings,tracks,people}.jsonl`、`jersey_predictions.npz`
+（全部100类分数与不确定性）、`jersey_summary.json`（权重/源码校验和、阈值与拒绝原因）。
+默认分数≥0.8、不确定性≤0.2、top2差≥0.2，至少2帧且间隔≥0.25秒支持；
+这些是初始工程阈值，不是校准的准确率。强读数冲突不会被多数票掩盖。
+模型类别仅0–99，无法区分0/00，因此类0留空并标记。没有球队/姓名识别。
+
+`--jersey-jnr` 与 `--cross-clip-distance` 同用时，比赛级库会采用号码冲突约束：
+可靠不同号禁止归并，局部号码混乱的档案保留待审；同号不降低KPR阈值、不强制归并。
+片段内归并仍由KPR执行，JNR只检查并标记其冲突，不改写原始轨迹与局部ID。
+重建库使用 `cli.build_person_library --use-jersey-evidence`；缺少JNR结果或混用权重/阈值会报错。
+网页展示原始读数、拒绝帧、号码候选和归并来源，号码可检索但不是实名身份。
+先复核5条中的接受读数是否正确、不可读是否留空、归并是否混人，再固定设置处理100条。
+没有人工号码真值时只报告覆盖与冲突数量，不能报告号码准确率。
+
 ## 网页与验收
 
 ```bash
@@ -146,6 +193,7 @@ python -m cli.check_evaluation
 python -m cli.check_track_review
 python -m cli.check_batch
 python -m cli.check_person_library
+python -m cli.check_jnr
 python -m cli.check_privacy
 # 网页/API 检查另外安装 requirements-web-test.txt
 python -m cli.check_web

@@ -78,6 +78,8 @@ class RunOptions(BaseModel):
     action_threshold: float = Field(default=0.2, ge=0, le=1)
     action_min_det_score: float = Field(default=0.3, ge=0, le=1)
     jersey_ocr: bool = False
+    jersey_jnr: bool = False
+    jnr_trust_checkpoint: bool = False
     allow_ocr_download: bool = False
 
 
@@ -177,6 +179,18 @@ def decorate_artifacts(
                 if path:
                     evidence['crop_url'] = artifact_url(project_id, video_id,
                         f"{artifacts['identity']['raw_media_prefix']}/{path}")
+
+        for track in (identity.get('jersey') or {}).get('tracks', []):
+            for reading in track.get('readings', []):
+                path = reading.get('crop_path')
+                if path:
+                    reading['crop_url'] = artifact_url(project_id, video_id,
+                        f"{artifacts['identity']['raw_media_prefix']}/{path}")
+        for reading in (identity.get('jersey') or {}).get('readings', []):
+            path = reading.get('crop_path')
+            if path:
+                reading['crop_url'] = artifact_url(project_id, video_id,
+                    f"{artifacts['identity']['raw_media_prefix']}/{path}")
 
     for identity in artifacts["identity"]["people"]:
         decorate_identity(identity)

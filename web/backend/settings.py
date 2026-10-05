@@ -71,6 +71,8 @@ class WebSettings(ExecutionSettings):
         }
         return {
             "ready": all(path.exists() for path in paths.values()),
+            "jnr_ready": all(path.is_file() for path in (
+                self.jnr_python, self.jnr_root / "src/uncertainty_jnr/model.py", self.jnr_config, self.jnr_checkpoint)),
             "paths": {
                 name: {"path": str(path), "exists": path.exists()}
                 for name, path in paths.items()

@@ -86,6 +86,26 @@ class CommandBuilder:
         self, stage: str, paths: dict[str, Path], options: dict[str, Any]
     ) -> list[str]:
         if stage == "jersey":
+            if options.get("jersey_jnr"):
+                for path, label in ((self.settings.jnr_python, "JNR Python"),
+                                    (self.settings.jnr_root / "src/uncertainty_jnr/model.py", "JNR source"),
+                                    (self.settings.jnr_root / "src/uncertainty_jnr/augmentation.py", "JNR preprocessing"),
+                                    (self.settings.jnr_config, "JNR config"),
+                                    (self.settings.jnr_checkpoint, "JNR checkpoint")):
+                    self._require(path, label)
+                command = [str(self.settings.jnr_python), "-m", "cli.jersey_jnr",
+                           "--archive-dir", str(paths["identity_raw"]),
+                           "--identity-map", str(paths["identity_map"]),
+                           "--output-dir", str(paths["identity"]),
+                           "--root", str(self.settings.jnr_root),
+                           "--config", str(self.settings.jnr_config),
+                           "--checkpoint", str(self.settings.jnr_checkpoint), "--overwrite"]
+                for flag, default in (("min-score", .8), ("max-uncertainty", .2), ("min-margin", .2),
+                                      ("min-support", 2), ("min-gap-s", .25)):
+                    command.extend(["--" + flag, str(options.get("jnr_" + flag.replace("-", "_"), default))])
+                if options.get("jnr_trust_checkpoint"):
+                    command.append("--trust-checkpoint")
+                return command
             self._require(self.settings.ocr_python, "OCR Python")
             command = [str(self.settings.ocr_python), "-m", "cli.jersey_numbers",
                        "--archive-dir", str(paths["identity_raw"]),

@@ -148,7 +148,9 @@
                 <label>身份归并距离<input id="identityMergeDistance" type="number" min="0" step="0.01" placeholder="留空：不自动合并" /></label>
                 <label>动作阈值<input id="actionThreshold" type="number" min="0" max="1" step="0.05" value="0.20" /></label>
                 <label class="checkbox-label"><input id="forceRun" type="checkbox" /><span>强制重跑已有阶段</span></label>
-                <label class="checkbox-label"><input id="jerseyOcr" type="checkbox" /><span>识别号码候选（需独立 OCR 环境）</span></label>
+                <label class="checkbox-label"><input id="jerseyOcr" type="checkbox" /><span>EasyOCR号码候选（仅展示）</span></label>
+                <label class="checkbox-label"><input id="jerseyJnr" type="checkbox" /><span>JNR号码候选（需独立 JNR 环境；不与EasyOCR同时选）</span></label>
+                <label class="checkbox-label"><input id="jnrTrustCheckpoint" type="checkbox" /><span>允许JNR训练元数据加载（仅确认是作者权重时选）</span></label>
                 <label class="checkbox-label"><input id="allowOcrDownload" type="checkbox" /><span>允许下载 OCR 权重</span></label>
               </div>
               <div class="module-buttons">

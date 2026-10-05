@@ -442,6 +442,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .library-card-copy p { color: #617789; font-size: 12px; }
 .library-preview-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
 .library-preview-row img { width: 34px; height: 52px; object-fit: contain; background: #edf4f3; border-radius: 5px; }
+.jnr-readings { display: flex; flex-wrap: wrap; gap: 12px; max-height: 380px; overflow-y: auto; margin-top: 12px; }
+.jnr-readings > span { width: 132px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.jnr-readings img { width: 100%; height: 152px; object-fit: contain; background: var(--bg-soft); border-radius: 5px; }
+.jnr-readings small { display: block; margin-top: 6px; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 .library-card-link { font-size: 12px; color: var(--library-accent); }
 .library-person-detail, .library-event-section { border-top: 1px solid #e1e9ee; padding-top: 24px; margin-top: 24px; }
 .library-members { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; max-height: 620px; overflow-y: auto; padding: 2px; }

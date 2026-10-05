@@ -200,6 +200,8 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
         if number and set(number.get('raw_track_ids', [])) != set(person.get('raw_track_ids', [])):
             jersey_warnings.append(f"{person['person_id']}: stale jersey evidence excluded; rerun jersey_numbers with the current identity map")
             number = None
+        if number:
+            number = {**number, 'tracks': [jersey_tracks[tid] for tid in number['raw_track_ids'] if tid in jersey_tracks]}
         person['jersey'] = number
     identity_by_id = {
         str(item.get("person_id")): item for item in identities if item.get("person_id")

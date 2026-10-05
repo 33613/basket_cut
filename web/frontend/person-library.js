@@ -3,6 +3,16 @@ const libraryState = {offset: 0, q: '', status: 'all', person: null, event: '', 
   eventQuery: '', minScore: 0.2, revision: null, request: 0, eventRequest: 0, personRequest: 0,
   editing: false, available: false, opened: false};
 
+function libraryJersey(jersey, showEvidence = false) {
+  if (!jersey) return '';
+  const label = jersey.number != null ? `JNR号码候选 #${jersey.number} · 队伍未知 · 未核实` :
+    jersey.status === 'conflict' ? '号码冲突 · 已阻止自动跨片段归并' : '号码未知 / 证据不足';
+  const readings = (jersey.tracks || []).flatMap(t => t.readings || []);
+  return `<p class="jersey-badge">${escapeHtml(label)}</p>${showEvidence && readings.length ?
+    `<details><summary>读号中间结果（${readings.length} 帧）</summary><div class="jnr-readings">${readings.map(r =>
+      `<span>${r.crop_url ? `<a href="${escapeHtml(r.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(r.crop_url)}" alt="JNR原始人物裁剪" loading="lazy" /></a>` : ''}<small>帧 ${escapeHtml(r.frame_idx)} · #${escapeHtml(r.text)}<br />score ${Number(r.raw_score).toFixed(3)} · u ${Number(r.uncertainty).toFixed(3)}<br />${escapeHtml((r.rejection_reasons || []).join(' / ') || '候选支持帧；非真值')}</small></span>`).join('')}</div></details>` : ''}`;
+}
+
 function bindPersonLibrary() {
   $('#openPersonLibraryButton').addEventListener('click', openPersonLibrary);
   $('#closePersonLibrary').addEventListener('click', closePersonLibrary);
@@ -80,11 +90,11 @@ async function loadPersonLibrary() {
       [s.merged_group_count, '跨片段人物组', `待复核局部档案 ${s.held_archive_count}`],
       [s.event_count, '可检索事件区间', '动作预测未经人工验证']].map(([value, label, note]) =>
       `<div class="batch-stat"><strong>${escapeHtml(value)}</strong><span>${label}</span><small>${escapeHtml(note)}</small></div>`).join('');
-    $('#personLibraryWarning').textContent = `跨片段阈值 ${s.settings.max_distance ?? '未开启'} · 候选归并不是确定身份；不会强行压成10人。时间为各原片段内的秒数，不是整场时间轴。${data.stale_review ? ' 旧人工复核已失效，请恢复自动归并后重新核查。' : ''}${s.warnings?.length ? ` 数据警告 ${s.warnings.length} 条。` : ''}`;
+    $('#personLibraryWarning').textContent = `跨片段阈值 ${s.settings.max_distance ?? '未开启'} · ${s.jersey_constraints ? `JNR号码冲突约束已启用，候选号码档案 ${s.candidate_number_archives} 个；相同号码不会强制合并。` : '仅KPR与质量约束。'}候选归并不是确定身份；不会强行压成10人。时间为各原片段内的秒数，不是整场时间轴。${data.stale_review ? ' 旧人工复核已失效，请恢复自动归并后重新核查。' : ''}${s.warnings?.length ? ` 数据警告 ${s.warnings.length} 条。` : ''}`;
     const labels = {candidate: '候选身份', needs_review: '待检查 / 未自动匹配', manual_grouping: '人工归组 · 非准确率'};
     $('#personLibraryGrid').innerHTML = data.items.map(p => `<button class="library-card ${libraryState.person === p.global_person_id ? 'selected' : ''}" data-library-person="${escapeHtml(p.global_person_id)}">
       <div class="library-cover">${p.cover?.crop_url ? `<img src="${escapeHtml(p.cover.crop_url)}" alt="候选人物代表图" loading="lazy" />` : '<span>暂无代表图</span>'}<span class="library-status">${labels[p.status] || escapeHtml(p.status)}</span></div>
-      <div class="library-card-copy"><strong>${escapeHtml(p.identity_label || p.global_person_id)}</strong><small>${escapeHtml(p.global_person_id)}</small><p>${p.clip_count} 个片段 · ${p.local_archive_count} 个局部档案 · ${p.event_count} 个事件</p>
+      <div class="library-card-copy"><strong>${escapeHtml(p.identity_label || p.global_person_id)}</strong><small>${escapeHtml(p.global_person_id)}</small>${libraryJersey(p.jersey)}<p>${p.clip_count} 个片段 · ${p.local_archive_count} 个局部档案 · ${p.event_count} 个事件</p>
       <div class="library-preview-row">${p.previews.filter(c => c.crop_url).map(c => `<img src="${escapeHtml(c.crop_url)}" alt="来源外观" loading="lazy" />`).join('')}</div><span class="library-card-link">核查来源 · 查看人物事件 ↗</span></div></button>`).join('') || emptyState('没有符合条件的人物', '清除搜索或切换筛选条件。');
     $$('#personLibraryGrid [data-library-person]').forEach(button => button.addEventListener('click', () => selectLibraryPerson(button.dataset.libraryPerson)));
     pager('personLibraryPagination', data.offset, data.limit, data.total, offset => { libraryState.offset = offset; loadPersonLibrary(); });
@@ -111,7 +121,7 @@ async function selectLibraryPerson(personId) {
       <p class="scope-warning">输入相同的“球队＋号码”标签可人工归组；不能合并同一片段中的不同局部人物。错误成员可拆出，混人轨迹须回到轨迹页处理。</p>
       <div class="library-members">${p.members.map(m => `<article class="library-member">
         ${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="局部档案来源" loading="lazy" />` : ''}
-        <div><strong>${escapeHtml(m.filename)}</strong><small>${escapeHtml(m.local_person_id)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))} · ${m.sample_count} 个KPR样本</small><p>${escapeHtml(m.hold_reasons.join(' / ') || '自动匹配证据通过；仍需人工核查')}</p>
+        <div><strong>${escapeHtml(m.filename)}</strong><small>${escapeHtml(m.local_person_id)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))} · ${m.sample_count} 个KPR样本</small><p>${escapeHtml(m.hold_reasons.join(' / ') || '自动匹配证据通过；仍需人工核查')}</p>${libraryJersey(m.jersey, true)}
         <div class="library-preview-row">${m.exemplars.filter(s => s.crop_url).map(s => `<img src="${escapeHtml(s.crop_url)}" alt="时序外观证据" loading="lazy" />`).join('')}</div>
         <button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button><button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '恢复自动匹配' : '从人物组拆出'}</button></div></article>`).join('')}</div>
       <details class="library-pair-evidence"><summary>最近匹配证据（${p.pairs.length} 对；距离不是置信度）</summary>${p.pairs.map(pair => `<div class="library-pair"><div>${[pair.left, pair.right].map(m => `<span>${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="匹配来源" loading="lazy" />` : ''}${escapeHtml(m.filename)} / ${escapeHtml(m.local_person_id)}</span>`).join('')}</div><p>距离 ${pair.distance == null ? '无可比部位' : Number(pair.distance).toFixed(3)} · ${pair.same_global_person ? '当前同组' : '当前分开'} · ${escapeHtml(pair.auto_block_reasons.join(' / ') || '满足候选条件')}</p></div>`).join('') || '<p>没有可用匹配对。</p>'}</details>`;

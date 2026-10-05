@@ -52,6 +52,8 @@ class PipelineRunner:
     ) -> dict[str, Any]:
         if target not in TARGETS:
             raise ValueError(f"Unknown target {target!r}; expected one of {TARGETS}")
+        if options.get('jersey_ocr') and options.get('jersey_jnr'):
+            raise ValueError('Choose only one jersey backend')
         key = (project_id, video_id)
         with self._lock:
             if self.store.get_video(project_id, video_id).get("read_only"):
@@ -139,8 +141,8 @@ class PipelineRunner:
         video = self.store.get_video(project_id, video_id)
         paths = self._paths(video)
         paths["output"].mkdir(parents=True, exist_ok=True)
-        plan = self._plan(target, paths, force, jersey=bool(options.get('jersey_ocr')))
-        if not options.get('jersey_ocr'):
+        plan = self._plan(target, paths, force, jersey=bool(options.get('jersey_ocr') or options.get('jersey_jnr')))
+        if not options.get('jersey_ocr') and not options.get('jersey_jnr'):
             plan = [stage for stage in plan if stage != 'jersey']
             self.store.set_stage(project_id, video_id, 'jersey', 'skipped', return_code=None)
         self._append_log(

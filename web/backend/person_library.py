@@ -57,19 +57,26 @@ def library_context(settings, store, project_id):
 
 def decorate_member(project_id, context, member):
     video = context["videos"][member["clip_name"]]
-    root = Path(video["output_dir"]) / "identity"
-
-    def media(sample):
+    def media(sample, kind="identity"):
         result = dict(sample)
+        media_root = Path(video["output_dir"]) / kind
         for key in ("crop_path", "context_path"):
             if result.get(key):
-                within_root(root / result[key], root)
+                within_root(media_root / result[key], media_root)
                 result[key.replace("_path", "_url")] = (
-                    f'/api/projects/{project_id}/videos/{video["video_id"]}/artifacts/identity/'
+                    f'/api/projects/{project_id}/videos/{video["video_id"]}/artifacts/{kind}/'
                     + quote(result[key], safe="/"))
         return result
 
+    jersey = member.get("jersey")
+    if jersey:
+        jersey = {**jersey, "tracks": [
+            {**track, "readings": [media(reading, "identity_raw") for reading in track.get("readings", [])],
+             "candidates": [{**candidate, "evidence": [media(reading, "identity_raw") for reading in candidate.get("evidence", [])]}
+                            for candidate in track.get("candidates", [])]}
+            for track in jersey.get("tracks", [])]}
     return {**member, "web_video_id": video["video_id"], "cover": media(member.get("cover") or {}),
+            "jersey": jersey,
             "exemplars": [media(sample) for sample in member.get("exemplars", [])]}
 
 
@@ -82,6 +89,7 @@ def library_catalog(settings, store, project_id, *, offset=0, limit=12, q="", st
     selected = []
     for person in people:
         text = " ".join([person["global_person_id"], person.get("identity_label") or "",
+                         *((person.get("jersey") or {}).get("candidate_numbers", [])),
                          *(member["filename"] for member in person["members"])])
         matches = {"all": True, "merged": person["local_archive_count"] > 1,
                    "singleton": person["local_archive_count"] == 1,

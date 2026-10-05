@@ -19,7 +19,15 @@ def main():
     parser.add_argument("--merge-distance", type=float)
     parser.add_argument("--cross-clip-distance", type=float,
                         help="After all clips complete, build a match-scoped KPR library; does not change per-clip IDs")
-    parser.add_argument("--jersey-ocr", action="store_true")
+    jersey = parser.add_mutually_exclusive_group()
+    jersey.add_argument("--jersey-ocr", action="store_true")
+    jersey.add_argument("--jersey-jnr", action="store_true", help="Read cached full-person crops with the uncertainty-jnr baseline")
+    parser.add_argument("--jnr-trust-checkpoint", action="store_true", help="Allow pickle for explicitly trusted author weights only")
+    parser.add_argument("--jnr-min-score", type=float, default=.8)
+    parser.add_argument("--jnr-max-uncertainty", type=float, default=.2)
+    parser.add_argument("--jnr-min-margin", type=float, default=.2)
+    parser.add_argument("--jnr-min-support", type=int, default=2)
+    parser.add_argument("--jnr-min-gap-s", type=float, default=.25)
     parser.add_argument("--allow-ocr-download", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -36,7 +44,11 @@ def main():
     result = run_batch(ExecutionSettings(), args.input_dir, args.output_dir, limit=args.limit,
                        selection=args.selection, target=args.target, force=args.force, dry_run=args.dry_run,
                        options={"min_free_gb": args.min_free_gb, "identity_merge_distance": args.merge_distance,
-                                "jersey_ocr": args.jersey_ocr, "allow_ocr_download": args.allow_ocr_download})
+                                "jersey_ocr": args.jersey_ocr, "allow_ocr_download": args.allow_ocr_download,
+                                "jersey_jnr": args.jersey_jnr, "jnr_trust_checkpoint": args.jnr_trust_checkpoint,
+                                "jnr_min_score": args.jnr_min_score, "jnr_max_uncertainty": args.jnr_max_uncertainty,
+                                "jnr_min_margin": args.jnr_min_margin, "jnr_min_support": args.jnr_min_support,
+                                "jnr_min_gap_s": args.jnr_min_gap_s})
     if args.cross_clip_distance is not None:
         if args.dry_run:
             result["person_library_plan"] = {"enabled": True, "max_distance": args.cross_clip_distance,
@@ -46,7 +58,8 @@ def main():
         else:
             from workflows.person_library import PersonLibraryOptions, build_person_library
             result["person_library"] = build_person_library(PersonLibraryOptions(
-                args.output_dir, max_distance=args.cross_clip_distance, overwrite=True))
+                args.output_dir, max_distance=args.cross_clip_distance,
+                use_jersey_evidence=args.jersey_jnr, overwrite=True))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result.get("failed_clips"):
         raise SystemExit(1)

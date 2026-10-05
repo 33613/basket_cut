@@ -50,6 +50,13 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
     if target not in {"identity", "full"}:
         raise ValueError("target must be identity or full")
     options = dict(options or {})
+    if options.get("jersey_jnr") and options.get("jersey_ocr"):
+        raise ValueError("Choose one jersey backend, JNR or EasyOCR")
+    if options.get("jersey_jnr"):
+        from pipeline.identity.jersey_jnr import validate_thresholds
+        validate_thresholds(options.get("jnr_min_score", .8), options.get("jnr_max_uncertainty", .2),
+                            options.get("jnr_min_margin", .2), options.get("jnr_min_support", 2),
+                            options.get("jnr_min_gap_s", .25))
     sources = select_inputs(input_dir, limit, selection)
     output = output_dir.resolve()
     # Outputs must never be mixed into the data tree or overlap source inputs.
@@ -76,12 +83,16 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
     code_files = {p.relative_to(settings.repository_root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                   for folder in ('cli', 'workflows', 'pipeline', 'contracts', 'adapters', 'analysis')
                   for p in (settings.repository_root / folder).rglob('*.py')}
+    if options.get("jersey_jnr"):
+        for filename in ("model.py", "augmentation.py"):
+            path = settings.jnr_root / "src/uncertainty_jnr" / filename
+            code_files["jnr_source/" + filename] = hashlib.sha256(path.read_bytes()).hexdigest()
     for source in sources:
         relative = source.relative_to(data).as_posix()
         slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in source.stem)[:70]
         name = f"{slug}-{hashlib.sha256(relative.encode()).hexdigest()[:8]}"
         paths = builder.paths({"source_path": str(source), "output_dir": str(output / name)})
-        stages = stages_for(target, options.get("jersey_ocr", False))
+        stages = stages_for(target, bool(options.get("jersey_ocr") or options.get("jersey_jnr")))
         commands = {stage: command_for(stage, paths) for stage in stages}
         # Model/config changes invalidate resume, even when filenames stay the same.
         resources = {str(p): [p.stat().st_size, p.stat().st_mtime_ns]
