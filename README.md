@@ -1,204 +1,147 @@
-# basket_cut
+# CourtVision · 篮球视频人物素材归档
 
-篮球短视频的人物追踪、身份归档、动作事件分析与可视化检查。
+`basket_cut` 是面向篮球视频整理与后续剪辑的可视化原型：**把同场比赛的短视频整理成可追溯的人物档案，并按“人物＋事件”找回对应片段。**
 
-```text
-视频 → MOTIP → 原始轨迹 → 质量检查 → KPR 原始档案 → 人物归并
-                                  └→ MMAction2 → 人物事件 → 区间
+系统已经串联人物追踪、轨迹质量筛选、身份归档、跨片段候选归并、动作预测和网页复核。目前重点是人物素材整理与检索，还不是自动生成集锦的完整剪辑产品。
+
+## 1. 产品做了什么
+
+- **看轨迹**：逐帧定位人物，保留原始轨迹，并标记短碎片、异常运动和疑似重复框。
+- **建档案**：为轨迹保存代表图片、时序样本和外观特征，尝试合并单视频中同一人的轨迹碎片。
+- **找同人**：在同场比赛不同片段之间建立候选人物库，保留每个成员的来源视频与轨迹。
+- **找事件**：把人物动作预测点聚合成时间区间，通过人物档案、事件类型检索并跳转原视频。
+- **可复核**：网页展示原始/筛选轨迹、原始/归并档案、号码证据和事件时间轴，支持持久化复核与人工修正。
+
+三个 ID 层级分开保存：**原始轨迹 ID → 单视频人物 ID → 比赛级候选人物 ID**。同一编号跨视频不代表同一人；候选身份也不等于已确认的真人身份。
+
+## 2. 采用的论文与模型
+
+| 职责 | 论文与公开实现 | 本项目中的作用 |
+| --- | --- | --- |
+| 人物追踪 | [Multiple Object Tracking as ID Prediction](https://arxiv.org/abs/2403.16848)，CVPR 2025 · [MOTIP](https://github.com/MCG-NJU/MOTIP) | 根据历史轨迹特征和 ID 上下文，为当前检测预测轨迹 ID；采用 SportsMOT 权重。 |
+| 外观重识别 | [Keypoint Promptable Re-Identification](https://arxiv.org/abs/2407.18112)，ECCV 2024 · [KPR](https://github.com/VlSomers/keypoint_promptable_reidentification) | 提取身体部位特征与可见性，比较轨迹是否可能属于同一人。 |
+| 动作预测 | [SlowFast Networks for Video Recognition](https://arxiv.org/abs/1812.03982)，ICCV 2019 · [MMAction2](https://github.com/open-mmlab/mmaction2) | 慢速分支建模外观语义，快速分支建模运动；复用追踪框进行人物动作检测。 |
+| 号码证据 | [Single-Stage Uncertainty-Aware Jersey Number Recognition in Soccer](https://openaccess.thecvf.com/content/CVPR2025W/CVSPORTS/papers/Grad_Single-Stage_Uncertainty-Aware_Jersey_Number_Recognition_in_Soccer_CVPRW_2025_paper.pdf)，CVPR Workshops 2025 · [Uncertainty-JNR](https://github.com/lukaszgrad/uncertainty-jnr) | 采用 ViT-S 足球预训练模型，输出号码类别分数与不确定性，作为归并的辅助约束。 |
+
+KPR 使用 [Hugging Face 多数据集权重](https://huggingface.co/trackinglaboratory/keypoint_promptable_reid/tree/main)，对应 DanceTrack、SportsMOT、PoseTrack21、OccludedDuke、Market。动作模块使用 [MultiSports](https://openaccess.thecvf.com/content/ICCV2021/html/Li_MultiSports_A_Multi-Person_Video_Dataset_of_Spatio-Temporally_Localized_Sports_Actions_ICCV_2021_paper.html) 的 [MMAction2 SlowFast 配置与权重](https://github.com/open-mmlab/mmaction2/tree/main/configs/detection/slowfast)。这些模型是引用的基线，不是本项目提出的新网络；本项目实现的是场景适配、模块编排、约束归档、事件索引与复核界面。
+
+## 3. 处理链路
+
+```mermaid
+flowchart TD
+    V[同场比赛的短视频] --> M[MOTIP：逐帧追踪]
+    M --> Q[质量检查：筛选轨迹与保留告警]
+    Q --> K[KPR：时序采样、特征与原始档案]
+    K --> L[单视频：受约束的人物归并]
+    L --> J[JNR：读取缓存样本，形成号码证据]
+    Q --> A[SlowFast：追踪框作为动作候选框]
+    A --> E[身份映射：动作点聚合成事件区间]
+    L --> E
+    L --> C[同场跨片段：KPR 候选人物库]
+    J -->|号码冲突约束| C
+    E --> C
+    C --> W[网页：人物素材、事件检索与来源复核]
 ```
 
-事件输出为 `[id, event, start, end, raw_score]`，时间单位为秒、区间为 `[start, end)`。
-原始分数、OCR 读数、轨迹数量和档案减少量都不是准确率。
-片段内身份与可选的比赛级候选身份分开保存，不改写原始轨迹。
+以下规则均对应现有代码。阈值是可配置的工程初值，不是模型准确率。
 
-## 结构与环境
+### 3.1 追踪与轨迹质量筛选
 
-- `pipeline/{tracking,identity,action}`：独立模块；`cli`：运行接口；`workflows`：编排。
-- `contracts`：数据契约与配置；`analysis`：评估、检查与可视化。
-- `tools`：数据和权重准备；`web`：检查界面；`configs`：通用配置。
-- `runtime/{data,models,outputs}`：默认资源目录，均不提交。上游源码不修改。
+MOTIP 为每个视频独立建立追踪状态，输出帧号、时间、人物框、检测分数和原始轨迹 ID。`det` 是检测分数，不是“这条轨迹始终同人”的概率。
 
-Python 3.10+。GPU 模块分别按 [MOTIP](MOTIP/docs/INSTALL.md)、
-[MMAction2](MMAction2/docs/en/get_started/installation.md)、
-[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification) 官方说明安装到独立环境。
-KPR 源码放在根目录 `KPR/`。权重见 [MOTIP Model Zoo](MOTIP/docs/MODEL_ZOO.md) 和
-[MultiSports 配置](MMAction2/configs/detection/slowfast/README.md)；KPR 可用 `cli.download_kpr` 下载。
+质量筛选先看时序支持：默认至少 **3 次观测，且观测数量 / FPS ≥ 0.1 秒**；不足的轨迹不传入后续模块，但原始记录保留。再计算框中心的归一化移动速度、缺失间隔和同帧重叠：异常跳变标记待审，高度重叠标记疑似重复。**默认不会仅凭跳变或重叠就删除轨迹，也不自动修复 ID 切换。**
 
-复制 `.env.example` 为私有 `.env`，填写数据、结果、权重和各环境 Python 的实际路径。
-`cli.serve_web`、`cli.process_batch`、`cli.import_web_results` 接受 `--env-file .env`，
-无需额外安装 dotenv；也可以设置环境变量。不要求特定机器、用户名或环境名称。
+源码：[追踪适配器](pipeline/tracking/motip_backend.py) · [质量检查](pipeline/tracking/quality.py)
 
-## 批量处理
+### 3.2 单视频建立人物档案
 
-先用 `--list-only` 查看预计解压大小；只解压选中的视频，不展开整个数据集：
+先从保留轨迹中选取检测分数与尺寸合格的人物框，默认每轨迹最多 8 张、沿时间分散选帧，各时间分组优先选择检测分数较高的样本。保存人物裁剪图和带框上下文图，让档案不只剩一个不可解释的向量。
 
-```bash
-python -m cli.extract_videos --archive runtime/data/videos.tar \
-  --output-dir runtime/data/subset --limit 30 --max-gb 6 --list-only
-python -m cli.extract_videos --archive runtime/data/videos.tar \
-  --output-dir runtime/data/subset --limit 30 --max-gb 6
+KPR 为每张图输出部位特征与可见性；同一轨迹内按可见性加权平均并归一化，形成轨迹原型。档案封面综合检测分数、可见性、清晰度、尺寸及原型距离选择，同时保留多张代表图、时间范围和轨迹内外观差异。
 
-python -m cli.process_batch --env-file .env \
-  --input-dir runtime/data/subset --selection runtime/data/subset/video_selection.json \
-  --output-dir runtime/outputs/batch30 --limit 30 --target full --dry-run
-python -m cli.process_batch --env-file .env \
-  --input-dir runtime/data/subset --selection runtime/data/subset/video_selection.json \
-  --output-dir runtime/outputs/batch30 --limit 30 --target full
-```
+初始档案一轨迹一份。随后以 KPR 距离归并碎片，但还要求时间间隔合理、同帧不存在明显空间冲突、样本与外观一致性合格。归组要求组间所有成员都满足距离约束，避免“甲像乙、乙像丙”就把甲乙丙无限串联。原始轨迹和档案不被覆盖。
 
-先试 1 条，再运行固定 30 条；后续扩大批次用新的输出目录。任务串行、失败保留、
-同配置重跑会从未完成阶段继续。输入、权重、代码或参数变化会拒绝静默复用；不要随意
-`--force` 覆盖用于评估的基线。`--target identity` 跳过动作，只跑追踪、身份与检查。
-`--merge-distance` 必须明确指定，未给出时不自动归并；距离需要小样本校准，不是概率。
+**Prompt 边界**：当前默认 `prompt_mode=none`；`keypoints` 模式支持外部提供的目标 COCO 17 点，以及可选的非目标关键点。项目尚未自动生成这些关键点，不能把默认运行称为“已启用关键点提示”。
 
-每视频保留 `tracking` 原始轨迹、`quality` 过滤轨迹、`identity_raw` 原始档案、
-`identity` 归并档案、`action` 预测与事件、`analysis/track_review` 时序证据。
-单模块参数可用 `python -m cli.tracking --help` 等查看。
+源码：[采样与归档](pipeline/identity/archive.py) · [KPR 适配与 Prompt](pipeline/identity/kpr_backend.py) · [片段内归并](pipeline/identity/resolution.py)
 
-## 跨片段人物库与事件检索
+### 3.3 号码如何读取，如何参与归并
 
-同场比赛的批次可以添加 `--cross-clip-distance 0.2`，在所有片段完成后建立
-`library/`。它独立于 `--merge-distance`（片段内归并）；二者都是未校准的
-距离阈值，不是概率。不要把不同比赛混进同一人物库。
+JNR 复用 KPR 缓存的时序人物图，按作者的躯干裁剪、缩放和归一化进行推理。每帧保留号码候选、分数、不确定性、前两类分数差及拒绝原因。
 
-```bash
-python -m cli.process_batch --env-file .env \
-  --input-dir runtime/data/match --output-dir runtime/outputs/match100 \
-  --limit 100 --target full --merge-distance 0.2 --cross-clip-distance 0.2
+默认只有分数 ≥ 0.8、不确定性 ≤ 0.2、前两类分差 ≥ 0.2，且至少两个间隔 ≥ 0.25 秒的帧支持，才接受号码候选。读不清留空，强读数冲突保留待审，不用多数票掩盖。模型无法区分 0/00，因此该类别不接受。
 
-# 只重建跨片段库，不重跑任何模型，也不改片段内结果。
-python -m cli.build_person_library --run-dir runtime/outputs/match100 \
-  --max-distance 0.2 --overwrite
-```
+**可靠不同号可以否决跨片段归并；相同号码不会强制归并，也不会放宽 KPR 距离。** 当前先做片段内 KPR 归并，再用 JNR 检查号码冲突；JNR 不回写局部身份。系统尚无自动球队、姓名识别，也未针对号码可读性专门选帧，足球模型在篮球中的效果需要单独验证。
 
-复用 KPR 部位原型与可见性，采用与
-[KPR 官方距离实现](https://github.com/VlSomers/keypoint_promptable_reidentification/blob/main/torchreid/metrics/distance.py)
-一致的可见性加权欧氏距离 / 2。归组使用 complete linkage：所有成员原型都必须
-满足阈值，不沿相似度链无限合并。同片段不同局部档案禁止在比赛级再次归并；
-样本不足、外观不一致、轨迹告警或缺少可比部位时保留独立档案。不会强制输出10个人。
-新 KPR 输出记录 checkpoint 校验和、prompt 模式与特征布局，拒绝混用不同特征空间；
-旧缓存只有在确认权重与设置一致时才显式使用 `--allow-legacy-features`，并保留警告。
+源码：[模型适配](pipeline/identity/jnr_backend.py) · [多帧证据与拒识](pipeline/identity/jersey_jnr.py)
 
-`library/people.jsonl` 保存比赛级 `G-*` 候选档案、代表图引用和来源成员；
-`identity_map.jsonl` 保留 `(clip_name, local_person_id, raw_track_ids) → global_person_id`；
-`match_pairs.jsonl` 保存有界的最近候选与匹配证据；`events.jsonl` 输出比赛级
-`id`，同时保留 `local_person_id`、来源事件与片段名。时间仍是原片段内的秒数，
-不会虚构整场时间轴。`library_manifest.json` 记录覆盖、参数、警告和源文件签名。
-缺少任何计划片段、事件引用无效或来源已改变时拒绝静默生成完整人物库。
+### 3.4 跨片段如何找到同一个人
 
-导入该批次后，网页“比赛人物库”可按人物、事件类型、原始分数和片段名检索，
-点击事件跳转原片段；查看多张来源图、最近匹配距离，拆出误合并成员。
-相同的人工“球队＋号码”标签可归组，但不自动将 OCR 号码当成身份真值。
-人工修正与重新索引保存到网页索引目录的独立 sidecar，不改模型输出，
-有版本冲突和失效检查。恢复自动归并只清空人物库修正，不清空轨迹复核。
-人工归组后的检索是修正后验收，不是独立身份识别准确率。
+同场批次完成后，复用每个局部档案的 KPR 原型与可见性，比较共同可见部位的加权欧氏距离。使用 **complete linkage（完整链接）**：新成员必须与组内所有成员满足阈值；本次批量运行的距离阈值为 0.2，并非“20% 置信度”。
 
-## 号码候选（可选）
+同片段的不同局部档案禁止在比赛级再次归并；样本不足、外观不一致、轨迹告警、可比部位不足或号码冲突的档案暂不自动归并，仍保留为独立候选。权重、Prompt 和特征布局须兼容，不能混用不同特征空间。
 
-在独立 OCR 环境安装 `requirements-ocr.txt`，在 `.env` 配置
-`BASKET_OCR_PYTHON`、`BASKET_OCR_MODEL_DIR`。给批量命令添加 `--jersey-ocr`；
-首次下载权重需明确加 `--allow-ocr-download`。
+比赛级 ID 是新增索引，保存 `视频 → 局部人物 → 原始轨迹` 的完整映射。不强制凑成 10 人，也不把外观匹配等同于实名身份或同人证明。
 
-使用通用 EasyOCR 读取近似躯干区域，多个独立帧支持才给出候选；冲突或读不清留空，
-保留读数、位置和图片证据。不是训练好的球衣号码模型，也不能证明整条轨迹同人。
-相同号码可能属于不同球队，OCR 永远不直接改写或归并身份。
+源码：[部位距离与约束归组](pipeline/identity/cross_clip.py) · [比赛人物库与来源索引](workflows/person_library.py)
 
-## 专用球衣号码基线（JNR）
+### 3.5 动作预测如何变成可检索事件
 
-[Single-Stage Uncertainty-Aware Jersey Number Recognition in Soccer](https://github.com/lukaszgrad/uncertainty-jnr)
-提供 ViT-S / ViT-B 的 SoccerNet 权重。先用 ViT-S；论文最佳模型未公开，
-足球测试准确率不能当作篮球准确率。该上游采用 CC-BY-SA-4.0，使用或分发须遵守许可。
-适配器不修改上游源码，不安装其训练/云日志依赖。独立 Python 3.11 环境：
+SlowFast 接收视频时间窗口，并复用筛选后的 MOTIP 人物框作为候选框，产生各人物在采样时刻的动作类别分数。先通过身份映射把轨迹动作归到局部人物，再按“同人物、同类别、相邻采样点”聚合：超过分数阈值的点可跨少量缺失步连接，首尾按采样间隔扩展并裁到视频范围，默认取支持点分数均值。
 
-```bash
-conda create -p ./runtime/envs/jnr python=3.11 pip -y
-conda activate ./runtime/envs/jnr
-python -m pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu124
-python -m pip install -r requirements-jnr.txt
-git clone https://github.com/lukaszgrad/uncertainty-jnr.git UncertaintyJNR
-git -C UncertaintyJNR checkout f19d9cb90e1a67d5ffe44acbf69fb348fe6525e7
-python -m cli.download_jnr --model vit-small --output-dir runtime/models/jnr
-python -m cli.inspect_jnr --device cuda
-```
+输出核心是 `[id, event, start, end, raw_score]`，同时保留来源视频、原始轨迹与支持点数。时间以原片段内秒计，区间为 `[start, end)`；跨片段检索不虚构整场时间轴。`raw_score` 未校准，不是正确率；区间边界是聚合估计，不是新模型学习出的精确动作边界。
 
-在 `.env` 配置 `BASKET_JNR_PYTHON`、`BASKET_JNR_ROOT`、`BASKET_JNR_CONFIG`、
-`BASKET_JNR_CHECKPOINT`。直接调用 `cli.inspect_jnr` / `cli.jersey_jnr` 不自动加载
-`.env`，自定义资源路径请用命令参数；批处理加载 `.env`。
-权重默认安全加载、严格匹配所有层。只有确认来自作者的文件，且安全加载确实拒绝
-训练元数据时，才加 `--trust-checkpoint`（批量为 `--jnr-trust-checkpoint`）。
-Google Drive 下载失败时从作者链接下载后传入 `--checkpoint`，不要找不明镜像。
+事件聚合是本项目对 MMAction2 点预测的适配，不属于 SlowFast 基线。当前动作模块提供候选事件，尚不能承诺准确找全投篮、判断进球结果或理解战术。
 
-```bash
-python -m cli.process_batch --env-file .env \
-  --input-dir runtime/data/smoke5 --output-dir runtime/outputs/jnr5 \
-  --limit 5 --target full --jersey-jnr --merge-distance 0.2 --cross-clip-distance 0.2
-```
+源码：[动作推理](pipeline/action/service.py) · [身份关联](workflows/link_events.py) · [事件区间适配](adapters/mmaction2/temporal_events.py)
 
-复用 KPR 时序采样的人物原图，按作者的躯干裁剪、缩放和归一化运行模型。
-这不是为号码可读性专门选帧；侧面、遮挡、框内多人的样本可能无法读号。
-保存 `identity/jersey_{readings,tracks,people}.jsonl`、`jersey_predictions.npz`
-（全部100类分数与不确定性）、`jersey_summary.json`（权重/源码校验和、阈值与拒绝原因）。
-默认分数≥0.8、不确定性≤0.2、top2差≥0.2，至少2帧且间隔≥0.25秒支持；
-这些是初始工程阈值，不是校准的准确率。强读数冲突不会被多数票掩盖。
-模型类别仅0–99，无法区分0/00，因此类0留空并标记。没有球队/姓名识别。
+## 4. 网页如何呈现成果
 
-`--jersey-jnr` 与 `--cross-clip-distance` 同用时，比赛级库会采用号码冲突约束：
-可靠不同号禁止归并，局部号码混乱的档案保留待审；同号不降低KPR阈值、不强制归并。
-片段内归并仍由KPR执行，JNR只检查并标记其冲突，不改写原始轨迹与局部ID。
-重建库使用 `cli.build_person_library --use-jersey-evidence`；缺少JNR结果或混用权重/阈值会报错。
-网页展示原始读数、拒绝帧、号码候选和归并来源，号码可检索但不是实名身份。
-先复核5条中的接受读数是否正确、不可读是否留空、归并是否混人，再固定设置处理100条。
-没有人工号码真值时只报告覆盖与冲突数量，不能报告号码准确率。
+亮色检查界面将结果组织成三个层次：
 
-## 网页与验收
+1. **批次工作台**：视频队列、处理状态、告警与复核进度，支持筛选和分页检查。
+2. **单视频检查**：原视频、轨迹/最终叠加视频、轨迹时序证据、原始/归并人物档案、号码读数、动作点和事件区间。
+3. **比赛人物库**：代表图与来源成员，按人物、事件类型、片段名等检索，跳转对应视频时段；支持人工标记与拆出误归并成员。
 
-```bash
-python -m pip install -r requirements-web.txt
-python -m cli.import_web_results --env-file .env --result-dir runtime/outputs/batch30
-python -m cli.serve_web --env-file .env --port 6006
-```
+中间结果持久保存，网页导入建立索引，人工修正另存，不覆盖模型原始输出。能演示结果，也能追问“为什么合并、来自哪条轨迹、哪些证据不足”。
 
-打开 `http://127.0.0.1:6006`。原始/归并档案分开展示，能追溯来源轨迹、图片、事件。
-批量审查按视频名、待审/告警/不确定状态筛选，每页 12 条视频、6 条轨迹；
-可先检查保留轨迹，再切换已过滤碎片检查误删。分页草稿合并保存，不覆盖其他页，
-支持“保存并下一条视频”。多个窗口同时修改时拒绝覆盖旧版本。人物素材图库独立于
-事件结果，每页 18 个档案，支持号码候选搜索；不同视频中的同名 ID 不代表同一真人。
-记录与复核持久保存在配置的索引目录；重启必须使用同一配置。点击右上角查看实际目录。
-导入只建立只读索引；浏览器编码不兼容时安装 FFmpeg，再导入加 `--prepare-media`。
-复核页可用配置的 OpenCV Python 在独立缓存生成截图，无需 GPU、不修改原预测。
-旧过滤副本缺失原始 ID 时会明确拒绝完整评估，应导入原始基线。
+源码：[网页前端](web/frontend) · [人物库界面](web/frontend/person-library.js) · [结果索引](web/backend/imports.py) · [复核记录](web/backend/reviews.py)
 
-验收只抓三个问题：轨迹是否始终同人、同人是否多 ID、归并档案是否混人。
-完整看完轨迹才标记 `full_track`；抽样只能发现反例。保存队伍＋号码等标签后，
-完整复核覆盖率、同人率、额外 ID 数、已标注纯轨迹上的身份成对 F1 才有对应分母。
-无真值、无复核时数值留空；过滤量不能冒充正确率。基于同一复核标签修正后再评分，
-只能叫修正后验收，不能叫独立模型准确率。
+## 5. 当前验证：同场比赛 100 个短视频
 
-```bash
-python -m cli.evaluate_run --run-dir runtime/outputs/batch30 \
-  --web-output-root runtime/outputs/web
-```
+一次 PL-NBA 同场比赛批量运行的结果如下。**这是处理与归档规模记录，不是独立准确率评测。**
 
-MultiSports 的公开验证标注可用于动作区间/动作 tube 评估，不提供整场持续真人身份与
-号码真值；测试集元信息不能代替动作 GT。轨迹真值评估用 `cli.evaluate_tracking`；
-动作 GT 适配用 `cli.prepare_multisports_reference` 与 `cli.evaluate_event_batch`。
-网页也可导出冻结的复核包，用 `cli.evaluate_track_reviews` 离线重算。
-100 条处理成功不等于泛化；开发数据与未参与调参的不同比赛留出数据分开。
+| 项目 | 结果 | 正确解读 |
+| --- | ---: | --- |
+| 处理片段 | 100 | 已跑通批处理与结果浏览。 |
+| 原始轨迹 → 有时序支持轨迹 | 3,049 → 1,516 | 筛掉支持不足的轨迹；减少量不能证明全部误检都被删掉。 |
+| 局部档案 → 比赛级候选档案 | 1,516 → 848 | 在保守约束下减少重复档案；848 不是实际球员人数。 |
+| 跨片段归并组 | 132 | 每组包含多个局部档案；不是“只剩 132 人”。 |
+| 待审局部档案 | 626 | 未进入自动跨片段归并，作为独立候选保留，已计入 848。 |
+| 接受号码候选的局部档案 | 2 | 目前覆盖很低，号码约束尚未充分发挥作用；不代表号码识别准确率。 |
 
-## 回归与隐私
+计数关系为：**848 = 132 个归并组 + 626 个待审独立档案 + 90 个其他未归并独立档案**。132 组覆盖 800 个局部档案，所有 1,516 个局部档案都保留来源，没有因待审而消失。
 
-```bash
-python -m cli.check_quality
-python -m cli.check_evaluation
-python -m cli.check_track_review
-python -m cli.check_batch
-python -m cli.check_person_library
-python -m cli.check_jnr
-python -m cli.check_privacy
-# 网页/API 检查另外安装 requirements-web-test.txt
-python -m cli.check_web
-```
+少量人工抽查发现了可用的跨片段匹配，但尚不足以给出整体准确率。此批次说明“追踪 → 归档 → 候选归并 → 事件索引 → 网页复核”能够落地；不能证明所有组均为同人、所有素材都被找全，或对其他比赛具有泛化能力。
 
-自检只说明代码逻辑可运行，不代表真实模型效果。服务未带认证，默认只监听回环地址，
-不要直接公开。只提交通用代码；私人配置、运行记录、视频、权重不提交。
-隐私扫描只检查工作树，删除文件不会自动清除旧 Git 历史。保留上游许可证与署名。
+## 6. 评估重点与下一步
+
+先冻结当前结果，独立核查，再提升号码模块，避免修正后用同一批标签宣称模型准确率。产品验收抓住三件事：
+
+- **轨迹是否可用**：完整看轨迹，判断同人、混人或非球员；已实现完整复核覆盖率、同人率和同人多 ID 统计。抽几帧可以发现反例，不能证明全轨迹同人。
+- **人物归并是否可信**：核查组内全部来源是否同人，同时记录同一真人被拆成多少档案，防止只报“合并正确”而隐藏大量漏合并。现有身份成对评估以单视频完整标注为范围；比赛级准确率仍需独立身份标签与完整成员核查。
+- **检索素材是否有用**：以投篮等重点事件验证人物归属、事件类别和时间覆盖，再报告命中率与漏检。事件评估代码已具备，但本批 PL-NBA 的文件名结果标签不能代替逐人物、逐时间区间真值。
+
+近期优先补齐有明确分母的复核结果，改善号码可读性采样与篮球域适配，再用未参与调参的其他比赛检验效果。自动剪辑、长视频按回合切分和战术理解属于后续范围。
+
+源码：[轨迹人工复核评估](analysis/evaluation/track_review.py) · [批次诊断](analysis/evaluation/run_summary.py) · [事件评估](analysis/evaluation/events.py)
+
+## 7. 代码职责与可追溯性
+
+- `pipeline/{tracking,identity,action}` 封装三类模型功能；`adapters` 保存基线输出适配，不混入基线网络。
+- `workflows` 编排步骤，`cli` 提供调用接口，`contracts` 统一数据契约。
+- `analysis` 负责评估与可视化，`web` 负责交互检查，`tools` 负责数据和权重准备。
+
+每个片段分别保留原始轨迹、质量审计、KPR 样本/原型、原始与归并档案、号码证据、动作点和事件；比赛人物库保留成员映射与匹配理由。批处理记录输入、参数、权重和代码签名，支持同配置断点继续，拒绝静默复用已变更的结果。
+
+本项目不改动上游模型源码，不提交私人配置、视频、权重和运行记录。引用模型、数据及其派生内容应遵守各自许可；Uncertainty-JNR 上游为 CC-BY-SA-4.0。当前成果是基于公开模型的可检查应用原型，不将模型论文指标直接作为本产品指标。
