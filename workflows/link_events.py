@@ -21,6 +21,8 @@ class LinkEventsOptions:
     output: Path
     allow_unmapped: bool = False
     overwrite: bool = False
+    player_map: Path | None = None
+    clip_name: str | None = None
 
 
 def load_identity_map(path: Path) -> dict[int, dict[str, Any]]:
@@ -45,6 +47,12 @@ def link_actions_to_people(options: LinkEventsOptions) -> dict[str, Any]:
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mappings = load_identity_map(identity_map_path)
+    players = {}
+    if options.player_map:
+        for row in read_jsonl(options.player_map):
+            if row["clip_name"] == options.clip_name:
+                for tid in row["raw_track_ids"]:
+                    players[int(tid)] = row["global_person_id"]
 
     record_count = 0
     mapped_count = 0
@@ -75,6 +83,7 @@ def link_actions_to_people(options: LinkEventsOptions) -> dict[str, Any]:
             enriched = dict(action)
             enriched["raw_track_id"] = raw_track_id
             enriched["person_id"] = person_id
+            enriched["player_id"] = players.get(raw_track_id)
             enriched["identity_label"] = (
                 mapping.get("identity_label") if mapping else None
             )

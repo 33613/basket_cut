@@ -17,6 +17,7 @@ STAGE_NAMES = (
     "identity",
     "resolution",
     "jersey",
+    "players",
     "action",
     "link",
     "aggregate",

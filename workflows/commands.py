@@ -8,13 +8,13 @@ from typing import Any
 
 
 class CommandBuilder:
-    def __init__(self, settings, control_python: str | None = None):
+    def __init__(self, settings, control_python: str | None = None, *, validate_resources=True):
+        self.validate_resources = validate_resources
         self.settings = settings
         self.control_python = control_python or sys.executable
 
-    @staticmethod
-    def _require(path: Path, label: str) -> None:
-        if not path.is_file():
+    def _require(self, path: Path, label: str) -> None:
+        if self.validate_resources and not path.is_file():
             raise FileNotFoundError(f"{label} not found: {path}")
 
     @staticmethod
@@ -40,6 +40,9 @@ class CommandBuilder:
             "web_result": output / "visualization/result_web.mp4",
             "review": output / "analysis/track_review",
             "log": output / "pipeline.log",
+            "match_root": output.parent,
+            "players": output / "identity/player_registration.json",
+            "player_map": output.parent / "library/identity_map.jsonl",
         }
 
     def artifact_exists(self, stage: str, paths: dict[str, Path]) -> bool:
@@ -54,21 +57,23 @@ class CommandBuilder:
             "render": paths["result"],
             "review": paths["review"] / "index.json",
             "jersey": paths["identity"] / "jersey_summary.json",
+            "players": paths["players"],
         }
         artifact = expected[stage]
+        if stage == "players" and not (paths["match_root"] / "library/players.sqlite3").is_file():
+            return False
         dependencies = {
-            "jersey": [paths["identity_raw"] / "kpr_samples.jsonl", paths["identity_map"]],
+            "jersey": [paths["stable_tracks"], paths["identity_map"]],
+            "players": [paths["identity"] / "resolution_summary.json"] +
+                       ([paths["events"]] if paths["events"].is_file() else []) +
+                       ([expected["jersey"]] if expected["jersey"].is_file() else []),
             "review": [paths["tracks"], paths["video_meta"], paths["quality"] / "quality_tracks.jsonl"],
             "quality": [paths["tracks"], paths["video_meta"]],
             "identity": [paths["stable_tracks"]],
             "resolution": [paths["stable_tracks"], expected["identity"]],
             "action": [paths["stable_tracks"]],
             "link": [paths["actions"], paths["identity_map"]],
-            "aggregate": [
-                paths["linked_actions"]
-                if paths["linked_actions"].is_file()
-                else paths["actions"]
-            ],
+            "aggregate": [paths["actions"]],
             "render": [paths["stable_tracks"]]
             + [
                 path
@@ -86,34 +91,21 @@ class CommandBuilder:
         self, stage: str, paths: dict[str, Path], options: dict[str, Any]
     ) -> list[str]:
         if stage == "jersey":
-            if options.get("jersey_jnr"):
-                for path, label in ((self.settings.jnr_python, "JNR Python"),
-                                    (self.settings.jnr_root / "src/uncertainty_jnr/model.py", "JNR source"),
-                                    (self.settings.jnr_root / "src/uncertainty_jnr/augmentation.py", "JNR preprocessing"),
-                                    (self.settings.jnr_config, "JNR config"),
-                                    (self.settings.jnr_checkpoint, "JNR checkpoint")):
-                    self._require(path, label)
-                command = [str(self.settings.jnr_python), "-m", "cli.jersey_jnr",
-                           "--archive-dir", str(paths["identity_raw"]),
-                           "--identity-map", str(paths["identity_map"]),
-                           "--output-dir", str(paths["identity"]),
-                           "--root", str(self.settings.jnr_root),
-                           "--config", str(self.settings.jnr_config),
-                           "--checkpoint", str(self.settings.jnr_checkpoint), "--overwrite"]
-                for flag, default in (("min-score", .8), ("max-uncertainty", .2), ("min-margin", .2),
-                                      ("min-support", 2), ("min-gap-s", .25)):
-                    command.extend(["--" + flag, str(options.get("jnr_" + flag.replace("-", "_"), default))])
-                if options.get("jnr_trust_checkpoint"):
-                    command.append("--trust-checkpoint")
-                return command
-            self._require(self.settings.ocr_python, "OCR Python")
-            command = [str(self.settings.ocr_python), "-m", "cli.jersey_numbers",
-                       "--archive-dir", str(paths["identity_raw"]),
-                       "--identity-map", str(paths["identity_map"]),
-                       "--output-dir", str(paths["identity"]),
-                       "--model-dir", str(self.settings.ocr_model_dir), "--overwrite"]
-            if options.get("allow_ocr_download"):
-                command.append("--allow-download")
+            self._require(self.settings.qwen_python, "Qwen Python")
+            return [str(self.settings.qwen_python), "-m", "cli.jersey_qwen",
+                    "--video", str(paths["source"]), "--tracks", str(paths["stable_tracks"]),
+                    "--identity-map", str(paths["identity_map"]), "--output-dir", str(paths["identity"]),
+                    "--model-dir", str(self.settings.qwen_model_dir)]
+        if stage == "players":
+            command = [self.control_python, "-m", "cli.build_person_library",
+                       "--run-dir", str(paths["match_root"]), "--clip-name", paths["output"].name,
+                       "--match-id", str(options.get("match_id") or paths["match_root"].name),
+                       "--max-distance", str(options.get("player_match_distance", .2)),
+                       "--novelty-distance", str(options.get("player_novelty_distance", .5)),
+                       "--min-margin", str(options.get("player_min_margin", .05)),
+                       "--registration-output", str(paths["players"])]
+            if options.get("jersey_qwen", True):
+                command.append("--use-jersey-evidence")
             return command
         if stage == "review":
             self._require(self.settings.review_python, "Review Python (OpenCV)")
@@ -208,10 +200,6 @@ class CommandBuilder:
                 str(paths["identity"]),
                 "--overwrite",
             ]
-            if options.get("identity_merge_distance") is not None:
-                command.extend(
-                    ["--max-distance", str(options["identity_merge_distance"])]
-                )
             return command
         if stage == "action":
             self._require(self.settings.action_python, "MMAction2 Python")
@@ -246,6 +234,9 @@ class CommandBuilder:
                 str(self.settings.motip_python),
                 "-m",
                 "cli.link_events",
+                "--allow-unmapped",
+                "--player-map", str(paths["player_map"]),
+                "--clip-name", paths["output"].name,
                 "--actions",
                 str(paths["actions"]),
                 "--identity-map",
@@ -282,17 +273,12 @@ class CommandBuilder:
                 command.extend(["--max-frames", str(int(options["max_frames"]))])
             return command
         if stage == "aggregate":
-            self._require(self.settings.motip_python, "MOTIP Python")
             return [
-                str(self.settings.motip_python),
+                self.control_python,
                 "-m",
                 "cli.aggregate_events",
                 "--input",
-                str(
-                    paths["linked_actions"]
-                    if paths["linked_actions"].is_file()
-                    else paths["actions"]
-                ),
+                str(paths["actions"]),
                 "--video-meta",
                 str(paths["video_meta"]),
                 "--output",

@@ -5,12 +5,12 @@ const libraryState = {offset: 0, q: '', status: 'all', person: null, event: '', 
 
 function libraryJersey(jersey, showEvidence = false) {
   if (!jersey) return '';
-  const label = jersey.number != null ? `JNR号码候选 #${jersey.number} · 队伍未知 · 未核实` :
+  const label = jersey.number != null ? `Qwen号码候选 #${jersey.number} · 队伍未知 · 未核实` :
     jersey.status === 'conflict' ? '号码冲突 · 已阻止自动跨片段归并' : '号码未知 / 证据不足';
   const readings = (jersey.tracks || []).flatMap(t => t.readings || []);
   return `<p class="jersey-badge">${escapeHtml(label)}</p>${showEvidence && readings.length ?
-    `<details><summary>读号中间结果（${readings.length} 帧）</summary><div class="jnr-readings">${readings.map(r =>
-      `<span>${r.crop_url ? `<a href="${escapeHtml(r.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(r.crop_url)}" alt="JNR原始人物裁剪" loading="lazy" /></a>` : ''}<small>帧 ${escapeHtml(r.frame_idx)} · #${escapeHtml(r.text)}<br />score ${Number(r.raw_score).toFixed(3)} · u ${Number(r.uncertainty).toFixed(3)}<br />${escapeHtml((r.rejection_reasons || []).join(' / ') || '候选支持帧；非真值')}</small></span>`).join('')}</div></details>` : ''}`;
+    `<details><summary>读号中间结果（${readings.length} 帧）</summary><div class="number-readings">${readings.map(r =>
+      `<span>${r.crop_url ? `<a href="${escapeHtml(r.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(r.crop_url)}" alt="Qwen原始人物裁剪" loading="lazy" /></a>` : ''}<small>帧 ${escapeHtml(r.frame_idx)} · #${escapeHtml(r.text)}<br />${escapeHtml((r.rejection_reasons || []).join(' / ') || '候选支持帧；非真值')}</small></span>`).join('')}</div></details>` : ''}`;
 }
 
 function bindPersonLibrary() {
@@ -39,9 +39,7 @@ function bindPersonLibrary() {
     ++libraryState.personRequest; $('#libraryPersonDetail').classList.add('hidden');
     $('#librarySelectedPerson').textContent = '全部人物'; loadLibraryEvents();
   });
-  $('#resetLibraryReview').addEventListener('click', () => {
-    if (window.confirm('恢复自动结果？这会清空本批人物库的人工归组和拆出设置，不改原始轨迹。')) editPersonLibrary('reset');
-  });
+
 }
 
 function resetPersonLibrary() {
@@ -75,10 +73,9 @@ async function loadPersonLibrary() {
     const data = await api(`/api/projects/${projectId}/person-library?${query}`);
     if (projectId !== state.project?.project_id || request !== libraryState.request) return;
     libraryState.available = data.available; libraryState.revision = data.revision || null;
-    $('#resetLibraryReview').disabled = !data.available || libraryState.editing;
     if (!data.available) {
       $('#personLibrarySummary').innerHTML = ''; $('#personLibraryGrid').innerHTML = emptyState('人物库尚未建立', data.message);
-      $('#personLibraryWarning').textContent = '先完成所有选定片段，再构建比赛级人物库；不会把片段内同名ID当成同一人。';
+      $('#personLibraryWarning').textContent = '每个片段完成身份处理后更新本场比赛球员库。';
       $('#personLibraryPagination').innerHTML = ''; $('#libraryEvents').innerHTML = ''; return;
     }
     if (data.total && libraryState.offset >= data.total) {
@@ -90,8 +87,8 @@ async function loadPersonLibrary() {
       [s.merged_group_count, '跨片段人物组', `待复核局部档案 ${s.held_archive_count}`],
       [s.event_count, '可检索事件区间', '动作预测未经人工验证']].map(([value, label, note]) =>
       `<div class="batch-stat"><strong>${escapeHtml(value)}</strong><span>${label}</span><small>${escapeHtml(note)}</small></div>`).join('');
-    $('#personLibraryWarning').textContent = `跨片段阈值 ${s.settings.max_distance ?? '未开启'} · ${s.jersey_constraints ? `JNR号码冲突约束已启用，候选号码档案 ${s.candidate_number_archives} 个；相同号码不会强制合并。` : '仅KPR与质量约束。'}候选归并不是确定身份；不会强行压成10人。时间为各原片段内的秒数，不是整场时间轴。${data.stale_review ? ' 旧人工复核已失效，请恢复自动归并后重新核查。' : ''}${s.warnings?.length ? ` 数据警告 ${s.warnings.length} 条。` : ''}`;
-    const labels = {candidate: '候选身份', needs_review: '待检查 / 未自动匹配', manual_grouping: '人工归组 · 非准确率'};
+    $('#personLibraryWarning').textContent = `匹配距离 ${s.settings.max_distance} · 新人物距离 ${s.settings.novelty_distance} · 本场比赛稳定 ID；模糊人物保留待定。${s.jersey_constraints ? '本地 Qwen 号码冲突约束已启用。' : 'KPR-only 模式。'}动作分数不是准确率，时间为原片段内秒数。`;
+    const labels = {candidate: '候选身份', needs_review: '待检查 / 未自动匹配', manual_grouping: '人工确认', non_player: '非球员'};
     $('#personLibraryGrid').innerHTML = data.items.map(p => `<button class="library-card ${libraryState.person === p.global_person_id ? 'selected' : ''}" data-library-person="${escapeHtml(p.global_person_id)}">
       <div class="library-cover">${p.cover?.crop_url ? `<img src="${escapeHtml(p.cover.crop_url)}" alt="候选人物代表图" loading="lazy" />` : '<span>暂无代表图</span>'}<span class="library-status">${labels[p.status] || escapeHtml(p.status)}</span></div>
       <div class="library-card-copy"><strong>${escapeHtml(p.identity_label || p.global_person_id)}</strong><small>${escapeHtml(p.global_person_id)}</small>${libraryJersey(p.jersey)}<p>${p.clip_count} 个片段 · ${p.local_archive_count} 个局部档案 · ${p.event_count} 个事件</p>
@@ -118,15 +115,17 @@ async function selectLibraryPerson(personId) {
     $('#librarySelectedPerson').textContent = p.identity_label || personId;
     const detail = $('#libraryPersonDetail'); detail.classList.remove('hidden');
     detail.innerHTML = `<div class="panel-title"><div><span class="eyebrow">MATCHING EVIDENCE</span><h3>${escapeHtml(p.identity_label || personId)}</h3><p>${p.clip_count} 个片段 · ${p.event_count} 个事件。请看来源，不要只看代表图。</p></div><button class="secondary-button" id="labelLibraryPerson">标记 / 合并到同名人物</button></div>
-      <p class="scope-warning">输入相同的“球队＋号码”标签可人工归组；不能合并同一片段中的不同局部人物。错误成员可拆出，混人轨迹须回到轨迹页处理。</p>
+      <button class="secondary-button" id="confirmLibraryPerson">确认当前身份分组</button><button class="ghost-button" id="excludeLibraryPerson">标记为非球员</button><p class="scope-warning">输入相同的“球队＋号码”标签可人工归组；同一片段中的同时出现人物不能合并。错误成员可拆出，混人轨迹须回到轨迹页处理。</p>
       <div class="library-members">${p.members.map(m => `<article class="library-member">
         ${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="局部档案来源" loading="lazy" />` : ''}
         <div><strong>${escapeHtml(m.filename)}</strong><small>${escapeHtml(m.local_person_id)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))} · ${m.sample_count} 个KPR样本</small><p>${escapeHtml(m.hold_reasons.join(' / ') || '自动匹配证据通过；仍需人工核查')}</p>${libraryJersey(m.jersey, true)}
         <div class="library-preview-row">${m.exemplars.filter(s => s.crop_url).map(s => `<img src="${escapeHtml(s.crop_url)}" alt="时序外观证据" loading="lazy" />`).join('')}</div>
-        <button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button><button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '恢复自动匹配' : '从人物组拆出'}</button></div></article>`).join('')}</div>
+        <button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button><button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '撤销拆出' : '从人物组拆出'}</button></div></article>`).join('')}</div>
       <details class="library-pair-evidence"><summary>最近匹配证据（${p.pairs.length} 对；距离不是置信度）</summary>${p.pairs.map(pair => `<div class="library-pair"><div>${[pair.left, pair.right].map(m => `<span>${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="匹配来源" loading="lazy" />` : ''}${escapeHtml(m.filename)} / ${escapeHtml(m.local_person_id)}</span>`).join('')}</div><p>距离 ${pair.distance == null ? '无可比部位' : Number(pair.distance).toFixed(3)} · ${pair.same_global_person ? '当前同组' : '当前分开'} · ${escapeHtml(pair.auto_block_reasons.join(' / ') || '满足候选条件')}</p></div>`).join('') || '<p>没有可用匹配对。</p>'}</details>`;
+    $('#confirmLibraryPerson').addEventListener('click', () => editPersonLibrary('confirm', {person_id: personId, label: p.identity_label}));
+    $('#excludeLibraryPerson').addEventListener('click', () => { if (window.confirm('标记整组为非球员并停止用于自动匹配？')) editPersonLibrary('exclude', {person_id: personId}); });
     $('#labelLibraryPerson').addEventListener('click', () => {
-      const label = window.prompt('输入球队＋号码等标签。同标签会人工归组；留空移除该组标签。此操作不是独立准确率评估。', p.identity_label || '');
+      const label = window.prompt('输入球队＋号码等标签。同标签会人工归组，并保留身份别名；留空移除该组标签。此操作不是独立准确率评估。', p.identity_label || '');
       if (label !== null) editPersonLibrary('label_group', {person_id: personId, label});
     });
     detail.querySelectorAll('[data-library-open]').forEach(button => button.addEventListener('click', async () => {
@@ -181,6 +180,5 @@ async function editPersonLibrary(operation, extra = {}) {
   } catch (error) { if (projectId === state.project?.project_id) toast('归组未修改', error.message, 'error'); }
   finally {
     libraryState.editing = false; $('#personLibrarySection').classList.remove('library-busy');
-    $('#resetLibraryReview').disabled = !libraryState.available;
   }
 }

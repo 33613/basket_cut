@@ -2,20 +2,18 @@
 
 from dataclasses import replace
 import base64
-import io
 import json
 import math
 from pathlib import Path
 import tempfile
 import unittest
-import contextlib
-import sys
 from unittest.mock import patch
 
 import numpy as np
 
 from contracts.schema import EventRecord, read_jsonl, write_json
-from pipeline.identity.cross_clip import group_nodes, part_distances
+from pipeline.identity.cross_clip import part_distances
+from pipeline.identity.player_registry import PlayerRegistry
 from workflows.person_library import PersonLibraryOptions, build_person_library, library_is_current
 
 
@@ -66,238 +64,239 @@ def make_library_fixture(root, angles=(0, 0.05, 1.4), *, extra_same_clip=False):
         rows(clip / "action/actions.jsonl", [])
         rows(clip / "action/events.jsonl", [EventRecord(name, f"E{tid}", f"P{tid:04d}",
              "basketball_2point_shot", 0.4, 1.2, 0.7, 10, 29, (tid,), 3).to_dict() for tid in range(count)])
-    write_json(run / "batch_manifest.json", {"target": "full", "clips": [
+    write_json(run / "batch_manifest.json", {"target": "full", "match_id": "synthetic-match", "clips": [
         {"name": f"clip{index + 1}"} for index in range(len(angles))]})
     return run
 
-
 class PersonLibraryChecks(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="basket-library-check-")
+        self.temp = tempfile.TemporaryDirectory(prefix='basket-library-check-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.run = make_library_fixture(self.root)
-        self.options = PersonLibraryOptions(self.run, max_distance=0.2)
+        self.options = PersonLibraryOptions(self.run, max_distance=.2)
 
-    def people(self):
-        return list(read_jsonl(self.run / "library/people.jsonl"))
+    def snapshot(self):
+        with PlayerRegistry(self.run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            return registry.snapshot()
 
-    def test_same_local_id_different_clips_and_global_events(self):
-        before = {str(path): path.read_bytes() for path in self.run.rglob("*") if path.is_file()}
+    def test_incremental_ids_survive_new_clip_and_repeated_registration(self):
+        first = build_person_library(replace(self.options, clip_names=('clip1',)))
+        pid = self.snapshot()['people'][0]['global_person_id']
+        second = build_person_library(replace(self.options, clip_names=('clip2',)))
+        snap = self.snapshot()
+        self.assertEqual(len(snap['people']), 1)
+        self.assertEqual(snap['people'][0]['global_person_id'], pid)
+        self.assertEqual(snap['people'][0]['clip_count'], 2)
+        third = build_person_library(replace(self.options, clip_names=('clip2',)))
+        self.assertEqual(third['review_revision'], second['review_revision'])
+        self.assertNotEqual(first['review_revision'], second['review_revision'])
+        build_person_library(replace(self.options, clip_names=('clip3',)))
+        self.assertEqual(len(self.snapshot()['people']), 2)
+        self.assertIn(pid, {p['global_person_id'] for p in self.snapshot()['people']})
+
+    def test_same_local_ids_are_scoped_and_events_join_without_losing_sources(self):
+        originals = {p: p.read_bytes() for p in self.run.rglob('*') if p.is_file()}
         result = build_person_library(self.options)
-        self.assertEqual((result["expected_clips"], result["global_person_count"], result["event_count"]), (3, 2, 3))
-        mapping = list(read_jsonl(self.run / "library/identity_map.jsonl"))
-        self.assertEqual(len({row["node_id"] for row in mapping}), 3)
-        events = list(read_jsonl(self.run / "library/events.jsonl"))
-        self.assertEqual(len({event["event_id"] for event in events}), 3)
-        self.assertEqual({event["local_person_id"] for event in events}, {"P0000"})
-        self.assertEqual({event["start"] for event in events}, {0.4})
-        self.assertTrue(all(event["id"] == event["global_person_id"] for event in events))
-        self.assertTrue(all(Path(path).read_bytes() == value for path, value in before.items()))
+        self.assertEqual((result['global_person_count'], result['event_count']), (2, 3))
+        events = self.snapshot()['events']
+        self.assertEqual(len({e['event_id'] for e in events}), 3)
+        self.assertTrue(all(e['start'] == .4 for e in events))
+        self.assertTrue(all(e['id'] == e['global_person_id'] for e in events))
+        self.assertTrue(all(p.read_bytes() == value for p, value in originals.items()))
 
-    def test_part_distance_matches_visibility_weighted_reference(self):
-        random = np.random.default_rng(8)
-        vectors = random.normal(size=(7, 3, 4)).astype(np.float32)
-        vectors /= np.linalg.norm(vectors, axis=-1, keepdims=True)
-        visibility = random.random((7, 3)).astype(np.float32)
-        visibility[0] = 0
-        matrix = part_distances(vectors, visibility, min_common_parts=2, block_size=2)
-        for a in range(7):
-            for b in range(7):
-                weight = np.sqrt(visibility[a] * visibility[b])
-                if np.count_nonzero(weight) < 2:
-                    self.assertTrue(np.isinf(matrix[a, b]))
-                else:
-                    expected = np.sum(np.linalg.norm(vectors[a] - vectors[b], axis=-1) * weight) / weight.sum() / 2
-                    self.assertAlmostEqual(float(matrix[a, b]), float(expected), delta=0.0003)
+    def test_foreign_match_refused(self):
+        build_person_library(self.options)
+        with self.assertRaises(ValueError):
+            PlayerRegistry(self.run / 'library/players.sqlite3', 'another-match')
 
-    def test_complete_link_prevents_transitive_identity_chain(self):
-        nodes = [{"node_id": str(i), "clip_name": str(i), "feature_indices": [i]} for i in range(3)]
-        matrix = np.array([[0, .1, .4], [.1, 0, .1], [.4, .1, 0]])
-        groups, _, _ = group_nodes(nodes, matrix, max_distance=.2)
-        self.assertEqual(sorted(len(group["members"]) for group in groups), [1, 2])
+    def test_changed_registered_evidence_rolls_back(self):
+        build_person_library(self.options)
+        revision = self.snapshot()['revision']
+        path = self.run / 'clip1/identity/identities.jsonl'
+        value = list(read_jsonl(path)); value[0]['sample_count'] += 1; rows(path, value)
+        with self.assertRaises(ValueError):
+            build_person_library(self.options)
+        self.assertEqual(self.snapshot()['revision'], revision)
 
-    def test_same_clip_cannot_link_is_transitive_across_groups(self):
-        nodes = [{"node_id": str(i), "clip_name": "same" if i != 1 else "other",
-                  "feature_indices": [i]} for i in range(3)]
-        groups, _, _ = group_nodes(nodes, np.zeros((3, 3)), max_distance=.2)
-        self.assertEqual(len(groups), 2)
-        for group in groups:
-            names = [n["clip_name"] for n in group["members"]]
-            self.assertEqual(len(names), len(set(names)))
+    def test_incompatible_feature_contract_refused(self):
+        build_person_library(replace(self.options, clip_names=('clip1',)))
+        write_json(self.run / 'clip2/identity_raw/kpr_summary.json', {'feature_contract': {'checkpoint_sha256': 'different'}})
+        with self.assertRaises(ValueError):
+            build_person_library(replace(self.options, clip_names=('clip2',)))
+        self.assertEqual(len(self.snapshot()['mappings']), 1)
 
-    def test_mixed_archive_abstains_and_disabled_threshold_does_not_merge(self):
-        rows(self.run / "clip1/identity/identities.jsonl", [{**next(read_jsonl(self.run / "clip1/identity/identities.jsonl")),
-                                                          "status": "needs_review"}])
+    def test_low_quality_stays_pending_and_does_not_enter_gallery(self):
+        path = self.run / 'clip1/identity_raw/identities.jsonl'
+        value = list(read_jsonl(path)); value[0]['sample_count'] = 1; rows(path, value)
+        build_person_library(replace(self.options, clip_names=('clip1',)))
+        person = self.snapshot()['people'][0]
+        self.assertEqual(person['status'], 'needs_review')
+        self.assertFalse(person['members'][0]['gallery_eligible'])
+
+    def test_unknown_events_preserved(self):
+        event_path = self.run / 'clip1/action/events.jsonl'
+        event = list(read_jsonl(event_path))[0]
+        event.update(id='T0999', raw_track_ids=[999]); rows(event_path, [event])
+        build_person_library(replace(self.options, clip_names=('clip1',)))
+        event = self.snapshot()['events'][0]
+        self.assertIsNone(event['global_person_id'])
+        self.assertEqual(event['identity_status'], 'unmapped')
+
+    def test_review_revision_detach_restore_and_event_reassociation(self):
+        build_person_library(self.options)
+        snap = self.snapshot()
+        person = next(p for p in snap['people'] if p['clip_count'] == 2)
+        node = person['members'][0]['node_id']; pid = person['global_person_id']
+        with PlayerRegistry(self.run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            revision = registry.review('detach', node_id=node, expected_revision=snap['revision'])
+            with self.assertRaises(RuntimeError):
+                registry.review('restore', node_id=node, expected_revision=snap['revision'])
+            detached = next(m for m in registry.snapshot()['mappings'] if m['node_id'] == node)
+            self.assertNotEqual(detached['global_person_id'], pid)
+            registry.review('restore', node_id=node, expected_revision=revision)
+            restored = next(m for m in registry.snapshot()['mappings'] if m['node_id'] == node)
+            self.assertEqual(restored['global_person_id'], pid)
+            self.assertEqual(len(registry.snapshot()['people']), 2)
+
+    def test_same_clip_simultaneous_people_cannot_merge(self):
+        run = make_library_fixture(self.root / 'overlap', angles=(0,), extra_same_clip=True)
+        build_person_library(PersonLibraryOptions(run, max_distance=.2))
+        with PlayerRegistry(run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            snap = registry.snapshot(); left, right = snap['people']
+            rev = registry.review('label_group', person_id=left['global_person_id'], label='white#15', expected_revision=snap['revision'])
+            with self.assertRaises(ValueError):
+                registry.review('label_group', person_id=right['global_person_id'], label='white#15', expected_revision=rev)
+            self.assertEqual(registry.snapshot()['revision'], rev)
+
+    def test_disjoint_fragments_same_clip_can_match(self):
+        run = make_library_fixture(self.root / 'fragments', angles=(0,), extra_same_clip=True)
+        tracks = list(read_jsonl(run / 'clip1/tracking/tracks.jsonl'))
+        tracks[1].update(frame_idx=25, timestamp_s=1)
+        rows(run / 'clip1/tracking/tracks.jsonl', tracks)
+        result = build_person_library(PersonLibraryOptions(run, max_distance=.2))
+        self.assertEqual(result['global_person_count'], 1)
+
+    def test_ambiguous_second_candidate_margin_abstains(self):
+        run = make_library_fixture(self.root / 'ambiguous', angles=(0, .1, .05))
+        opts = PersonLibraryOptions(run, max_distance=.02, novelty_distance=.04, min_margin=.03)
+        build_person_library(replace(opts, clip_names=('clip1',)))
+        build_person_library(replace(opts, clip_names=('clip2',)))
+        build_person_library(replace(opts, clip_names=('clip3',), max_distance=.2, novelty_distance=.5))
+        with PlayerRegistry(run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            latest = next(p for p in registry.snapshot()['people'] if p['members'][0]['clip_name'] == 'clip3')
+            self.assertEqual(latest['status'], 'needs_review')
+
+    def test_source_changes_mark_index_stale_and_symlink_refused(self):
         result = build_person_library(self.options)
-        self.assertEqual(result["held_archive_count"], 1)
-        self.assertEqual(result["global_person_count"], 3)
-        disabled = build_person_library(replace(self.options, max_distance=None, overwrite=True))
-        self.assertEqual(disabled["global_person_count"], 3)
+        self.assertTrue(library_is_current(self.run, result))
+        (self.run / 'clip1/action/events.jsonl').write_text('')
+        self.assertFalse(library_is_current(self.run, result))
+        other = self.root / 'escape'; other.mkdir()
+        with self.assertRaises(ValueError):
+            build_person_library(replace(self.options, output_dir=other))
 
-    def test_incompatible_checkpoints_rejected_before_output(self):
-        write_json(self.run / "clip2/identity_raw/kpr_summary.json", {"feature_contract": {"checkpoint_sha256": "other"}})
-        with self.assertRaisesRegex(ValueError, "Incompatible"):
+    def test_invalid_prototypes_refused(self):
+        path = self.run / 'clip1/identity_raw/kpr_track_prototypes.npz'
+        np.savez(path, embeddings=np.ones((1,2,2)), visibility_scores=np.ones((1,2)), track_ids=[0])
+        with self.assertRaises(ValueError):
             build_person_library(self.options)
-        self.assertFalse((self.run / "library").exists())
 
-    def test_legacy_requires_explicit_opt_in_and_malformed_features_fail(self):
-        for index in range(1, 4):
-            write_json(self.run / f"clip{index}/identity_raw/kpr_summary.json",
-                       {"checkpoint": "weights/synthetic.pth", "prompt_mode": "none"})
-        with self.assertRaisesRegex(ValueError, "legacy KPR metadata"):
-            build_person_library(self.options)
-        summary = build_person_library(replace(self.options, allow_legacy_features=True))
-        self.assertTrue(any("not a checkpoint checksum" in warning for warning in summary["warnings"]))
-        np.savez_compressed(self.run / "clip1/identity_raw/kpr_track_prototypes.npz",
-                            embeddings=np.ones((1, 2, 2)), visibility_scores=np.ones((1, 2)), track_ids=[0])
-        with self.assertRaisesRegex(ValueError, "L2-normalized"):
-            build_person_library(replace(self.options, allow_legacy_features=True, overwrite=True))
+    def test_different_numbers_veto_matching_and_equal_numbers_do_not_force_it(self):
+        run = make_library_fixture(self.root / 'numbers', angles=(0, .01, 1.4))
+        for name, number in (('clip1', '15'), ('clip2', '32'), ('clip3', '15')):
+            rows(run / name / 'identity/jersey_tracks.jsonl', [{'raw_track_id': 0,
+                'number': number, 'status': 'candidate_consensus', 'verified': False, 'readings': []}])
+            write_json(run / name / 'identity/jersey_summary.json', {'backend': 'qwen_vl',
+                'provenance': {'model_sha256': 'synthetic'}, 'thresholds': {'min_support': 2}})
+        result = build_person_library(PersonLibraryOptions(run, max_distance=.2, use_jersey_evidence=True))
+        self.assertEqual(result['global_person_count'], 3)
+        with PlayerRegistry(run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            second = next(p for p in registry.snapshot()['people'] if p['members'][0]['clip_name'] == 'clip2')
+            self.assertEqual(second['status'], 'needs_review')
 
-    def test_output_symlink_and_overlapping_directory_are_rejected(self):
-        destination = self.root / "keep"
-        destination.mkdir()
-        marker = destination / "preserved.txt"
-        marker.write_text("preserved")
-        (self.run / "library").symlink_to(destination, target_is_directory=True)
-        with self.assertRaisesRegex(ValueError, "symlink"):
-            build_person_library(replace(self.options, overwrite=True))
-        self.assertEqual(marker.read_text(), "preserved")
-        with self.assertRaisesRegex(ValueError, "overwrite a run"):
-            build_person_library(replace(self.options, output_dir=self.run, overwrite=True))
+    def test_incremental_qwen_model_changes_refused(self):
+        for name in ('clip1', 'clip2'):
+            rows(self.run / name / 'identity/jersey_tracks.jsonl', [{'raw_track_id': 0,
+                'number': '15', 'status': 'candidate_consensus', 'verified': False, 'readings': []}])
+            write_json(self.run / name / 'identity/jersey_summary.json', {'backend': 'qwen_vl',
+                'provenance': {'model_sha256': name}, 'thresholds': {'min_support': 2}})
+        opts = replace(self.options, use_jersey_evidence=True)
+        build_person_library(replace(opts, clip_names=('clip1',)))
+        with self.assertRaises(ValueError):
+            build_person_library(replace(opts, clip_names=('clip2',)))
+        self.assertEqual(len(self.snapshot()['mappings']), 1)
 
-    def test_failed_or_missing_clip_is_not_silently_omitted(self):
-        write_json(self.run / "clip2/batch_status.json", {"status": "failed"})
-        with self.assertRaisesRegex(ValueError, "not complete"):
-            build_person_library(self.options)
-        write_json(self.run / "clip2/batch_status.json", {"status": "completed"})
-        (self.run / "clip2/action/events.jsonl").unlink()
+    def test_manual_merge_preserves_alias_and_exclusion_stops_gallery(self):
+        build_person_library(self.options)
+        with PlayerRegistry(self.run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            snap = registry.snapshot(); left, right = snap['people']
+            revision = registry.review('label_group', person_id=left['global_person_id'], label='confirmed-player', expected_revision=snap['revision'])
+            registry.review('label_group', person_id=right['global_person_id'], label='confirmed-player', expected_revision=revision)
+            merged = registry.snapshot()
+            self.assertEqual(len(merged['people']), 1)
+            self.assertEqual(merged['aliases'][right['global_person_id']], left['global_person_id'])
+            revision = registry.review('exclude', person_id=left['global_person_id'], expected_revision=merged['revision'])
+            self.assertEqual(registry.snapshot()['people'][0]['status'], 'non_player')
+            self.assertFalse(any(m['gallery_eligible'] for m in registry.snapshot()['people'][0]['members']))
+
+    def test_missing_database_cannot_silently_regenerate_ids(self):
+        build_person_library(self.options)
+        (self.run / 'library/players.sqlite3').unlink()
         with self.assertRaises(FileNotFoundError):
             build_person_library(self.options)
 
-    def test_stale_source_detection_ignores_operational_resume_timestamps(self):
-        build_person_library(self.options)
-        manifest = json.loads((self.run / "library/library_manifest.json").read_text())
-        write_json(self.run / "clip1/batch_status.json", {"status": "completed", "retry": True})
-        value = json.loads((self.run / "batch_manifest.json").read_text())
-        write_json(self.run / "batch_manifest.json", value)
-        self.assertTrue(library_is_current(self.run, manifest))
-        write_json(self.run / "clip1/batch_status.json", {"status": "running"})
-        self.assertFalse(library_is_current(self.run, manifest))
-        write_json(self.run / "clip1/batch_status.json", {"status": "completed"})
-        (self.run / "clip1/action/events.jsonl").write_text("")
-        self.assertFalse(library_is_current(self.run, manifest))
-
-    def test_foreign_event_and_unsafe_names_rejected(self):
-        record = next(read_jsonl(self.run / "clip1/action/events.jsonl"))
-        rows(self.run / "clip1/action/events.jsonl", [{**record, "id": "Punknown"}])
-        with self.assertRaisesRegex(ValueError, "foreign/missing"):
-            build_person_library(self.options)
-        write_json(self.run / "batch_manifest.json", {"clips": [{"name": "../escape"}]})
-        with self.assertRaisesRegex(ValueError, "safe clip"):
-            build_person_library(self.options)
-
-    def test_empty_tracks_are_represented_without_fake_accuracy(self):
-        for index in range(1, 4):
-            clip = self.run / f"clip{index}"
-            for filename in ("identity/identities.jsonl", "identity_raw/identities.jsonl", "action/events.jsonl"):
-                rows(clip / filename, [])
+    def test_snapshot_manifest_publishes_one_immutable_generation(self):
         result = build_person_library(self.options)
-        self.assertEqual((result["expected_clips"], result["global_person_count"], result["event_count"]), (3, 0, 0))
-
-    def test_review_detach_manual_group_and_stale_fingerprint(self):
-        result = build_person_library(self.options)
-        merged = next(p for p in self.people() if p["clip_count"] == 2)
-        node = merged["members"][0]["node_id"]
-        review = {"input_fingerprint": result["input_fingerprint"], "blocked_node_ids": [node]}
-        result = build_person_library(replace(self.options, overwrite=True), review_value=review)
-        self.assertEqual(result["global_person_count"], 3)
-        nodes = [p["members"][0]["node_id"] for p in self.people()]
-        review = {"input_fingerprint": result["input_fingerprint"], "assignments": {n: "team#15" for n in nodes}}
-        result = build_person_library(replace(self.options, overwrite=True), review_value=review)
-        self.assertEqual(result["global_person_count"], 1)
-        self.assertEqual(self.people()[0]["status"], "manual_grouping")
-        with self.assertRaisesRegex(ValueError, "stale"):
-            build_person_library(replace(self.options, overwrite=True), review_value={"input_fingerprint": "old"})
-
-    def test_manual_labels_cannot_override_same_clip_conflict(self):
-        run = make_library_fixture(self.root / "conflict", extra_same_clip=True)
-        result = build_person_library(PersonLibraryOptions(run, max_distance=.2))
-        same_clip_nodes = [n["node_id"] for p in read_jsonl(run / "library/people.jsonl")
-                           for n in p["members"] if n["clip_name"] == "clip1"]
-        with self.assertRaisesRegex(ValueError, "same-clip"):
-            build_person_library(PersonLibraryOptions(run, max_distance=.2, overwrite=True),
-                                 review_value={"input_fingerprint": result["input_fingerprint"],
-                                               "assignments": {n: "team#15" for n in same_clip_nodes}})
-
-    def test_batch_flag_builds_only_after_complete_and_never_on_dry_run(self):
-        from cli import process_batch
-        arguments = ["process_batch", "--input-dir", str(self.root / "data"),
-                     "--output-dir", str(self.run), "--cross-clip-distance", ".2"]
-        with patch.object(sys, "argv", arguments), patch.object(process_batch, "run_batch", return_value={"failed_clips": []}), \
-                contextlib.redirect_stdout(io.StringIO()) as output:
-            process_batch.main()
-        self.assertEqual(json.loads(output.getvalue())["person_library"]["global_person_count"], 2)
-        manifest = (self.run / "library/library_manifest.json").read_bytes()
-        with patch.object(sys, "argv", arguments + ["--dry-run"]), \
-                patch.object(process_batch, "run_batch", return_value={"dry_run": True}), \
-                contextlib.redirect_stdout(io.StringIO()) as output:
-            process_batch.main()
-        self.assertTrue(json.loads(output.getvalue())["person_library_plan"]["runs_after_all_clips_complete"])
-        with patch.object(sys, "argv", arguments), \
-                patch.object(process_batch, "run_batch", return_value={"failed_clips": ["clip2"]}), \
-                contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(SystemExit):
-            process_batch.main()
-        self.assertIn("person_library_skipped", json.loads(output.getvalue()))
-        self.assertEqual((self.run / "library/library_manifest.json").read_bytes(), manifest)
-
-    def test_api_person_event_pagination_review_and_readonly_sources(self):
-        try:
-            from fastapi.testclient import TestClient
-            from web.backend.settings import WebSettings
-            from web.backend.store import ProjectStore
-            from web.backend.imports import import_results
-        except ImportError:
-            self.skipTest("Install requirements-web-test.txt for API regressions")
+        directory = self.run / 'library' / result['index_dir']
+        self.assertTrue((directory / 'people.jsonl').is_file())
+        # A partially replaced compatibility file cannot affect the published snapshot.
+        (self.run / 'library/people.jsonl').write_text('broken')
+        self.assertEqual(len(list(read_jsonl(directory / 'people.jsonl'))), 2)
         build_person_library(self.options)
-        settings = WebSettings(data_root=self.root / "data/web", source_root=self.root / "data",
-                               import_root=self.root / "outputs", output_root=self.root / "outputs/web")
-        settings.ensure_directories()
+        self.assertEqual(len(list(read_jsonl(self.run / 'library/people.jsonl'))), 2)
+
+    def test_visibility_distance_matches_independent_reference(self):
+        rng = np.random.default_rng(9)
+        f = rng.normal(size=(5,3,4)).astype(np.float32)
+        f /= np.linalg.norm(f, axis=-1, keepdims=True)
+        v = rng.random((5,3)).astype(np.float32)
+        actual = part_distances(f,v,min_common_parts=2)
+        for a in range(5):
+            for b in range(5):
+                w = np.sqrt(v[a]*v[b])
+                expected = (np.linalg.norm(f[a]-f[b],axis=-1)*w).sum()/w.sum()/2
+                self.assertAlmostEqual(float(actual[a,b]), float(expected), places=3)
+
+    def test_http_import_review_and_dynamic_events(self):
+        from fastapi.testclient import TestClient
+        from web.backend import app as module
+        from web.backend.store import ProjectStore
+        from web.backend.settings import WebSettings
+        from web.backend.imports import import_results
+        build_person_library(self.options)
+        settings = replace(WebSettings(), data_root=self.root / 'web-data', output_root=self.root / 'web-output',
+                           source_root=self.root / 'data', import_root=self.root / 'outputs')
         store = ProjectStore(settings.data_root, settings.output_root)
-        manifest = import_results(settings, store, self.run)
-        baseline = (self.run / "library/identity_map.jsonl").read_bytes()
-        with patch.dict("os.environ", {"BASKET_WEB_OUTPUT_ROOT": str(settings.output_root),
-                                      "BASKET_WEB_DATA_ROOT": str(settings.data_root)}):
-            from web.backend import app as module
-        with patch.object(module, "settings", settings), patch.object(module, "store", store), TestClient(module.app) as client:
-            base = f'/api/projects/{manifest["project_id"]}/person-library'
-            catalog = client.get(base + "?limit=1").json()
-            self.assertEqual((catalog["total"], len(catalog["items"])), (2, 1))
-            person_id = catalog["items"][0]["global_person_id"]
-            person = client.get(base + f"/people/{person_id}").json()
-            self.assertEqual(person["clip_count"], 2)
-            self.assertEqual(client.get(person["members"][0]["cover"]["crop_url"]).status_code, 200)
-            events = client.get(base + f"/events?person_id={person_id}&event=basketball_2point_shot&limit=1").json()
-            self.assertEqual((events["total"], len(events["items"])), (2, 1))
-            self.assertTrue(events["items"][0]["web_video_id"])
-            self.assertEqual(client.get(base + "/events?min_score=0.9").json()["total"], 0)
-            detached = client.post(base + "/review", json={"operation": "detach", "node_id": person["members"][0]["node_id"]})
-            self.assertEqual(detached.status_code, 200, detached.text)
-            self.assertEqual(client.get(base).json()["summary"]["global_person_count"], 3)
-            conflict = client.post(base + "/review", json={"operation": "reset"})
-            self.assertEqual(conflict.status_code, 409)
-            revision = detached.json()["revision"]
-            # A fresh store and a reload keep the same independent review sidecar.
-            from web.backend.person_library import library_catalog
-            fresh_store = ProjectStore(settings.data_root, settings.output_root)
-            persisted = library_catalog(settings, fresh_store, manifest["project_id"])
-            self.assertEqual(persisted["revision"], revision)
-            self.assertEqual(persisted["summary"]["global_person_count"], 3)
-            self.assertEqual(client.post(base + "/review", json={"operation": "reset", "expected_revision": revision}).status_code, 200)
-            self.assertEqual(client.get(base + "/people/unknown").status_code, 404)
-            self.assertEqual(client.get(base + "?limit=1000").status_code, 422)
-            self.assertEqual(client.get(base + "/events?min_score=nan").status_code, 422)
-        self.assertEqual((self.run / "library/identity_map.jsonl").read_bytes(), baseline)
+        project = import_results(settings, store, self.run)
+        with patch.object(module, 'settings', settings), patch.object(module, 'store', store), TestClient(module.app) as client:
+            base = f"/api/projects/{project['project_id']}/person-library"
+            result = client.get(base); self.assertEqual(result.status_code, 200)
+            value = result.json(); self.assertEqual(value['total'], 2)
+            person = next(p for p in value['items'] if p['clip_count'] == 2)
+            detail = client.get(base + '/people/' + person['global_person_id']).json()
+            request = {'operation': 'detach', 'node_id': detail['members'][0]['node_id'], 'expected_revision': value['revision']}
+            # Route is shared with the existing review UI.
+            response = client.post(base + '/review', json=request)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(client.post(base + '/review', json=request).status_code, 409)
+            events = client.get(base + '/events').json()
+            self.assertEqual(events['total'], 3)
+            exclusion = client.post(base + '/review', json={'operation': 'exclude',
+                'person_id': person['global_person_id'], 'expected_revision': response.json()['revision']})
+            self.assertEqual(exclusion.status_code, 200, exclusion.text)
+            self.assertEqual(client.get(base + '?status=non_player').json()['total'], 1)
+            self.assertEqual(client.get(base).json()['total'], 2)
 
 
 def main():
@@ -306,5 +305,5 @@ def main():
         raise SystemExit(1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

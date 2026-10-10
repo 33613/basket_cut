@@ -1,7 +1,6 @@
 /outputs/
 /tests/
 /KPR/
-/UncertaintyJNR/
 __pycache__/
 *.py[cod]
 .pytest_cache/

@@ -14,6 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--actions", required=True, type=Path)
     parser.add_argument("--identity-map", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--player-map", type=Path)
+    parser.add_argument("--clip-name")
     parser.add_argument("--allow-unmapped", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser
@@ -30,6 +32,7 @@ def main() -> None:
             output=args.output,
             allow_unmapped=args.allow_unmapped,
             overwrite=args.overwrite,
+            player_map=args.player_map, clip_name=args.clip_name,
         )
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

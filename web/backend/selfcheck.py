@@ -393,19 +393,17 @@ class DashboardSelfCheck(unittest.TestCase):
         self.addCleanup(runner.shutdown)
         paths = runner._paths(self.imported()["videos"][0])
         plan = runner._plan("full", paths, True)
-        self.assertLess(plan.index("link"), plan.index("aggregate"))
+        self.assertLess(plan.index("aggregate"), plan.index("link"))
         self.assertLess(plan.index("aggregate"), plan.index("render"))
         self.assertLess(plan.index("quality"), plan.index("identity"))
         self.assertLess(plan.index("resolution"), plan.index("link"))
         numbered = runner._plan('full', paths, True, jersey=True)
         self.assertLess(numbered.index('resolution'), numbered.index('jersey'))
-        self.assertLess(numbered.index('jersey'), numbered.index('action'))
+        self.assertLess(numbered.index('action'), numbered.index('jersey'))
+        self.assertLess(numbered.index('aggregate'), numbered.index('players'))
         command = runner._command("resolution", paths, {})
         self.assertNotIn("--max-distance", command)
-        self.assertIn(
-            "--max-distance",
-            runner._command("resolution", paths, {"identity_merge_distance": 0.2}),
-        )
+        self.assertNotIn("--max-distance", runner._command("resolution", paths, {"identity_merge_distance": .2}))
 
     def test_new_artifacts_and_quality_reach_dashboard(self) -> None:
         video = self.imported()["videos"][0]
@@ -429,6 +427,19 @@ class DashboardSelfCheck(unittest.TestCase):
             "quality/quality_summary.json",
             zipfile.ZipFile(io.BytesIO(build_inspection_bundle(video))).namelist(),
         )
+
+    def test_action_branch_does_not_force_kpr_reextraction(self):
+        runner = PipelineRunner(self.settings, self.store)
+        self.addCleanup(runner.shutdown)
+        paths = runner._paths(self.imported()["videos"][0])
+        valid = {"tracking", "quality", "identity", "resolution", "jersey", "players", "review"}
+        with patch.object(runner, '_artifact_exists', side_effect=lambda stage, _: stage in valid):
+            plan = runner._plan('full', paths, False, jersey=True)
+        self.assertIn('action', plan)
+        self.assertIn('players', plan)
+        self.assertNotIn('identity', plan)
+        self.assertNotIn('resolution', plan)
+        self.assertNotIn('jersey', plan)
 
     def test_empty_quality_result_does_not_invoke_models(self) -> None:
         from adapters.mmaction2.temporal_events import (

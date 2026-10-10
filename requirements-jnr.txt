@@ -1,9 +1,0 @@
-# Inference subset only. Python 3.11; install torch 2.4.1 / torchvision 0.19.1 first.
-numpy==1.24.4
-scipy==1.11.4
-opencv-python-headless==4.10.0.84
-albumentations==1.4.21
-albucore==0.0.20
-timm==1.0.11
-PyYAML==6.0.2
-gdown==5.2.0

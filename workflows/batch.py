@@ -34,12 +34,16 @@ def select_inputs(input_dir: Path, limit: int, selection: Path | None = None) ->
     return resolved
 
 
-def stages_for(target: str, jersey: bool = False) -> list[str]:
-    stages = ["tracking", "quality", "identity", "resolution"]
+def stages_for(target: str, jersey: bool = True) -> list[str]:
+    stages = ["tracking", "quality"]
+    if target == "full":
+        stages.extend(["action", "aggregate"])
+    stages.extend(["identity", "resolution"])
     if jersey:
         stages.append("jersey")
+    stages.append("players")
     if target == "full":
-        stages.extend(["action", "link", "aggregate"])
+        stages.append("link")
     stages.extend(["render", "review"])
     return stages
 
@@ -50,26 +54,25 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
     if target not in {"identity", "full"}:
         raise ValueError("target must be identity or full")
     options = dict(options or {})
-    if options.get("jersey_jnr") and options.get("jersey_ocr"):
-        raise ValueError("Choose one jersey backend, JNR or EasyOCR")
-    if options.get("jersey_jnr"):
-        from pipeline.identity.jersey_jnr import validate_thresholds
-        validate_thresholds(options.get("jnr_min_score", .8), options.get("jnr_max_uncertainty", .2),
-                            options.get("jnr_min_margin", .2), options.get("jnr_min_support", 2),
-                            options.get("jnr_min_gap_s", .25))
+    options.setdefault("match_id", output_dir.resolve().name)
+    options.setdefault("jersey_qwen", True)
+    import math
+    if (not math.isfinite(options.get("player_match_distance", .2))
+            or options.get("player_match_distance", .2) < 0
+            or not math.isfinite(options.get("player_novelty_distance", .5))
+            or options.get("player_novelty_distance", .5) <= options.get("player_match_distance", .2)
+            or not math.isfinite(options.get("player_min_margin", .05))
+            or options.get("player_min_margin", .05) < 0):
+        raise ValueError("Invalid player distance/margin parameters")
     sources = select_inputs(input_dir, limit, selection)
     output = output_dir.resolve()
     # Outputs must never be mixed into the data tree or overlap source inputs.
     data = input_dir.resolve()
     if output == data or output.is_relative_to(data) or data.is_relative_to(output):
         raise ValueError("Batch output and input trees must not overlap")
-    builder = CommandBuilder(settings)
+    builder = CommandBuilder(settings, validate_resources=not dry_run)
     def command_for(stage, paths):
         command = builder.command(stage, paths, options)
-        if stage == 'aggregate':
-            # Plans are created before linked_actions exists. Always aggregate
-            # the linked file produced by this run, never unowned raw points.
-            command[command.index('--input') + 1] = str(paths['linked_actions'])
         if stage == 'render':
             for flag in ('--actions', '--identity-map'):
                 if flag in command:
@@ -83,32 +86,39 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
     code_files = {p.relative_to(settings.repository_root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                   for folder in ('cli', 'workflows', 'pipeline', 'contracts', 'adapters', 'analysis')
                   for p in (settings.repository_root / folder).rglob('*.py')}
-    if options.get("jersey_jnr"):
-        for filename in ("model.py", "augmentation.py"):
-            path = settings.jnr_root / "src/uncertainty_jnr" / filename
-            code_files["jnr_source/" + filename] = hashlib.sha256(path.read_bytes()).hexdigest()
     for source in sources:
         relative = source.relative_to(data).as_posix()
         slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in source.stem)[:70]
         name = f"{slug}-{hashlib.sha256(relative.encode()).hexdigest()[:8]}"
         paths = builder.paths({"source_path": str(source), "output_dir": str(output / name)})
-        stages = stages_for(target, bool(options.get("jersey_ocr") or options.get("jersey_jnr")))
+        stages = stages_for(target, bool(options["jersey_qwen"]))
         commands = {stage: command_for(stage, paths) for stage in stages}
-        # Model/config changes invalidate resume, even when filenames stay the same.
-        resources = {str(p): [p.stat().st_size, p.stat().st_mtime_ns]
-                     for command in commands.values() for word in command
-                     if (p := Path(word)).is_file() and not p.resolve().is_relative_to(output)}
+        # Separate clip identity from stage configuration so identity-only runs
+        # can gain actions later without re-extracting registered KPR evidence.
         identity = {"input": relative, "size": source.stat().st_size,
-                    "mtime_ns": source.stat().st_mtime_ns, "options": options,
-                    "commands": commands, "resources": resources, "code": code_files}
+                    "mtime_ns": source.stat().st_mtime_ns, "options": options, "code": code_files}
         fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        stage_fingerprints = {}
+        for stage, command in commands.items():
+            resources = {str(p): [p.stat().st_size, p.stat().st_mtime_ns]
+                for word in command if (p := Path(word)).is_file() and not p.resolve().is_relative_to(output)}
+            stage_fingerprints[stage] = hashlib.sha256(json.dumps(
+                [fingerprint, command, resources], sort_keys=True).encode()).hexdigest()
         entries.append({"name": name, "input": relative, "fingerprint": fingerprint,
-                        "commands": commands, "paths": paths})
-    plan = {"schema_version": 1, "target": target, "options": options,
+                        "commands": commands, "stage_fingerprints": stage_fingerprints, "paths": paths})
+    plan = {"schema_version": 2, "match_id": options["match_id"], "target": target, "options": options,
             "clips": [{k: e[k] for k in ("name", "input", "fingerprint")} for e in entries]}
     manifest = output / "batch_manifest.json"
-    if manifest.is_file() and json.loads(manifest.read_text()) != plan and not force:
-        raise ValueError("Frozen batch inputs/config changed. Use a new output directory, or --force to replace this run.")
+    if manifest.is_file():
+        previous_plan = json.loads(manifest.read_text())
+        if previous_plan.get("match_id") != options["match_id"]:
+            raise ValueError("Output directory belongs to another match")
+        prior = {row["name"]: row for row in previous_plan["clips"]}
+        for row in plan["clips"]:
+            if row["name"] in prior and prior[row["name"]] != row and not force:
+                raise ValueError("Registered clip inputs/config changed; use a new run or --force for unchanged evidence")
+            prior[row["name"]] = row
+        plan["clips"] = list(prior.values())
     if dry_run:
         return {"dry_run": True, "selected_videos": len(entries), "plan": plan,
                 "commands": {e["name"]: e["commands"] for e in entries}}
@@ -124,14 +134,15 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
         except (OSError, json.JSONDecodeError):
             previous = {}  # A damaged status cannot authorize reuse of outputs.
         status = {"name": entry["name"], "input": entry["input"],
-                  "fingerprint": entry["fingerprint"], "status": "running", "stages": {}}
-        stale = force or previous.get("fingerprint") != entry["fingerprint"]
+                  "fingerprint": entry["fingerprint"], "status": "running", "stages": {},
+                  "stage_fingerprints": entry["stage_fingerprints"]}
         try:
             for stage, command in entry["commands"].items():
-                if not stale and previous.get("stages", {}).get(stage) == "completed" and builder.artifact_exists(stage, paths):
+                if (not force and previous.get("stages", {}).get(stage) == "completed"
+                        and previous.get("stage_fingerprints", {}).get(stage) == entry["stage_fingerprints"][stage]
+                        and builder.artifact_exists(stage, paths)):
                     status["stages"][stage] = "completed"
                     continue
-                stale = True
                 if shutil.disk_usage(output).free < float(options.get('min_free_gb', 2)) * 1024**3:
                     raise RuntimeError('Disk reserve reached; free or expand storage before resuming. Existing artifacts were preserved.')
                 if builder.write_empty_model_artifacts(stage, paths):

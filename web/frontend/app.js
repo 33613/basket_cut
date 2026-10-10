@@ -459,7 +459,8 @@ function stageName(stage) {
     tracking: "正在追踪人物",
     quality: "正在检查轨迹质量",
     identity: "正在提取身份特征",
-    resolution: "正在归并人物档案",
+    resolution: "正在整理轨迹档案",
+    players: "正在更新球员库",
     jersey: '正在读取号码候选',
     action: "正在识别动作",
     link: "正在连接人物事件",
@@ -617,10 +618,10 @@ function jerseyBadge(person) {
   if (person.identity_label) return `<p class="jersey-badge">人工标签：${escapeHtml(person.identity_label)}</p>`;
   if (!jersey) return '<p class="archive-warning">号码未运行 / 无证据</p>';
   const text = jersey.number != null ? `号码候选 #${jersey.number} · 未人工确认` : jersey.status === 'conflict' ? '号码读数冲突 · 不能作为身份' : '号码不确定 / 不可读';
-  const evidence = (jersey.candidates || []).map(candidate => `<div><strong>#${escapeHtml(candidate.number)}</strong> · ${candidate.support_frames} 个独立帧 · raw_score ${Number(candidate.mean_raw_score).toFixed(3)}<div class="exemplar-strip">${candidate.evidence.map(row => row.crop_url ? `<a href="${escapeHtml(row.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(row.crop_url)}" alt="号码证据帧 ${row.frame_idx}" loading="lazy" /></a>` : '').join('')}</div></div>`).join('');
+  const evidence = (jersey.candidates || []).map(candidate => `<div><strong>#${escapeHtml(candidate.number)}</strong> · ${candidate.support_frames} 个独立帧<div class="exemplar-strip">${candidate.evidence.map(row => row.crop_url ? `<a href="${escapeHtml(row.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(row.crop_url)}" alt="号码证据帧 ${row.frame_idx}" loading="lazy" /></a>` : '').join('')}</div></div>`).join('');
   const readings = jersey.readings || (jersey.tracks || []).flatMap(t => t.readings || []);
-  const details = readings.map(r => `<span>${r.crop_url ? `<a href="${escapeHtml(r.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(r.crop_url)}" alt="JNR读号帧 ${escapeHtml(r.frame_idx)}" loading="lazy" /></a>` : ''}<small>#${escapeHtml(r.text)} · score ${Number(r.raw_score).toFixed(3)} · u ${Number(r.uncertainty).toFixed(3)}<br />${escapeHtml((r.rejection_reasons || []).join(' / ') || '候选支持，尚未确认')}</small></span>`).join('');
-  return `<p class="jersey-badge ${jersey.status === 'conflict' ? 'error-text' : ''}">${escapeHtml(text)}</p>${evidence || details ? `<details><summary>号码识别证据</summary>${evidence}<div class="jnr-readings">${details}</div></details>` : ''}`;
+  const details = readings.map(r => `<span>${r.crop_url ? `<a href="${escapeHtml(r.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(r.crop_url)}" alt="Qwen读号帧 ${escapeHtml(r.frame_idx)}" loading="lazy" /></a>` : ''}<small>#${escapeHtml(r.text)}<br />${escapeHtml((r.rejection_reasons || []).join(' / ') || '候选支持，尚未确认')}</small></span>`).join('');
+  return `<p class="jersey-badge ${jersey.status === 'conflict' ? 'error-text' : ''}">${escapeHtml(text)}</p>${evidence || details ? `<details><summary>号码识别证据</summary>${evidence}<div class="number-readings">${details}</div></details>` : ''}`;
 }
 
 function renderIdentity() {
@@ -1043,15 +1044,13 @@ function runPayload(target) {
   return {
     target,
     force: $("#forceRun").checked,
-    jersey_ocr: $('#jerseyOcr').checked,
-    jersey_jnr: $('#jerseyJnr').checked,
-    jnr_trust_checkpoint: $('#jnrTrustCheckpoint').checked,
-    allow_ocr_download: $('#allowOcrDownload').checked,
+    jersey_qwen: $('#jerseyQwen').checked,
     max_frames: maxFrames ? Number(maxFrames) : null,
     tracking_det_threshold: Number($("#trackingThreshold").value),
     identity_samples: Number($("#identitySamples").value),
     identity_min_det_score: Number($("#identityThreshold").value),
-    identity_merge_distance: $("#identityMergeDistance").value.trim() ? Number($("#identityMergeDistance").value) : null,
+    player_match_distance: Number($("#playerMatchDistance").value),
+    player_novelty_distance: Number($("#playerNoveltyDistance").value),
     prompt_mode: "none",
     action_threshold: Number($("#actionThreshold").value),
     action_min_det_score: 0.3,

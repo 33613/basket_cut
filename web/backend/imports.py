@@ -77,6 +77,7 @@ def import_results(
             "identity": output / "identity/identity_archive_manifest.json",
             "resolution": output / "identity/resolution_summary.json",
             "jersey": output / 'identity/jersey_summary.json',
+            "players": output / 'identity/player_registration.json',
             "action": output / "action/actions.jsonl",
             "link": output / "action/actions_with_identity.jsonl",
             "aggregate": output / "action/events.jsonl",
@@ -98,7 +99,7 @@ def import_results(
                 "status": "completed"
                 if expected[stage].is_file()
                 else "skipped"
-                if stage in {"quality", "resolution", "review", "jersey"}
+                if stage in {"quality", "resolution", "review", "jersey", "players"}
                 else "pending",
                 "started_at": None,
                 "finished_at": None,

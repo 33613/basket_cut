@@ -69,18 +69,15 @@ class RunOptions(BaseModel):
     tracking_det_threshold: float = Field(default=0.3, ge=0, le=1)
     identity_samples: int = Field(default=8, ge=1, le=64)
     identity_min_det_score: float = Field(default=0.5, ge=0, le=1)
-    identity_merge_distance: float | None = Field(
-        default=None, ge=0, allow_inf_nan=False
-    )
+    player_match_distance: float = Field(default=.2, ge=0, allow_inf_nan=False)
+    player_novelty_distance: float = Field(default=.5, gt=0, allow_inf_nan=False)
+    player_min_margin: float = Field(default=.05, ge=0, allow_inf_nan=False)
     quality_min_observations: int = Field(default=3, ge=1)
     quality_min_observed_seconds: float = Field(default=0.1, ge=0, allow_inf_nan=False)
     prompt_mode: Literal["none"] = "none"
     action_threshold: float = Field(default=0.2, ge=0, le=1)
     action_min_det_score: float = Field(default=0.3, ge=0, le=1)
-    jersey_ocr: bool = False
-    jersey_jnr: bool = False
-    jnr_trust_checkpoint: bool = False
-    allow_ocr_download: bool = False
+    jersey_qwen: bool = True
 
 
 class ReviewSave(BaseModel):
@@ -89,7 +86,7 @@ class ReviewSave(BaseModel):
 
 
 class LibraryEdit(BaseModel):
-    operation: Literal["label_group", "detach", "restore", "reset"]
+    operation: Literal["label_group", "confirm", "exclude", "detach", "restore"]
     expected_revision: str | None = None
     person_id: str | None = Field(default=None, max_length=80)
     node_id: str | None = Field(default=None, max_length=80)
@@ -178,19 +175,19 @@ def decorate_artifacts(
                 path = evidence.get('crop_path')
                 if path:
                     evidence['crop_url'] = artifact_url(project_id, video_id,
-                        f"{artifacts['identity']['raw_media_prefix']}/{path}")
+                        f"identity/{path}")
 
         for track in (identity.get('jersey') or {}).get('tracks', []):
             for reading in track.get('readings', []):
                 path = reading.get('crop_path')
                 if path:
                     reading['crop_url'] = artifact_url(project_id, video_id,
-                        f"{artifacts['identity']['raw_media_prefix']}/{path}")
+                        f"identity/{path}")
         for reading in (identity.get('jersey') or {}).get('readings', []):
             path = reading.get('crop_path')
             if path:
                 reading['crop_url'] = artifact_url(project_id, video_id,
-                    f"{artifacts['identity']['raw_media_prefix']}/{path}")
+                    f"identity/{path}")
 
     for identity in artifacts["identity"]["people"]:
         decorate_identity(identity)
@@ -295,7 +292,7 @@ def get_materials(project_id: str, offset: int = Query(default=0, ge=0),
 def get_person_library(project_id: str, offset: int = Query(default=0, ge=0),
                        limit: int = Query(default=12, ge=1, le=50),
                        q: str = Query(default="", max_length=120),
-                       status: Literal["all", "merged", "singleton", "needs_review", "manual_grouping"] = "all"):
+                       status: Literal["all", "merged", "singleton", "needs_review", "manual_grouping", "non_player"] = "all"):
     try:
         return library_catalog(settings, store, project_id, offset=offset, limit=limit, q=q, status=status)
     except FileNotFoundError as exc:

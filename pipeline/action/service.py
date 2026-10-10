@@ -19,6 +19,7 @@ from mmaction.registry import MODELS
 from mmaction.structures import ActionDataSample
 
 from pipeline.action.proposals import group_by_track, nearest_proposals
+from pipeline.action.sampling import sample_frame_indices
 from contracts.schema import TrackRecord, read_jsonl, write_json, write_jsonl_line
 
 
@@ -117,16 +118,11 @@ def recognize_actions(options: ActionOptions) -> dict[str, Any]:
     config = mmengine.Config.fromfile(str(options.config))
     clip_len, frame_interval = sampler_settings(config)
     window_size = clip_len * frame_interval
-    if len(frames) < window_size:
-        raise ValueError(
-            f"Video has {len(frames)} frames, but this model needs at least "
-            f"{window_size} frames per clip"
-        )
-    timestamps = np.arange(
-        window_size // 2,
-        len(frames) + 1 - window_size // 2,
-        options.predict_stepsize,
-    )
+    if not frames:
+        raise ValueError("Video contains no decoded frames")
+    # Predict across the whole source clip. Boundary context repeats edge frames;
+    # timestamps always refer to real frames, including clips shorter than a window.
+    timestamps = np.arange(1, len(frames) + 1, options.predict_stepsize)
 
     try:
         config["model"]["test_cfg"]["rcnn"] = dict(action_thr=0)
@@ -159,8 +155,8 @@ def recognize_actions(options: ActionOptions) -> dict[str, Any]:
                 progress.update()
                 continue
 
-            start_frame = int(timestamp) - (clip_len // 2 - 1) * frame_interval
-            frame_indices = start_frame + np.arange(0, window_size, frame_interval) - 1
+            frame_indices, temporal_padding = sample_frame_indices(
+                center_frame_idx, len(frames), clip_len, frame_interval)
             images = [frames[int(index)].astype(np.float32).copy() for index in frame_indices]
             for image in images:
                 mmcv.imnormalize_(image, mean=mean, std=std, to_rgb=False)
@@ -220,6 +216,7 @@ def recognize_actions(options: ActionOptions) -> dict[str, Any]:
                     "video_id": proposal.track.video_id,
                     "frame_idx": center_frame_idx,
                     "timestamp_s": center_frame_idx / video_meta["fps"],
+                    "temporal_padding": temporal_padding,
                     "track_id": proposal.track.track_id,
                     "bbox_xyxy": list(proposal.track.bbox_xyxy),
                     "det_score": proposal.track.det_score,

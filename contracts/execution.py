@@ -24,13 +24,8 @@ def _python_env(name: str) -> Path:
 class ExecutionSettings:
     repository_root: Path = REPOSITORY_ROOT
     review_python: Path = field(default_factory=lambda: _python_env("BASKET_REVIEW_PYTHON") if os.environ.get("BASKET_REVIEW_PYTHON") else _python_env("BASKET_MOTIP_PYTHON"))
-    ocr_python: Path = field(default_factory=lambda: _python_env("BASKET_OCR_PYTHON"))
-    ocr_model_dir: Path = field(default_factory=lambda: _path_env("BASKET_OCR_MODEL_DIR", model_path("ocr", "easyocr")))
-    jnr_python: Path = field(default_factory=lambda: _python_env("BASKET_JNR_PYTHON"))
-    jnr_root: Path = field(default_factory=lambda: _path_env("BASKET_JNR_ROOT", REPOSITORY_ROOT / "UncertaintyJNR"))
-    jnr_config: Path = field(default_factory=lambda: _path_env("BASKET_JNR_CONFIG",
-        _path_env("BASKET_JNR_ROOT", REPOSITORY_ROOT / "UncertaintyJNR") / "configs/small16_reid.yaml"))
-    jnr_checkpoint: Path = field(default_factory=lambda: _path_env("BASKET_JNR_CHECKPOINT", model_path("jnr", "vit_small_soccernet.pt")))
+    qwen_python: Path = field(default_factory=lambda: _python_env("BASKET_QWEN_PYTHON"))
+    qwen_model_dir: Path = field(default_factory=lambda: _path_env("BASKET_QWEN_MODEL_DIR", model_path("qwen", "Qwen2.5-VL-3B-Instruct")))
     motip_python: Path = field(
         default_factory=lambda: _python_env("BASKET_MOTIP_PYTHON")
     )

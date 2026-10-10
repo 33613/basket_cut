@@ -11,7 +11,6 @@ from dataclasses import replace
 
 from contracts.execution import ExecutionSettings
 from contracts.schema import write_json
-from pipeline.identity.jersey import group_numbers, number_consensus
 from tools.datasets.video_archive import extract_videos
 from workflows.batch import run_batch, select_inputs
 from analysis.evaluation.run_summary import summarize_run
@@ -47,13 +46,21 @@ class BatchChecks(unittest.TestCase):
             paths['identity_map'].write_text('')
             (paths['identity'] / 'identities.jsonl').write_text('')
             write_json(paths['identity'] / 'resolution_summary.json', {})
+        elif stage == 'cli.jersey_qwen':
+            write_json(paths['identity'] / 'jersey_summary.json', {'backend': 'qwen_vl', 'provenance': {}, 'thresholds': {}})
+            (paths['identity'] / 'jersey_tracks.jsonl').write_text('')
+        elif stage == 'cli.build_person_library':
+            from workflows.person_library import PersonLibraryOptions, build_person_library
+            build_person_library(PersonLibraryOptions(paths['match_root'], match_id='outputs',
+                clip_names=(paths['output'].name,), use_jersey_evidence=True, max_distance=.2))
+            write_json(paths['players'], {})
         elif stage == 'cli.render_results':
             paths['visualization'].mkdir(exist_ok=True)
             paths['result'].write_bytes(b'synthetic-result')
         elif stage == 'cli.link_events':
             paths['linked_actions'].write_text('')
         elif stage == 'cli.aggregate_events':
-            self.assertEqual(command[command.index('--input') + 1], str(paths['linked_actions']))
+            self.assertEqual(command[command.index('--input') + 1], str(paths['actions']))
             paths['events'].write_text('')
         elif stage == 'cli.prepare_track_review':
             paths['review'].mkdir(parents=True, exist_ok=True)
@@ -74,7 +81,7 @@ class BatchChecks(unittest.TestCase):
         self.assertIsNone(metrics['headline']['pure_track_rate'])
         self.assertIsNone(metrics['completed_subset']['identity_pairs']['f1'])
 
-    def test_full_plan_aggregates_linked_ownership_before_render(self):
+    def test_full_plan_keeps_track_events_before_registration_and_render(self):
         settings = replace(self.settings, action_python=Path(sys.executable),
                            action_checkpoint=self.settings.motip_checkpoint,
                            action_config=self.settings.motip_checkpoint,
@@ -83,12 +90,12 @@ class BatchChecks(unittest.TestCase):
         plan = run_batch(settings, self.data, run, target='full', dry_run=True)
         commands = next(iter(plan['commands'].values()))
         aggregation = commands['aggregate']
-        self.assertTrue(aggregation[aggregation.index('--input') + 1].endswith('actions_with_identity.jsonl'))
+        self.assertTrue(aggregation[aggregation.index('--input') + 1].endswith('actions.jsonl'))
         self.assertIn('--identity-map', commands['render'])
         self.assertIn('--actions', commands['render'])
         result = run_batch(settings, self.data, run, target='full', execute=self.fake)
         self.assertEqual(result['completed_clips'], 1)
-        self.assertLess(self.calls.index('cli.link_events'), self.calls.index('cli.aggregate_events'))
+        self.assertLess(self.calls.index('cli.aggregate_events'), self.calls.index('cli.build_person_library'))
         self.assertNotIn('cli.action', self.calls)  # Empty trajectories must not invoke the model.
 
     def test_failed_clip_is_reported_and_retry_resumes_upstream(self):
@@ -101,6 +108,32 @@ class BatchChecks(unittest.TestCase):
         self.assertEqual(len(result['failed_clips']), 1)
         run_batch(self.settings, self.data, run, target='identity', execute=self.fake)
         self.assertEqual(self.calls.count('cli.tracking'), 1)
+
+    def test_new_clips_append_without_removing_old_manifest_members(self):
+        run = self.root / 'outputs'
+        run_batch(self.settings, self.data, run, target='identity', execute=self.fake)
+        (self.data / 'b.mp4').write_bytes(b'new-synthetic-video')
+        result = run_batch(self.settings, self.data, run, target='identity', execute=self.fake)
+        self.assertEqual(result['completed_clips'], 2)
+        self.assertEqual(self.calls.count('cli.tracking'), 2)
+        manifest = json.loads((run / 'batch_manifest.json').read_text())
+        self.assertEqual(len(manifest['clips']), 2)
+        run_batch(self.settings, self.data, run, limit=1, target='identity', execute=self.fake)
+        self.assertEqual(len(json.loads((run / 'batch_manifest.json').read_text())['clips']), 2)
+
+    def test_identity_run_can_gain_events_without_reextracting_identity(self):
+        settings = replace(self.settings, action_python=Path(sys.executable),
+            action_checkpoint=self.settings.motip_checkpoint, action_config=self.settings.motip_checkpoint,
+            action_label_map=self.settings.motip_checkpoint)
+        run = self.root / 'outputs'
+        first = run_batch(settings, self.data, run, target='identity', execute=self.fake)
+        self.assertEqual(first['completed_clips'], 1)
+        second = run_batch(settings, self.data, run, target='full', execute=self.fake)
+        self.assertEqual(second['completed_clips'], 1)
+        self.assertEqual(self.calls.count('cli.tracking'), 1)
+        self.assertEqual(self.calls.count('cli.resolve_identity'), 1)
+        self.assertEqual(self.calls.count('cli.jersey_qwen'), 1)
+        self.assertEqual(self.calls.count('cli.build_person_library'), 2)
 
     def test_changed_video_and_option_refuse_silent_resume(self):
         run = self.root / 'outputs'
@@ -152,47 +185,6 @@ class BatchChecks(unittest.TestCase):
             extract_videos(self.archive(['../escape.mp4']), self.root / 'out')
         with self.assertRaises(ValueError):
             extract_videos(self.archive(['a.mp4']), self.root / 'out', max_gb=1e-10)
-
-    def test_duplicate_ocr_frame_is_not_independent_support(self):
-        row = {'frame_idx': 1, 'text': '15', 'raw_score': .95}
-        self.assertIsNone(number_consensus([row, row])['number'])
-        result = number_consensus([row, {**row, 'frame_idx': 2}])
-        self.assertEqual(result['number'], '15')
-        self.assertFalse(result['verified'])
-
-    def test_ocr_conflict_unknown_and_zero_abstention(self):
-        rows = [{'frame_idx': f, 'text': text, 'raw_score': .95}
-                for f, text in enumerate(['15', '15', '32'])]
-        self.assertEqual(number_consensus(rows)['status'], 'conflict')
-        self.assertEqual(number_consensus([{'frame_idx': 0, 'text': '00', 'raw_score': .99},
-                                           {'frame_idx': 1, 'text': '00', 'raw_score': .99}])['number'], '00')
-        self.assertIsNone(group_numbers([1, 2], {1: {'number': '15', 'status': 'candidate_consensus'}})['number'])
-        self.assertEqual(group_numbers([1, 2], {1: {'number': '15', 'status': 'candidate_consensus'},
-                                               2: {'number': '32', 'status': 'candidate_consensus'}})['status'], 'conflict')
-
-    def test_ocr_real_crop_pipeline_keeps_frame_evidence_and_mapping(self):
-        try:
-            import cv2
-            import numpy as np
-        except ImportError:
-            self.skipTest('OpenCV required for real crop check')
-        from pipeline.identity.jersey import recognize_jerseys
-        archive = self.root / 'archive'; archive.mkdir()
-        crop = archive / 'person.jpg'
-        cv2.imwrite(str(crop), np.zeros((200, 80, 3), dtype=np.uint8))
-        mapping = self.root / 'map.jsonl'
-        mapping.write_text(json.dumps({'raw_track_id': 1, 'person_id': 'P1'}) + '\n')
-        (archive / 'kpr_samples.jsonl').write_text(''.join(json.dumps({'track_id': 1, 'frame_idx': f, 'crop_path': crop.name}) + '\n' for f in (0, 10)))
-        class Reader:
-            def readtext(self, image, **kwargs):
-                return [([[0, 0], [20, 0], [20, 20], [0, 20]], '15', .95)]
-        original = mapping.read_bytes()
-        output = self.root / 'ocr'
-        recognize_jerseys(archive, mapping, output, self.root / 'models', reader=Reader())
-        person = json.loads((output / 'jersey_people.jsonl').read_text())
-        self.assertEqual(person['number'], '15')
-        self.assertFalse(person['verified'])
-        self.assertEqual(mapping.read_bytes(), original)
 
     def test_private_environment_loader_does_not_evaluate_shell(self):
         from cli.serve_web import load_environment

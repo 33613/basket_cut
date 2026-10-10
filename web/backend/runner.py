@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import shutil
@@ -52,8 +53,12 @@ class PipelineRunner:
     ) -> dict[str, Any]:
         if target not in TARGETS:
             raise ValueError(f"Unknown target {target!r}; expected one of {TARGETS}")
-        if options.get('jersey_ocr') and options.get('jersey_jnr'):
-            raise ValueError('Choose only one jersey backend')
+        distance = options.get("player_match_distance", .2)
+        novelty = options.get("player_novelty_distance", .5)
+        margin = options.get("player_min_margin", .05)
+        if (not math.isfinite(distance) or distance < 0 or not math.isfinite(novelty)
+                or novelty <= distance or not math.isfinite(margin) or margin < 0):
+            raise ValueError("Require novelty distance > match distance and nonnegative margin")
         key = (project_id, video_id)
         with self._lock:
             if self.store.get_video(project_id, video_id).get("read_only"):
@@ -98,36 +103,27 @@ class PipelineRunner:
         return CommandBuilder(self.settings).artifact_exists(stage, paths)
 
     def _plan(self, target: str, paths: dict[str, Path], force: bool, jersey: bool = False) -> list[str]:
+        from workflows.batch import stages_for
         requested = {
             "tracking": ["tracking", "quality", "review"],
-            "identity": ["tracking", "quality", "identity", "resolution", "review"],
-            "action": ["tracking", "quality", "action", "review"],
-            "final": ["tracking", "quality", "link", "aggregate", "render", "review"],
-            "full": [
-                "tracking",
-                "quality",
-                "identity",
-                "resolution",
-                "action",
-                "link",
-                "aggregate",
-                "render",
-                "review",
-            ],
+            "identity": stages_for("identity", jersey),
+            "action": ["tracking", "quality", "action", "aggregate", "review"],
+            "final": ["players", "link", "render", "review"],
+            "full": stages_for("full", jersey),
         }[target]
-        if (
-            target == "final"
-            and (paths["identity_raw"] / "identity_archive_manifest.json").is_file()
-        ):
-            requested.insert(requested.index("link"), "resolution")
-        if jersey and 'resolution' in requested:
-            requested.insert(requested.index('resolution') + 1, 'jersey')
+        dependencies = {
+            "quality": ["tracking"], "action": ["quality"], "aggregate": ["action"],
+            "identity": ["quality"], "resolution": ["identity"], "jersey": ["resolution"],
+            "players": ["resolution"] + (["aggregate"] if "aggregate" in requested else []) +
+                       (["jersey"] if jersey else []),
+            "link": ["action", "players"], "render": ["quality", "link", "resolution"],
+            "review": ["tracking", "quality"],
+        }
         plan = []
-        stale = force
         for stage in requested:
-            if stale or not self._artifact_exists(stage, paths):
+            if (force or not self._artifact_exists(stage, paths)
+                    or any(parent in plan for parent in dependencies.get(stage, []))):
                 plan.append(stage)
-                stale = True
         return plan
 
     def _run_job(
@@ -141,8 +137,15 @@ class PipelineRunner:
         video = self.store.get_video(project_id, video_id)
         paths = self._paths(video)
         paths["output"].mkdir(parents=True, exist_ok=True)
-        plan = self._plan(target, paths, force, jersey=bool(options.get('jersey_ocr') or options.get('jersey_jnr')))
-        if not options.get('jersey_ocr') and not options.get('jersey_jnr'):
+        options = {**options, "match_id": project_id}
+        project = self.store.get_project(project_id)
+        # Uploads are stored under project/videos/<clip>; that parent is the match run.
+        manifest_path = paths["match_root"] / "batch_manifest.json"
+        write_json(manifest_path, {"schema_version": 2, "match_id": project_id,
+            "target": "full" if target in {"full", "action", "final"} else "identity",
+            "clips": [{"name": Path(v["output_dir"]).name} for v in project["videos"]]})
+        plan = self._plan(target, paths, force, jersey=bool(options.get('jersey_qwen', True)))
+        if not options.get('jersey_qwen', True):
             plan = [stage for stage in plan if stage != 'jersey']
             self.store.set_stage(project_id, video_id, 'jersey', 'skipped', return_code=None)
         self._append_log(

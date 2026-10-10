@@ -1,0 +1,4 @@
+-r requirements-web-test.txt
+numpy>=1.24,<2
+opencv-python-headless>=4.8,<4.12
+Pillow>=10,<12
