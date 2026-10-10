@@ -31,7 +31,8 @@ from web.backend.artifacts import load_json
 from web.backend.settings import WebSettings
 from web.backend.store import ProjectStore, safe_slug
 from web.backend.catalog import catalog, material_catalog, next_review_video, review_page, video_catalog
-from web.backend.person_library import library_catalog, library_person, library_events, edit_library
+from web.backend.person_library import library_catalog, library_person, library_events, edit_library, clip_player_assignments
+from web.backend.workflow import evidence_page
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 settings = WebSettings()
@@ -292,7 +293,7 @@ def get_materials(project_id: str, offset: int = Query(default=0, ge=0),
 def get_person_library(project_id: str, offset: int = Query(default=0, ge=0),
                        limit: int = Query(default=12, ge=1, le=50),
                        q: str = Query(default="", max_length=120),
-                       status: Literal["all", "merged", "singleton", "needs_review", "manual_grouping", "non_player"] = "all"):
+                       status: Literal["all", "candidate", "merged", "singleton", "needs_review", "manual_grouping", "non_player"] = "all"):
     try:
         return library_catalog(settings, store, project_id, offset=offset, limit=limit, q=q, status=status)
     except FileNotFoundError as exc:
@@ -631,6 +632,27 @@ def inspection_bundle(project_id: str, video_id: str) -> Response:
             "Content-Disposition": f'attachment; filename="{safe_slug(video_id)}-inspection.zip"',
         },
     )
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/identity-evidence")
+def get_identity_evidence(project_id: str, video_id: str,
+                          purpose: Literal["kpr", "jersey"] = "kpr",
+                          track_id: int | None = Query(default=None, ge=0),
+                          offset: int = Query(default=0, ge=0),
+                          limit: int = Query(default=24, ge=1, le=48)):
+    video = get_video(project_id, video_id)
+    return evidence_page(video["output_dir"], purpose, track_id=track_id, offset=offset, limit=limit)
+
+
+@app.get("/api/projects/{project_id}/videos/{video_id}/player-assignments")
+def get_clip_players(project_id: str, video_id: str):
+    video = get_video(project_id, video_id)
+    try:
+        return clip_player_assignments(settings, store, project_id, video)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/projects/{project_id}/videos/{video_id}/records/{kind}")

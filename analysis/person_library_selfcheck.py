@@ -283,12 +283,20 @@ class PersonLibraryChecks(unittest.TestCase):
             base = f"/api/projects/{project['project_id']}/person-library"
             result = client.get(base); self.assertEqual(result.status_code, 200)
             value = result.json(); self.assertEqual(value['total'], 2)
+            self.assertEqual(client.get(base + '?status=candidate').json()['total'], 2)
+            assignments = f"/api/projects/{project['project_id']}/videos/{project['videos'][0]['video_id']}/player-assignments"
+            before = client.get(assignments).json()
+            self.assertEqual(before['items'][0]['raw_track_ids'], [0])
             person = next(p for p in value['items'] if p['clip_count'] == 2)
             detail = client.get(base + '/people/' + person['global_person_id']).json()
             request = {'operation': 'detach', 'node_id': detail['members'][0]['node_id'], 'expected_revision': value['revision']}
             # Route is shared with the existing review UI.
             response = client.post(base + '/review', json=request)
             self.assertEqual(response.status_code, 200, response.text)
+            after = client.get(assignments).json()
+            self.assertNotEqual(after['revision'], before['revision'])
+            self.assertNotEqual(after['items'][0]['global_person_id'], before['items'][0]['global_person_id'])
+            self.assertTrue(after['items'][0]['manually_detached'])
             self.assertEqual(client.post(base + '/review', json=request).status_code, 409)
             events = client.get(base + '/events').json()
             self.assertEqual(events['total'], 3)

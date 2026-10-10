@@ -36,6 +36,7 @@ DIAGNOSTIC_FILES = (
     "identity/jersey_tracks.jsonl",
     "identity/jersey_people.jsonl",
     "identity/jersey_summary.json",
+    "identity/player_registration.json",
     "action/actions.jsonl",
     "action/actions_with_identity.jsonl",
     "action/events.jsonl",

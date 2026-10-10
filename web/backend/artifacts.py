@@ -240,7 +240,9 @@ def collect_video_artifacts(video: dict[str, Any]) -> dict[str, Any]:
         "actions": bool(actions),
         "events": (action / "events.jsonl").is_file(),
     }
+    from web.backend.workflow import workflow_artifacts
     return {
+        "workflow": workflow_artifacts(output),
         "available": available,
         "tracking": {
             "summary": load_json(tracking / "track_summary.json"),

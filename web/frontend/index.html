@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>CourtVision Lab · Basketball Video Intelligence</title>
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <title>CourtVision · 比赛片段与球员库</title>
+    <link rel="stylesheet" href="/assets/styles.css?v=match-workflow-1" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -18,13 +18,13 @@
         </span>
         <span>
           <strong>CourtVision</strong>
-          <small>VIDEO INSPECTION</small>
+          <small>MATCH · CLIPS · PLAYERS</small>
         </span>
       </a>
       <div class="topbar-center">
         <span class="eyebrow">BASKETBALL VIDEO INTELLIGENCE</span>
         <span class="topbar-separator"></span>
-        <span id="projectTitle">实验工作台</span>
+        <span id="projectTitle">比赛工作台</span>
       </div>
       <div class="system-state" id="systemState">
         <span class="state-dot"></span>
@@ -36,32 +36,32 @@
       <aside class="sidebar">
         <div class="sidebar-heading">
           <div>
-            <span class="eyebrow">WORKSPACES</span>
-            <h2>实验记录</h2>
+            <span class="eyebrow">MATCHES</span>
+            <h2>比赛项目</h2>
           </div>
-          <button class="icon-button" id="newProjectButton" title="新建实验">＋</button>
+          <button class="icon-button" id="newProjectButton" title="新建比赛">＋</button>
         </div>
         <div id="projectList" class="project-list"></div>
 
         <div class="sidebar-note">
           <span class="note-index">01</span>
           <div>
-            <strong>结果可追溯</strong>
-            <p>片段内 ID 与比赛级 ID 分开保留。人物库归并是候选结果，需要核查是否混人。</p>
+            <strong>一场比赛，一个球员库</strong>
+            <p>同场片段持续追加。原始轨迹 ID、片段档案 ID 与比赛球员 ID 分开保存。</p>
           </div>
         </div>
       </aside>
 
       <main class="main-content">
         <section class="inspection-intro hidden" id="inspectionIntro">
-          <div><span class="eyebrow">RESULT INSPECTION</span><h1>批量结果检查</h1><p>从待审视频进入，逐条核查轨迹与人物档案。保存后的复核记录可在下次继续。</p></div>
-          <div class="library-entry-actions"><button class="primary-button" id="openPersonLibraryButton">比赛人物库 ↗</button><button class="ghost-button" id="toggleImportButton" aria-expanded="false">导入另一批结果 ＋</button></div>
+          <div><span class="eyebrow">MATCH WORKSPACE</span><h1>片段流程与比赛球员库</h1><p id="matchContext">选择同场比赛片段，查看追踪、动作、身份和号码证据。</p></div>
+          <div class="library-entry-actions"><button class="primary-button" id="openPersonLibraryButton">比赛球员库 ↗</button><button class="ghost-button" id="refreshMatchButton">刷新比赛</button><button class="ghost-button" id="toggleImportButton" aria-expanded="false">导入 / 更新结果 ＋</button></div>
         </section>
         <section class="panel person-library-section hidden" id="personLibrarySection" aria-label="比赛级人物库与事件检索">
-          <div class="panel-title library-header"><div><span class="eyebrow">MATCH PERSON LIBRARY</span><h2>一场比赛，按人物查找素材。</h2><p>同场比赛增量更新 · 球员 ID 稳定 · 原始证据保留</p></div><div class="library-entry-actions"><button class="ghost-button" id="refreshPersonLibrary">刷新人物库</button><button class="secondary-button" id="closePersonLibrary">返回视频检查 →</button></div></div>
+          <div class="panel-title library-header"><div><span class="eyebrow">MATCH PLAYER LIBRARY</span><h2>比赛球员库</h2><p>稳定球员 ID · KPR 外观图库增量更新 · Qwen 号码辅助匹配</p></div><div class="library-entry-actions"><button class="ghost-button" id="refreshPersonLibrary">刷新球员库</button><button class="secondary-button" id="closePersonLibrary">返回片段检查 →</button></div></div>
           <div id="personLibrarySummary" class="batch-progress"></div>
-          <p class="scope-warning" id="personLibraryWarning">人物数量减少不是准确率，也不强制归并为10人。事件时间均相对于各自原片段。</p>
-          <div class="queue-controls"><label class="search-field">人物搜索<input id="librarySearch" type="search" maxlength="120" placeholder="比赛级 ID / 球队＋号码标签 / 来源视频名" /></label><label>人物状态<select id="libraryStatus"><option value="all">全部候选人物</option><option value="merged">已跨片段归并</option><option value="singleton">单片段档案</option><option value="needs_review">证据不足 / 待复核</option><option value="manual_grouping">人工确认</option><option value="non_player">非球员</option></select></label></div>
+          <p class="scope-warning" id="personLibraryWarning">本场比赛内保持身份。球员候选、待定观察与人工确认分别保存。</p>
+          <div class="queue-controls"><label class="search-field">球员搜索<input id="librarySearch" type="search" maxlength="120" placeholder="球员 ID / 号码 / 球队或姓名标签 / 片段名" /></label><label>身份状态<select id="libraryStatus"><option value="all">全部球员身份</option><option value="candidate">候选身份</option><option value="needs_review">待定 / 证据不足</option><option value="manual_grouping">人工确认</option><option value="merged">跨片段身份</option><option value="singleton">单份轨迹档案</option><option value="non_player">非球员</option></select></label></div>
           <div id="personLibraryGrid" class="person-library-grid"></div><div class="pagination" id="personLibraryPagination"></div>
           <section id="libraryPersonDetail" class="library-person-detail hidden"></section>
           <section class="library-event-section"><div class="panel-title"><div><span class="eyebrow">PERSON × EVENT → SOURCE CLIP</span><h3>人物事件检索</h3></div><button class="ghost-button" id="libraryAllPeople">查看全部人物事件</button></div><div class="queue-controls"><span id="librarySelectedPerson" class="scope-badge">全部人物</span><label>事件类型<select id="libraryEventType"><option value="">全部事件</option></select></label><label>最低原始分数<input id="libraryMinScore" type="number" min="0" max="1" step="0.05" value="0.2" /></label><label class="search-field">片段搜索<input id="libraryEventSearch" type="search" maxlength="120" placeholder="来源片段文件名" /></label></div><div id="libraryEvents"></div><div class="pagination" id="libraryEventsPagination"></div></section>
@@ -69,8 +69,8 @@
         <section class="upload-section panel" id="uploadSection">
           <div class="section-copy">
             <span class="eyebrow">INPUT / VIDEO MATERIALS</span>
-            <h1>让每个结果<br />都看得见。</h1>
-            <p>检查人物轨迹、身份图片与事件时间区间。已有结果直接导入，不需要重新运行模型。</p>
+            <h1>追加本场比赛片段</h1>
+            <p>处理短视频片段，依次完成 MOTIP、动作识别、KPR 与本地 Qwen，更新同一个球员库。</p>
           </div>
           <div class="drop-zone" id="dropZone" tabindex="0" role="button">
             <input id="fileInput" type="file" accept="video/*,.mkv,.avi" multiple hidden />
@@ -86,10 +86,10 @@
         </section>
 
         <section class="import-section panel" id="importSection" aria-label="导入已有结果">
-          <div><span class="eyebrow">EXISTING RESULTS</span><h3>导入已完成的实验</h3><p>只建立只读索引，不复制原视频，不修改原结果。</p></div>
+          <div><span class="eyebrow">EXISTING RESULTS</span><h3>导入 / 更新比赛结果</h3><p>填写一场比赛的结果目录，加载片段、球员库和事件。追加片段处理完成后，导入同一目录即可更新。</p></div>
           <form id="importForm">
             <label for="importPath">结果目录</label>
-            <div class="import-fields"><input id="importPath" required placeholder="runtime/outputs/experiment" /><button class="import-button" type="submit">导入结果 ↗</button></div>
+            <div class="import-fields"><input id="importPath" required placeholder="runtime/outputs/game-001" /><button class="import-button" type="submit">导入结果 ↗</button></div>
           </form>
         </section>
 
@@ -99,10 +99,10 @@
             <div class="strip-header">
               <div>
                 <span class="eyebrow">CLIP QUEUE</span>
-                <h3>批量审查工作台</h3>
+                <h3>本场比赛片段</h3>
               </div>
               <div class="strip-actions">
-                <span class="scope-badge hidden" id="readOnlyBadge">已导入 · 只读</span>
+                <span class="scope-badge hidden" id="readOnlyBadge">CLI 结果 · 浏览与复核</span>
                 <button class="ghost-button" id="batchRunButton">▶ 批量处理</button>
                 <button class="ghost-button" id="batchReviewButton">复核汇总</button>
                 <button class="control-button" id="nextReviewButton">下一个待复核 →</button>
@@ -115,7 +115,7 @@
               <label class="search-field">搜索视频<input id="queueSearch" type="search" placeholder="输入文件名" maxlength="120" /></label>
               <label>审查队列<select id="queueFilter"><option value="all">全部视频</option><option value="remaining">待完整复核</option><option value="risk">存在告警 / 混人</option><option value="uncertain">存在不确定轨迹</option><option value="complete">已完整复核</option><option value="failed">失败 / 零轨迹 / 无法复核</option></select></label>
               <button class="ghost-button" id="refreshQueueButton">刷新队列</button>
-              <span class="queue-caveat">进度不是准确率；抽样、不确定仍需检查</span>
+              <span class="queue-caveat">处理进度与人工复核进度分别记录</span>
             </div>
             <div id="clipStrip" class="clip-strip"></div>
             <div class="pagination" id="queuePagination"></div>
@@ -152,25 +152,13 @@
               </div>
               <div class="module-buttons">
                 <button data-target="tracking">只跑追踪</button>
-                <button data-target="identity">运行身份归档</button>
+                <button data-target="identity">运行身份支路与球员入库</button>
                 <button data-target="action">运行动作识别</button>
                 <button data-target="final">重新生成结果视频</button>
               </div>
             </div>
 
-            <div class="stage-rail panel" id="stageRail">
-              <div class="stage" data-stage="tracking"><span>01</span><div><small>MOTIP</small><strong>人物追踪</strong></div><i></i></div>
-              <div class="stage" data-stage="quality"><span>02</span><div><small>AUDIT</small><strong>轨迹质量</strong></div><i></i></div>
-              <div class="stage" data-stage="identity"><span>03</span><div><small>KPR</small><strong>身份特征</strong></div><i></i></div>
-              <div class="stage" data-stage="resolution"><span>04</span><div><small>RESOLVE</small><strong>身份归并</strong></div><i></i></div>
-              <div class="stage" data-stage="players"><span>+</span><div><small>PLAYER MEMORY</small><strong>更新球员库</strong></div><i></i></div>
-              <div class="stage" data-stage="jersey"><span>+</span><div><small>QWEN VL</small><strong>号码证据</strong></div><i></i></div>
-              <div class="stage" data-stage="action"><span>05</span><div><small>SLOWFAST</small><strong>动作识别</strong></div><i></i></div>
-              <div class="stage" data-stage="link"><span>06</span><div><small>CONTRACT</small><strong>人物事件</strong></div><i></i></div>
-              <div class="stage" data-stage="aggregate"><span>07</span><div><small>INTERVALS</small><strong>事件聚合</strong></div><i></i></div>
-              <div class="stage" data-stage="render"><span>08</span><div><small>OUTPUT</small><strong>结果渲染</strong></div></div>
-              <div class="stage" data-stage="review"><span>09</span><div><small>EVIDENCE</small><strong>复核证据</strong></div></div>
-            </div>
+            <div class="stage-rail panel" id="stageRail" aria-label="按实际执行顺序查看阶段结果"></div>
 
             <div class="inspection-grid">
               <section class="video-panel panel">
@@ -211,10 +199,13 @@
 
             <section class="detail-panel panel">
               <nav class="tabs" id="tabs">
-                <button data-tab="tracking" class="active">轨迹检查</button>
-                <button data-tab="review">同人 / 碎片 / 混人复核</button>
-                <button data-tab="identity">原始 / 归并人物档案</button>
+                <button data-tab="workflow" class="active">流程与产物</button>
+                <button data-tab="tracking">轨迹与质量</button>
+                <button data-tab="sampling">KPR 质量采样</button>
+                <button data-tab="jersey">Qwen 号码证据</button>
+                <button data-tab="identity">片段身份档案</button>
                 <button data-tab="events">事件时间区间</button>
+                <button data-tab="review">轨迹人工复核</button>
                 <button data-tab="points">动作预测点</button>
                 <button data-tab="raw">原始数据</button>
                 <button data-tab="logs">运行日志</button>
@@ -228,8 +219,8 @@
               <div><span class="eyebrow">CLIP PERSON MATERIALS</span><h3>片段内人物档案</h3></div>
               <span class="scope-badge">CLIP-LOCAL IDs</span>
             </div>
-            <p class="scope-warning">这里保留各片段的局部 ID；跨片段候选归并、来源检查和人物事件检索请进入上方“比赛人物库”。</p>
-            <div class="queue-controls"><label class="search-field">搜索素材<input id="materialSearch" type="search" maxlength="120" placeholder="视频名 / 档案 ID / 人工标签 / 号码候选" /></label><label>档案层级<select id="materialView"><option value="resolved">归并后人物档案</option><option value="raw">KPR 原始轨迹档案</option></select></label><span class="queue-caveat">点击图片检查来源；号码候选不是确认身份</span></div>
+            <p class="scope-warning">这里按原片段保留轨迹档案；比赛级身份和跨片段来源请进入上方“比赛球员库”。</p>
+            <div class="queue-controls"><label class="search-field">搜索素材<input id="materialSearch" type="search" maxlength="120" placeholder="视频名 / 档案 ID / 人工标签 / 号码候选" /></label><label>档案层级<select id="materialView"><option value="resolved">片段身份档案</option><option value="raw">KPR 原始轨迹档案</option></select></label><span class="queue-caveat">点击图片检查来源；比赛球员库统一管理同场身份</span></div>
             <div id="crossClipGrid" class="cross-clip-grid"></div>
             <div class="pagination" id="materialPagination"></div>
           </section>
@@ -238,7 +229,8 @@
     </div>
 
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
-    <script src="/assets/person-library.js" defer></script>
-    <script src="/assets/app.js" defer></script>
+    <script src="/assets/workflow.js?v=match-workflow-1" defer></script>
+    <script src="/assets/person-library.js?v=match-workflow-1" defer></script>
+    <script src="/assets/app.js?v=match-workflow-1" defer></script>
   </body>
 </html>

@@ -196,6 +196,52 @@ class DashboardSelfCheck(unittest.TestCase):
         )
         self.assertEqual(len(result["videos"]), 1)
 
+    def test_workflow_distinguishes_missing_outputs_from_empty_events(self):
+        video = self.imported()["videos"][0]
+        output = Path(video["output_dir"])
+        write_jsonl(output / "action/events.jsonl", [])
+        workflow = collect_video_artifacts(video)["workflow"]
+        self.assertTrue(workflow["stages"]["aggregate"]["primary_exists"])
+        self.assertEqual(workflow["stages"]["aggregate"]["files"][0]["size_bytes"], 0)
+        self.assertFalse(workflow["stages"]["players"]["primary_exists"])
+        self.assertEqual(workflow["stages"]["identity"]["files"][0]["path"],
+                         "identity/identity_archive_manifest.json")
+        (output / "action/events.jsonl").unlink()
+        self.assertFalse(collect_video_artifacts(video)["workflow"]["stages"]["aggregate"]["primary_exists"])
+
+    def test_http_quality_evidence_pages_filter_and_preserve_qwen_rejections(self):
+        from fastapi.testclient import TestClient
+        from web.backend import app as module
+        project = self.imported()
+        video = project["videos"][0]
+        output = Path(video["output_dir"])
+        # KPR fallback must expose actual raw evidence, not archive representative images.
+        write_jsonl(output / "identity_raw/kpr_samples.jsonl", [
+            {"track_id": tid, "frame_idx": frame, "sampling_quality": .8}
+            for tid in (0, 1) for frame in range(30)])
+        with (output / "identity_raw/kpr_samples.jsonl").open("a") as handle:
+            handle.write("{partial write\n[]\n")
+        write_jsonl(output / "identity_raw/kpr_track_sampling.jsonl", [
+            {"track_id": 0, "status": "selected", "selected_sample_count": 30},
+            {"track_id": 2, "status": "excluded", "exclusion_reasons": ["no_qualified_crops"]}])
+        write_jsonl(output / "identity/jersey_tracks.jsonl", [{"raw_track_id": 0,
+            "status": "unreadable", "number": None, "readings": [{"frame_idx": 5,
+                "number": None, "rejection_reasons": ["unreadable"], "raw_response": "unclear"}]}])
+        base = f"/api/projects/{project['project_id']}/videos/{video['video_id']}/identity-evidence"
+        with patch.object(module, "settings", self.settings), patch.object(module, "store", self.store), TestClient(module.app) as client:
+            page = client.get(base + "?purpose=kpr&track_id=0&offset=24&limit=24").json()
+            self.assertEqual((page["total"], len(page["items"]), page["media_prefix"]), (30, 6, "identity_raw"))
+            self.assertEqual(page["items"][0]["frame_idx"], 24)
+            excluded = client.get(base + "?purpose=kpr&track_id=2").json()
+            self.assertEqual(excluded["total"], 0)
+            self.assertEqual(excluded["tracks"][0]["exclusion_reasons"], ["no_qualified_crops"])
+            number = client.get(base + "?purpose=jersey").json()["items"][0]
+            self.assertIsNone(number["number"])
+            self.assertEqual(number["raw_response"], "unclear")
+            self.assertEqual(number["rejection_reasons"], ["unreadable"])
+            self.assertEqual(client.get(base + "?purpose=kpr&limit=49").status_code, 422)
+            self.assertEqual(client.get(base + "?purpose=unknown").status_code, 422)
+
     def test_batch_manifest_limits_import_and_preserves_failure_counts(self) -> None:
         write_json(self.run / 'batch_manifest.json', {
             'clips': [{'name': '1_example(black)'}, {'name': 'missing-video'}]})

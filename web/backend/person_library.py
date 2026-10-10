@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 import threading
 from urllib.parse import quote
@@ -87,7 +88,7 @@ def library_catalog(settings, store, project_id, *, offset=0, limit=12, q="", st
         text = " ".join([person["global_person_id"], person.get("identity_label") or "",
                          *((person.get("jersey") or {}).get("candidate_numbers", [])),
                          *(member["filename"] for member in person["members"])])
-        matches = {"all": person["status"] != "non_player", "non_player": person["status"] == "non_player", "merged": person["local_archive_count"] > 1,
+        matches = {"all": person["status"] != "non_player", "candidate": person["status"] == "candidate", "non_player": person["status"] == "non_player", "merged": person["clip_count"] > 1,
                    "singleton": person["local_archive_count"] == 1,
                    "needs_review": person["status"] == "needs_review",
                    "manual_grouping": person["status"] == "manual_grouping"}
@@ -102,6 +103,9 @@ def library_catalog(settings, store, project_id, *, offset=0, limit=12, q="", st
                                   for member in person["members"][:4]]})
     summary = {key: value for key, value in context["manifest"].items()
                if key not in {"source_artifacts", "merges", "feature_contract"}}
+    summary["player_status_counts"] = dict(Counter(p["status"] for p in context["people"]))
+    summary["gallery_observation_count"] = sum(m.get("gallery_eligible", False)
+        for person in context["people"] for m in person["members"])
     return {"available": True, "items": rows, "offset": offset, "limit": limit,
             "total": len(selected), "summary": summary, "stale_review": context["stale_review"],
             "revision": context["review"].get("revision")}
@@ -149,6 +153,24 @@ def library_events(settings, store, project_id, *, person_id="", event="", q="",
     selected.sort(key=lambda row: (row["filename"], row["start"], row["event_id"]))
     return {"items": selected[offset:offset + limit], "total": len(selected), "offset": offset, "limit": limit,
             "time_scope": "source_clip_seconds", "warning": "Events are cached model predictions, not verified actions"}
+
+
+def clip_player_assignments(settings, store, project_id, video):
+    """Use the current exported registry, including manual edits and aliases."""
+    context = library_context(settings, store, project_id)
+    if context is None:
+        return {"available": False, "items": []}
+    clip = Path(video["output_dir"]).name
+    items = []
+    for person in context["people"]:
+        for member in person["members"]:
+            if member["clip_name"] == clip:
+                items.append({"global_person_id": person["global_person_id"],
+                    "identity_label": person.get("identity_label"), "status": person["status"],
+                    **{key: member.get(key) for key in ("local_person_id", "raw_track_ids", "decision",
+                        "gallery_eligible", "hold_reasons", "manually_detached")}})
+    return {"available": True, "match_id": context["manifest"]["match_id"],
+            "revision": context["manifest"]["review_revision"], "items": items}
 
 
 def edit_library(settings, store, project_id, operation, *, expected_revision=None,
