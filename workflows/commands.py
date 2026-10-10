@@ -162,6 +162,8 @@ class CommandBuilder:
                 str(options.get("prompt_mode", "none")),
                 "--samples-per-track",
                 str(int(options.get("identity_samples", 8))),
+                "--sample-min-gap-s",
+                str(float(options.get("identity_sample_min_gap_s", 0.25))),
                 "--min-det-score",
                 str(float(options.get("identity_min_det_score", 0.5))),
                 "--overwrite",

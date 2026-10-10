@@ -7,7 +7,8 @@ import math
 from pathlib import Path
 
 from contracts.schema import read_jsonl, write_json, write_jsonl_line
-from pipeline.identity.qwen_backend import QwenBackend, parse_reading
+from pipeline.identity.qwen_backend import QwenBackend, model_provenance, parse_reading
+from pipeline.identity.sampling import SAMPLING_STRATEGY
 
 
 def qwen_consensus(readings, *, min_support=2, min_gap_s=.25):
@@ -38,71 +39,51 @@ def qwen_consensus(readings, *, min_support=2, min_gap_s=.25):
         "candidates": candidates, "readings": readings, "verified": False, "backend": "qwen_vl"}
 
 
-def sample_torsos(video, tracks, output_dir, *, max_samples=6, min_gap_s=.25):
+def sample_torsos(video, tracks, output_dir, *, max_samples=6, min_gap_s=.25,
+                  track_ids=None):
     import cv2
-    if max_samples < 2 or not math.isfinite(min_gap_s) or min_gap_s <= 0:
-        raise ValueError("Invalid number sampling parameters")
-    by_frame, by_track = defaultdict(list), defaultdict(dict)
-    for row in read_jsonl(tracks):
-        tid, frame = int(row["track_id"]), int(row["frame_idx"])
-        if frame < 0 or not math.isfinite(float(row["timestamp_s"])) or row["timestamp_s"] < 0:
-            raise ValueError("Invalid track timestamp/frame")
-        if float(row["det_score"]) >= .5:
-            by_frame[frame].append(row)
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
+    from contracts.schema import TrackRecord
+    from pipeline.identity.sampling import select_quality_samples
+
+    if max_samples < 2:
+        raise ValueError("Require at least two number samples")
+    records = [TrackRecord.from_dict({"category_id": 0, **row}) for row in read_jsonl(tracks)]
+    selected, quality = select_quality_samples(
+        video, records, purpose="jersey", sample_count=max_samples,
+        min_gap_s=min_gap_s, track_ids=track_ids,
+    )
+    if not selected:
+        return []
+    output = Path(output_dir).resolve()
+    by_frame = defaultdict(list)
+    for record in selected:
+        by_frame[record.frame_idx].append(record)
+    capture = cv2.VideoCapture(str(video))
+    if not capture.isOpened():
+        capture.release()
         raise ValueError("Cannot decode number-sampling video")
-    try:
-        frame_idx = 0
-        while by_frame:
-            ok, image = cap.read()
-            if not ok:
-                raise ValueError("Video ended before selected tracking frames")
-            for row in by_frame.pop(frame_idx, []):
-                x1, y1, x2, y2 = map(float, row["bbox_xyxy"])
-                height, width = image.shape[:2]
-                # Generous torso region; its legibility is decided by Qwen, not assumed.
-                left, right = max(0, round(x1)), min(width, round(x2))
-                top, bottom = max(0, round(y1 + .12 * (y2-y1))), min(height, round(y1 + .7 * (y2-y1)))
-                if right-left < 32 or bottom-top < 48:
-                    continue
-                crop = image[top:bottom, left:right]
-                sharpness = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
-                if sharpness < 5:
-                    continue
-                tid = int(row["track_id"])
-                bucket = int(float(row["timestamp_s"]) / min_gap_s)
-                quality = sharpness * math.sqrt(crop.shape[0] * crop.shape[1])
-                old = by_track[tid].get(bucket)
-                if old is None or quality > old[0]:
-                    by_track[tid][bucket] = (quality, dict(row), crop.copy(), [left, top, right, bottom])
-                # Bound image memory for every track while keeping diverse temporal buckets.
-                if len(by_track[tid]) > max_samples * 3:
-                    worst = min(by_track[tid], key=lambda k: by_track[tid][k][0])
-                    del by_track[tid][worst]
-            frame_idx += 1
-    finally:
-        cap.release()
-    output = Path(output_dir)
     samples = []
-    for tid, buckets in sorted(by_track.items()):
-        selected = []
-        for quality, row, crop, roi in sorted(buckets.values(), key=lambda r: -r[0]):
-            if any(abs(row["timestamp_s"] - s["timestamp_s"]) < min_gap_s for s in selected):
-                continue
-            relative = f"jersey_media/T{tid:04d}/f{row['frame_idx']:08d}.png"
-            path = output / relative
-            if path.is_symlink() or not path.resolve().is_relative_to(output.resolve()):
-                raise ValueError("Number crop path escapes output")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if not cv2.imwrite(str(path), crop):
-                raise OSError("Cannot save torso crop")
-            selected.append({"raw_track_id": tid, "frame_idx": row["frame_idx"],
-                "timestamp_s": row["timestamp_s"], "crop_path": relative, "torso_roi_xyxy": roi,
-                "sampling_quality": quality})
-            if len(selected) >= max_samples:
-                break
-        samples.extend(sorted(selected, key=lambda r: r["frame_idx"]))
+    try:
+        for frame_idx in range(max(by_frame) + 1):
+            ok, image = capture.read()
+            if not ok:
+                raise ValueError("Video ended before selected number frames")
+            for record in by_frame.get(frame_idx, []):
+                info = quality[(record.track_id, frame_idx)]
+                left, top, right, bottom = info["sampling_roi_xyxy"]
+                relative = f"jersey_media/T{record.track_id:04d}/f{frame_idx:08d}.png"
+                path = output / relative
+                if path.is_symlink() or not path.resolve().is_relative_to(output):
+                    raise ValueError("Number crop path escapes output")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not cv2.imwrite(str(path), image[top:bottom, left:right]):
+                    raise OSError("Cannot save torso crop")
+                samples.append({"raw_track_id": record.track_id,
+                    "frame_idx": frame_idx, "timestamp_s": record.timestamp_s,
+                    "crop_path": relative, "torso_roi_xyxy": [left, top, right, bottom],
+                    **info})
+    finally:
+        capture.release()
     return samples
 
 
@@ -116,12 +97,16 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
         raise ValueError("Duplicate identity mapping")
     ids = {int(r["raw_track_id"]) for r in mappings}
     qwen_consensus([], min_support=min_support, min_gap_s=min_gap_s)
-    samples = sample_torsos(video, tracks, output, max_samples=max_samples, min_gap_s=min_gap_s) if ids else []
-    samples = [s for s in samples if s["raw_track_id"] in ids]
+    samples = sample_torsos(video, tracks, output, max_samples=max_samples,
+                            min_gap_s=min_gap_s, track_ids=ids) if ids else []
     if samples and backend is None:
         backend = QwenBackend(model_dir, device=device)
-    provenance = backend.provenance if backend else {"backend": "qwen_vl", "empty_input": True}
+    # A track with no readable crops still belongs to the same model contract
+    # as other clips. Resolve provenance without loading a GPU model.
+    provenance = (backend.provenance if backend else model_provenance(model_dir)
+                  if ids else {"backend": "qwen_vl", "empty_input": True})
     by_track = defaultdict(list)
+    inference_count, cache_hit_count = 0, 0
     for sample in samples:
         path = output / sample["crop_path"]
         cache_id = hashlib.sha256(path.read_bytes() + json.dumps(provenance, sort_keys=True).encode()).hexdigest()
@@ -130,9 +115,11 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
             raise ValueError("Number cache escapes output")
         if cache.is_file():
             result = json.loads(cache.read_text())
+            cache_hit_count += 1
         else:
             with Image.open(path) as image:
                 raw = backend.read(image.convert("RGB"))
+            inference_count += 1
             result = {**parse_reading(raw), "raw_response": raw}
             write_json(cache, result)
         by_track[sample["raw_track_id"]].append({**sample, **result, "text": result["number"]})
@@ -150,8 +137,11 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
             for row in rows:
                 write_jsonl_line(handle, row)
     summary = {"backend": "qwen_vl", "provenance": provenance,
-        "thresholds": {"min_support": min_support, "min_gap_s": min_gap_s},
-        "track_count": len(ids), "sample_count": len(samples), "model_invoked": bool(samples),
+        "thresholds": {"min_support": min_support, "min_gap_s": min_gap_s,
+                       "max_samples": max_samples, "sampling_strategy": SAMPLING_STRATEGY},
+        "track_count": len(ids), "sample_count": len(samples),
+        "model_invoked": inference_count > 0, "inference_count": inference_count,
+        "cache_hit_count": cache_hit_count,
         "warning": "Uncalibrated number evidence; matching digits do not establish player identity."}
     write_json(output / "jersey_summary.json", summary)
     return summary

@@ -87,18 +87,28 @@ conda run -n basket-action python -m pip install --no-deps -e MMAction2
 
 ## 5. 本地 Qwen 视觉模型
 
-第一版适配 `Qwen2.5-VL-3B-Instruct`，以 FP16、SDPA、逐张躯干图方式运行。显存占用和号码准确率需要实机测量，不能从模型名称推断。
+适配 `Qwen2.5-VL-3B-Instruct` 和 `Qwen2.5-VL-7B-Instruct`，默认 7B，以 FP16、SDPA、逐张躯干图方式运行。模型权重下载可以并行，GPU 推理阶段串行。实际显存占用需要实机测量。
 
 ```bash
 conda create -n basket-qwen python=3.10 -y
 conda run -n basket-qwen python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-conda run -n basket-qwen python -m pip install -r requirements-qwen.txt
+conda run -n basket-qwen python -m pip install -r requirements-qwen.txt transformers==4.51.3 accelerate==1.6.0
 conda run -n basket-qwen python -m pip install 'huggingface_hub>=0.25,<1'
 ```
 
-从官方 [Qwen/Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct) 下载完整快照到 `runtime/models/qwen/Qwen2.5-VL-3B-Instruct`，包括 safetensors、配置、tokenizer、processor 文件。为复现记录所用 snapshot commit SHA；可以通过 `huggingface_hub.snapshot_download` 的 `revision` 指定该 SHA。
+从官方 [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) 下载完整快照到 `runtime/models/qwen/Qwen2.5-VL-7B-Instruct`，包括 safetensors、配置、tokenizer、processor 文件。为复现记录所用 snapshot commit SHA；可以通过 `huggingface_hub.snapshot_download` 的 `revision` 指定该 SHA。
 
 运行时 `local_files_only=True`，不联网下载权重；`trust_remote_code=False`，只加载 safetensors。适配器记录模型文件与提示词摘要并缓存单图读数。若要换成其他 Qwen 架构，需先调整适配器和验证，不能只替换路径。
+
+在 Qwen 环境执行独立功能检查，确认质量抽样、GPU 生成、JSON 解析、缓存和多帧证据文件能够衔接。命令会生成一个小视频及轨迹，输出目录必须为空；它不评估号码准确率，也不能证明 MOTIP 联合链路已通过。首次加载前会读取全部权重计算摘要，需要等待磁盘读取完成。
+
+```bash
+conda run -n basket-qwen python -m cli.smoke_qwen \
+  --model-dir runtime/models/qwen/Qwen2.5-VL-7B-Instruct \
+  --output-dir runtime/checks/qwen-smoke-001
+```
+
+真实轨迹继续通过 `cli.jersey_qwen` 和批处理中的 `jersey` 阶段调用相同采样与识别服务。KPR 的 `--sample-min-gap-s` 默认 0.25 秒，批处理选项为 `identity_sample_min_gap_s`。新采样版本首次使用应建立新的运行目录，避免复用旧样本或将不同号码证据合同写入已有球员库。
 
 ## 6. 私人运行配置
 

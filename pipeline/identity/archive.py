@@ -12,7 +12,6 @@ import hashlib
 import math
 import shutil
 from collections import defaultdict
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +24,7 @@ from contracts.schema import (
     write_jsonl_line,
 )
 from pipeline.identity.kpr_backend import PROMPT_MODES, KPRBackend
+from pipeline.identity.sampling import SAMPLING_STRATEGY, select_quality_samples
 
 DEFAULT_KPR_ROOT = Path("KPR")
 DEFAULT_KPR_CONFIG = Path("configs/kpr/multidataset_sports_test.yaml")
@@ -55,6 +55,7 @@ class IdentityArchiveOptions:
     prompt_mode: str = "none"
     keypoints: Path | None = None
     samples_per_track: int = 8
+    sample_min_gap_s: float = 0.25
     archive_exemplars: int = 4
     batch_size: int = 16
     min_det_score: float = 0.5
@@ -133,44 +134,6 @@ def keypoints_for_crop(
     return array
 
 
-def choose_track_samples(
-    records: Iterable[TrackRecord],
-    *,
-    sample_count: int,
-    min_score: float,
-    min_width: float,
-    min_height: float,
-) -> list[TrackRecord]:
-    """Select temporally diverse, high-confidence observations for one track."""
-    if sample_count <= 0:
-        raise ValueError("sample_count must be positive")
-    eligible = []
-    for record in sorted(records, key=lambda item: item.frame_idx):
-        x1, y1, x2, y2 = record.bbox_xyxy
-        if (
-            record.det_score >= min_score
-            and x2 - x1 >= min_width
-            and y2 - y1 >= min_height
-        ):
-            eligible.append(record)
-    if len(eligible) <= sample_count:
-        return eligible
-
-    # Pick the highest-confidence observation from each temporal bin.  This is
-    # less redundant than simply taking the global top-N scores.
-    selected = []
-    for bin_idx in range(sample_count):
-        start = math.floor(bin_idx * len(eligible) / sample_count)
-        end = math.floor((bin_idx + 1) * len(eligible) / sample_count)
-        selected.append(
-            max(
-                eligible[start:end],
-                key=lambda item: (item.det_score, -item.frame_idx),
-            )
-        )
-    return sorted(selected, key=lambda item: item.frame_idx)
-
-
 def build_track_sampling_diagnostics(
     records_by_track: dict[int, list[TrackRecord]],
     selected: list[TrackRecord],
@@ -208,6 +171,8 @@ def build_track_sampling_diagnostics(
             if not exclusion_reasons:
                 exclusion_reasons.append("score_and_size_filters_never_pass_together")
         selected_count = selected_counts.get(track_id, 0)
+        if eligible_count and not selected_count:
+            exclusion_reasons.append("no_image_crops_passed_quality_filters")
         diagnostics.append(
             {
                 "track_id": track_id,
@@ -219,6 +184,7 @@ def build_track_sampling_diagnostics(
                 "eligible_observation_count": eligible_count,
                 "selected_sample_count": selected_count,
                 "status": "selected" if selected_count else "excluded",
+                "sampling_strategy": SAMPLING_STRATEGY,
                 "exclusion_reasons": exclusion_reasons,
                 "filters": {
                     "min_det_score": min_score,
@@ -581,6 +547,9 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
         raise ValueError("--context-padding must be in [0, 2]")
     if options.archive_exemplars <= 0:
         raise ValueError("--archive-exemplars must be positive")
+    if (options.samples_per_track <= 0 or not math.isfinite(options.sample_min_gap_s)
+            or options.sample_min_gap_s <= 0):
+        raise ValueError("Invalid identity sampling count or temporal gap")
     if options.prompt_mode == "none" and options.keypoints is not None:
         raise ValueError("--keypoints requires --prompt-mode keypoints")
     if options.prompt_mode == "keypoints" and options.keypoints is None:
@@ -624,17 +593,14 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
     for values in records_by_track.values():
         values.sort(key=lambda item: item.frame_idx)
 
-    selected = []
-    for track_id in sorted(records_by_track):
-        selected.extend(
-            choose_track_samples(
-                records_by_track[track_id],
-                sample_count=options.samples_per_track,
-                min_score=options.min_det_score,
-                min_width=options.min_box_width,
-                min_height=options.min_box_height,
-            )
-        )
+    selected, sampling_metadata = select_quality_samples(
+        video_path, all_records, purpose="person",
+        sample_count=options.samples_per_track,
+        min_score=options.min_det_score,
+        min_width=options.min_box_width,
+        min_height=options.min_box_height,
+        min_gap_s=options.sample_min_gap_s,
+    )
     track_sampling = build_track_sampling_diagnostics(
         records_by_track,
         selected,
@@ -648,7 +614,28 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
         for value in track_sampling:
             write_jsonl_line(handle, value)
     if not selected:
-        raise ValueError("No tracks passed the KPR sampling filters")
+        # Poor imagery is a valid absence of identity evidence. Preserve the
+        # sampling diagnostics and let action/event processing continue.
+        for filename in ("kpr_sampling_manifest.jsonl", "kpr_samples.jsonl",
+                         "kpr_track_pairs.jsonl", "identities.jsonl", "identity_map.jsonl"):
+            (output_dir / filename).write_text("", encoding="utf-8")
+        summary = {
+            "video_id": all_records[0].video_id if all_records else None,
+            "status": "prepared_not_inferred" if options.prepare_only else "no_usable_identity_samples",
+            "sampling_strategy": SAMPLING_STRATEGY,
+            "sample_min_gap_s": options.sample_min_gap_s,
+            "sample_count": 0, "input_track_count": len(records_by_track),
+            "track_count": 0, "identity_count": 0,
+            "excluded_track_count": len(records_by_track), "model_invoked": False,
+            "reason": "no_crops_passed_quality_filters",
+            "identity_resolution_mode": "archive_no_merge",
+        }
+        if options.prepare_only:
+            write_json(output_dir / "kpr_prepare_summary.json", summary)
+        else:
+            write_json(output_dir / "kpr_summary.json", summary)
+            write_json(output_dir / "identity_archive_manifest.json", summary)
+        return summary
 
     samples, sample_metadata = load_selected_crops(
         video_path,
@@ -659,6 +646,8 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
         prompt_mode=options.prompt_mode,
         prompts=prompts,
     )
+    for value in sample_metadata:
+        value.update(sampling_metadata[(value["track_id"], value["frame_idx"])])
     with (output_dir / "kpr_sampling_manifest.jsonl").open(
         "w", encoding="utf-8"
     ) as handle:
@@ -667,6 +656,8 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
     if options.prepare_only:
         prepare_summary = {
             "status": "prepared_not_inferred",
+            "sampling_strategy": SAMPLING_STRATEGY,
+            "sample_min_gap_s": options.sample_min_gap_s,
             "input": str(video_path),
             "tracks": str(tracks_path),
             "prompt_mode": options.prompt_mode,
@@ -826,6 +817,8 @@ def build_identity_archive(options: IdentityArchiveOptions) -> dict[str, Any]:
 
     summary = {
         "input": str(video_path),
+        "sampling_strategy": SAMPLING_STRATEGY,
+        "sample_min_gap_s": options.sample_min_gap_s,
         "tracks": str(tracks_path),
         "backend": "KPR",
         "prompt_mode": options.prompt_mode,

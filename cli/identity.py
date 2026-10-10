@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt-mode", choices=("none", "keypoints"), default="none")
     parser.add_argument("--keypoints", type=Path)
     parser.add_argument("--samples-per-track", type=int, default=8)
+    parser.add_argument("--sample-min-gap-s", type=float, default=0.25)
     parser.add_argument("--archive-exemplars", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--min-det-score", type=float, default=0.5)
@@ -62,6 +63,7 @@ def main() -> None:
             prompt_mode=args.prompt_mode,
             keypoints=args.keypoints,
             samples_per_track=args.samples_per_track,
+            sample_min_gap_s=args.sample_min_gap_s,
             archive_exemplars=args.archive_exemplars,
             batch_size=args.batch_size,
             min_det_score=args.min_det_score,

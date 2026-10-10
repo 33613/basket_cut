@@ -25,7 +25,7 @@ class ExecutionSettings:
     repository_root: Path = REPOSITORY_ROOT
     review_python: Path = field(default_factory=lambda: _python_env("BASKET_REVIEW_PYTHON") if os.environ.get("BASKET_REVIEW_PYTHON") else _python_env("BASKET_MOTIP_PYTHON"))
     qwen_python: Path = field(default_factory=lambda: _python_env("BASKET_QWEN_PYTHON"))
-    qwen_model_dir: Path = field(default_factory=lambda: _path_env("BASKET_QWEN_MODEL_DIR", model_path("qwen", "Qwen2.5-VL-3B-Instruct")))
+    qwen_model_dir: Path = field(default_factory=lambda: _path_env("BASKET_QWEN_MODEL_DIR", model_path("qwen", "Qwen2.5-VL-7B-Instruct")))
     motip_python: Path = field(
         default_factory=lambda: _python_env("BASKET_MOTIP_PYTHON")
     )
