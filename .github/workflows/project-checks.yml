@@ -17,3 +17,5 @@ jobs:
       - run: python -m cli.check_person_library
       - run: python -m cli.check_qwen
       - run: python -m cli.check_web
+      - run: pip install -r requirements-teamtrack.txt
+      - run: python -m cli.check_teamtrack

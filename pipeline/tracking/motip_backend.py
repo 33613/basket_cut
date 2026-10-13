@@ -47,11 +47,23 @@ class MotipBackend:
         checkpoint_path: str | Path,
         runtime_config: MotipRuntimeConfig,
         device: str = "cuda:0",
+        preprocessing: str = "tensor",
     ) -> None:
         self.motip_root = Path(motip_root).expanduser().resolve()
         self.config_path = self._resolve_under_root(config_path)
         self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
         self.runtime_config = runtime_config
+        if preprocessing not in ("tensor", "upstream-pil"):
+            raise ValueError(f"Unknown preprocessing: {preprocessing}")
+        self.preprocessing = preprocessing
+        if preprocessing == "upstream-pil":
+            from torchvision.transforms import v2
+            self._pil_transform = v2.Compose([
+                v2.Resize(size=runtime_config.max_shorter, max_size=runtime_config.max_longer),
+                v2.ToImage(),
+                v2.ToDtype(torch.float32, scale=True),
+                v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
         self.device = torch.device(device)
 
         if not self.motip_root.is_dir():
@@ -118,6 +130,18 @@ class MotipBackend:
     @torch.inference_mode()
     def infer_frame(self, tracker: Any, frame_bgr: Any) -> list[dict[str, Any]]:
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        if self.preprocessing == "upstream-pil":
+            from PIL import Image
+            tensor = self._pil_transform(Image.fromarray(frame_rgb))
+        else:
+            tensor = self._prepare_tensor(frame_rgb)
+        tensor = tensor.to(device=self.device, dtype=self.dtype)
+        nested = self._nested_tensor_from_tensor_list([tensor])
+
+        tracker.update(nested)
+        return self._results(tracker)
+
+    def _prepare_tensor(self, frame_rgb):
         tensor = transform_functional.to_tensor(frame_rgb)
         tensor = transform_functional.resize(
             tensor,
@@ -130,10 +154,9 @@ class MotipBackend:
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
         )
-        tensor = tensor.to(device=self.device, dtype=self.dtype)
-        nested = self._nested_tensor_from_tensor_list([tensor])
+        return tensor
 
-        tracker.update(nested)
+    def _results(self, tracker):
         raw = tracker.get_track_results()
         boxes = raw["bbox"].detach().float().cpu().tolist()
         scores = raw["score"].detach().float().cpu().tolist()

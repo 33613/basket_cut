@@ -145,3 +145,5 @@ CPU 自检覆盖身份稳定、追加/重跑、开放集待定、质量门槛、
 KPR 默认 `prompt_mode=none`；显式关键点提示需要另行提供，当前不自动生成关键点。第一版图库检索面向小规模比赛，尚未引入大规模向量索引或学习式拒识模型。
 
 采用模型：[MOTIP](https://github.com/MCG-NJU/MOTIP)、[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification)、[MMAction2](https://github.com/open-mmlab/mmaction2)、[Qwen2.5-VL](https://github.com/QwenLM/Qwen2.5-VL)。请遵守各上游模型、权重和数据许可。
+
+TeamTrack 篮球标注数据可用独立入口 `cli.benchmark_teamtrack` 评估原始 MOTIP。支持 HOTA/DetA/AssA/MOTA/IDF1、逐帧 CLEAR 明细、分视角与总体指标，以及完整性校验和断点恢复。安装与测试步骤见 [TeamTrack 评估说明](docs/teamtrack.md)。
