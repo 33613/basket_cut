@@ -18,6 +18,11 @@ def infer(output, split, checkpoint, device='cuda:0'):
     import torchvision
     from pipeline.tracking.motip_backend import MotipBackend, MotipRuntimeConfig
 
+    # The upstream submission entry disables both TF32 switches explicitly.
+    # FP32 tensors alone do not guarantee this, especially for cuDNN operations.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     output, checkpoint = Path(output).resolve(), Path(checkpoint).resolve()
     folder = output / split
     dataset = json.loads((folder / 'dataset.json').read_text())
@@ -30,6 +35,8 @@ def infer(output, split, checkpoint, device='cuda:0'):
         'checkpoint_sha256': sha256(checkpoint), 'config': config,
         'runtime': runtime.to_dict(), 'preprocessing': 'upstream-pil',
         'frame_decoder': 'OpenCV BGR -> RGB PIL', 'device': device, 'seed': 0,
+        'allow_tf32_matmul': torch.backends.cuda.matmul.allow_tf32,
+        'allow_tf32_cudnn': torch.backends.cudnn.allow_tf32,
         'torch': torch.__version__, 'torchvision': torchvision.__version__, 'opencv': cv2.__version__,
         'code_sha256': {str(p.relative_to(ROOT)): sha256(p) for p in sorted(set(code_paths))},
         'dataset_sha256': sha256(folder / 'dataset.json'),

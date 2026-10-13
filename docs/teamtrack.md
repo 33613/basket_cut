@@ -59,6 +59,8 @@ python -u -m cli.benchmark_teamtrack \
 
 使用 `r50_deformable_detr_motip_sportsmot.pth` 与对应配置（带轨迹增强版本），FP32、object-max、miss_tolerance=60、det=0.3、newborn=0.6、id=0.2、area=0，短边 800、长边上限 1440。
 
+与官方提交入口一致，显式关闭 CUDA matmul 和 cuDNN 的 TF32，并将两个开关写入推理协议。早期基线未显式设置或记录这两个开关，不能认定其数值路径完全等同官方。更新后进行推理需使用新的输出目录，保留旧结果供对照。
+
 预处理复用上游 `MOTIP/data/seq_dataset.py` 的 PIL Resize → ToImage → FP32 → Normalize 顺序；视频由 OpenCV 解码再转 RGB PIL，不提取成有损 JPEG。保留原帧率、整段连续追踪；每条序列重置 tracker，同一 split 复用模型。直接导出 raw tracker 框和 ID，不做业务质量过滤、GT 过滤、球员数 top-k 限制、KPR/Qwen 或跨视频身份合并。模型在球员之外检测到的裁判等对象也可能贡献 FP。
 
 4K 普通视角与鱼眼视角在同一长边限制下有效人物分辨率不同，因此分别报告。改变分辨率、阈值或权重属于新实验；先在 val 做选择，再冻结设置运行 test。多视角片段可能来自同一比赛，不应被解释为独立比赛样本。
@@ -92,6 +94,8 @@ CSV 中的得分、recall、precision 都是百分数（100 表示完全正确�
 - HOTA、DetA、AssA：对 IoU=0.05、0.10、…、0.95 的 19 个值取均值。HOTA_TP/FP/FN 随阈值变化，单独导出，不能和 CLEAR 计数互换。
 - MOTA、TP、FP、FN、recall、precision、IDSW、Frag：TrackEval CLEAR，IoU=0.5。recall=TP/(TP+FN)，precision=TP/(TP+FP)，MOTA 计入 FP、FN、IDSW，可为负值。
 - IDF1、IDTP、IDFP、IDFN、IDR、IDP：TrackEval Identity，IoU=0.5，以整个序列的身份分配计算。IDF1 与 AssA 不是逐帧检测指标，不伪造“逐帧 IDF1/HOTA”。
+
+检测分数阈值0.3、新生轨迹分数阈值0.6和身份分数阈值0.2都是模型输出置信度阈值，不是评价IoU阈值。MOTIP通过身份解码分数进行关联，不能把其身份阈值解释为IoU=0.2。HOTA最终分数是各alpha下 `sqrt(DetA_alpha * AssA_alpha)` 的均值，而不是直接用已经平均后的DetA/AssA计算平方根。
 
 逐帧明细复现仓库自带 CLEAR 的匹配规则（优先上一时刻关联、再 IoU，包括其空帧状态处理），逐序列与官方 CLEAR 的 TP/FP/FN/IDSW 总计交叉校验，不一致就报错。它描述的是原始 MOTIP 输出，不是业务流程中 quality、identity 等阶段的准确率。
 

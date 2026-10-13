@@ -205,6 +205,9 @@ class TeamTrackChecks(unittest.TestCase):
                 MotipRuntimeConfig=lambda **kwargs: SimpleNamespace(to_dict=lambda: kwargs)),
         }
         modules['torch'].version = SimpleNamespace(cuda=None)
+        modules['torch'].backends = SimpleNamespace(
+            cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=True)),
+            cudnn=SimpleNamespace(allow_tf32=True))
         return modules, calls
 
     def inference_fixture(self):
@@ -220,6 +223,11 @@ class TeamTrackChecks(unittest.TestCase):
         modules, calls = self.fake_model_modules()
         with patch.dict('sys.modules', modules):
             infer(output, 'val', checkpoint, device='cpu')
+            self.assertFalse(modules['torch'].backends.cuda.matmul.allow_tf32)
+            self.assertFalse(modules['torch'].backends.cudnn.allow_tf32)
+            protocol = json.loads((output / 'val/inference_protocol.json').read_text())
+            self.assertFalse(protocol['allow_tf32_matmul'])
+            self.assertFalse(protocol['allow_tf32_cudnn'])
             infer(output, 'val', checkpoint, device='cpu')
             self.assertEqual(calls, {'loads': 1, 'trackers': 1})
             pred = next((output / 'val/predictions/motip/data').glob('*.txt'))
