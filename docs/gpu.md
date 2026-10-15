@@ -89,7 +89,7 @@ conda run -n basket-action python -m pip install --no-deps -e MMAction2
 
 统一使用 `Qwen3-VL-8B-Instruct` 处理号码图片和有帧数限制的视频窗口。CUDA上优先BF16，不支持时FP16，使用SDPA；视频输入不等同于已经实现篮球回合切分。
 
-现有Qwen2.5环境可以先克隆到新前缀，再安装 `requirements-qwen.txt`，复用torch2.6.0及torchvision0.21.0。新的独立环境采用transformers4.57.1，不能只改模型路径继续用旧加载器。若从空环境安装，PyTorch CUDA轮子单独选用原有兼容源，再安装其余依赖。
+现有Qwen2.5环境可以先克隆到新前缀，再安装 `requirements-qwen.txt`，复用torch2.6.0及torchvision0.21.0。清理过Conda包缓存后，克隆可能需要联网补齐基础包，不应强制离线；用新前缀的 `bin/python` 是否可执行来判断创建成功，不能只判断目录存在。新的独立环境采用transformers4.57.1，不能只改模型路径继续用旧加载器。若从空环境安装，PyTorch CUDA轮子单独选用原有兼容源，再安装其余依赖。
 
 ```bash
 conda create -n basket-qwen3 python=3.10 -y
@@ -97,7 +97,7 @@ conda run -n basket-qwen3 python -m pip install torch==2.6.0 torchvision==0.21.0
 conda run -n basket-qwen3 python -m pip install -r requirements-qwen.txt
 ```
 
-视频由官方processor读取原始本地窗口并保留解码器提供的FPS/采样帧索引。该固定版本优先torchcodec（若安装），否则使用torchvision/PyAV；推荐新环境不安装torchcodec，使用与torch2.6匹配的torchvision0.21及PyAV14，避免额外FFmpeg共享库/ABI配置。不要传已经被该版本忽略的 `video_load_backend` 参数来声称强制切换了解码器。
+视频由官方processor读取原始本地窗口并保留解码器提供的FPS/采样帧索引。该固定版本优先torchcodec（若安装），否则使用torchvision/PyAV；推荐新环境不安装torchcodec，使用与torch2.6匹配的torchvision0.21及PyAV14.2.0，避免额外FFmpeg共享库/ABI配置。依赖文件将PyAV固定为14.2.0并只允许其二进制wheel；14.3/14.4缺少Python3.10 Linux wheel，宽泛的14.x版本范围会触发源码编译并要求FFmpeg开发库。若镜像缺少14.2.0的wheel，应从官方PyPI补齐，不退回源码编译。不要传已经被该版本忽略的 `video_load_backend` 参数来声称强制切换了解码器。
 
 通过ModelScope下载官方完整快照，使用本地目标目录，避免再复制一份模型缓存。下载时冻结远端文件清单和官方SHA256到模型目录之外的manifest，检查全部选中模型文件、权重分片索引和本地图片/视频processor。相同命令可以利用ModelScope下载断点；若远端master已变更则停止，不静默混用文件。可显式指定官方tag。
 
