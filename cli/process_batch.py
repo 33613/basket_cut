@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--match-id', required=True, help='One match per persistent output directory')
     parser.add_argument('--env-file', type=Path)
     parser.add_argument('--selection', type=Path)
+    parser.add_argument('--clips-manifest', type=Path, help='Validated long-video clip provenance manifest')
     parser.add_argument('--limit', type=int, default=30)
     parser.add_argument('--target', choices=('identity', 'full'), default='full')
     parser.add_argument('--min-free-gb', type=float, default=2)
@@ -30,7 +31,8 @@ def main():
     if not math.isfinite(args.min_free_gb) or args.min_free_gb < 0:
         parser.error('min-free-gb must be finite and nonnegative')
     result = run_batch(ExecutionSettings(), args.input_dir, args.output_dir, limit=args.limit,
-        selection=args.selection, target=args.target, force=args.force, dry_run=args.dry_run,
+        selection=args.selection, clips_manifest=args.clips_manifest,
+        target=args.target, force=args.force, dry_run=args.dry_run,
         options={'match_id': args.match_id, 'min_free_gb': args.min_free_gb,
                  'jersey_qwen': not args.skip_qwen, 'player_match_distance': args.player_match_distance,
                  'player_novelty_distance': args.player_novelty_distance, 'player_min_margin': args.player_min_margin})

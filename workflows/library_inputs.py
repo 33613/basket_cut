@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from contracts.schema import EventRecord, read_jsonl
+from contracts.lineage import clip_context, event_lineage, track_uid
 from pipeline.identity.jersey import group_numbers
 
 
@@ -69,6 +70,10 @@ def load_library_inputs(options: PersonLibraryOptions):
         if options.clip_names is None and status_path.is_file() and json.loads(status_path.read_text()).get("status") != "completed":
             raise ValueError(f"Clip is not complete: {name}; finish/retry the batch first")
         meta = json.loads(record(f"{name}/tracking/video_meta.json").read_text())
+        context = clip_context(manifest, name)
+        # Keep old registry evidence byte-compatible; source lineage is added
+        # only for newly exported long-video clips.
+        lineage = context if "source_video_id" in context else {}
         raw = list(read_jsonl(record(f"{name}/identity_raw/identities.jsonl")))
         local = list(read_jsonl(record(f"{name}/identity/identities.jsonl")))
         resolution = json.loads(record(f"{name}/identity/resolution_summary.json").read_text())
@@ -177,6 +182,8 @@ def load_library_inputs(options: PersonLibraryOptions):
                     reasons.add("jersey_number_conflict")
             node_id = "N-" + hashlib.sha256(f"{name}\0{pid}".encode()).hexdigest()[:16]
             nodes.append({"node_id": node_id, "clip_name": name, "video_id": meta["video_id"],
+                          **lineage,
+                          **({"track_uids": [track_uid(context["clip_id"], tid) for tid in tids]} if lineage else {}),
                           "filename": Path(meta["input_path"]).name, "local_person_id": pid,
                           "raw_track_ids": tids,
                           "intervals": [[min(track_times[t]), max(track_times[t]) + 1 / float(meta["fps"])]
@@ -196,6 +203,8 @@ def load_library_inputs(options: PersonLibraryOptions):
                     raise ValueError(f"Duplicate event id in {name}")
                 seen_events.add(event.event_id)
                 events.append({**event.to_dict(), "clip_name": name,
+                               **(event_lineage(lineage, event.start, event.end) if lineage else {}),
+                               **({"track_uids": [track_uid(context["clip_id"], t) for t in event.raw_track_ids]} if lineage else {}),
                                "local_person_id": event.identity_id})
     fingerprint = hashlib.sha256(json.dumps({"artifacts": signatures, "clips": names,
                                              "target": manifest.get("target", "full"),

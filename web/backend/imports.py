@@ -21,6 +21,15 @@ def within_root(path: Path, root: Path) -> Path:
     return resolved
 
 
+def source_media_path(path, settings, *, derived=False):
+    """Original uploads or derived clips in the configured result tree."""
+    resolved = Path(path).expanduser().resolve()
+    roots = (settings.source_root, settings.import_root) if derived else (settings.source_root,)
+    if not any(resolved.is_relative_to(root.resolve()) for root in roots):
+        raise ValueError("Video must be inside the configured source or result tree")
+    return resolved
+
+
 def import_results(
     settings: WebSettings,
     store: ProjectStore,
@@ -63,7 +72,22 @@ def import_results(
         meta = load_json(meta_path)
         if not meta or not meta.get("input_path"):
             raise ValueError(f"Missing input_path in {meta_path}")
-        source = within_root(Path(meta["input_path"]), settings.source_root)
+        from contracts.lineage import clip_context
+        lineage = clip_context(batch, output.name) if batch else {"clip_id": output.name}
+        generated = False
+        source = Path(meta["input_path"]).expanduser().resolve()
+        if not source.is_relative_to(settings.source_root.resolve()):
+            entry = (batch or {}).get("segmentation")
+            if not entry or "source_video_id" not in lineage:
+                raise ValueError("Source outside data root has no segmentation provenance")
+            exported = source_media_path(entry["clips_manifest"], settings, derived=True)
+            clips = json.loads(exported.read_text())["videos"]
+            matching = [r for r in clips if r["clip_id"] == lineage["clip_id"]
+                        and (exported.parent / r["path"]).resolve() == source]
+            if len(matching) != 1:
+                raise ValueError("Generated source does not match the segmentation manifest")
+            generated = True
+        source = source_media_path(source, settings, derived=generated)
         video_id = (
             safe_slug(output.name)
             + "-"
@@ -122,6 +146,9 @@ def import_results(
                 "video_id": video_id,
                 "filename": source.name,
                 "source_path": str(source),
+                "clip_id": lineage["clip_id"],
+                "lineage": lineage,
+                "generated_source": generated,
                 "output_dir": str(output),
                 "media_cache_dir": str(cache),
                 "size_bytes": source.stat().st_size if source.is_file() else 0,
@@ -184,9 +211,8 @@ def prepare_browser_media(
         }.items():
             if not original.is_file():
                 continue
-            original = within_root(
-                original, settings.source_root if kind == "source" else output
-            )
+            original = (source_media_path(original, settings, derived=video.get("generated_source", False))
+                        if kind == "source" else within_root(original, output))
             cache.mkdir(parents=True, exist_ok=True)
             target = cache / f"{kind}.mp4"
             stamp_path = cache / f"{kind}.json"

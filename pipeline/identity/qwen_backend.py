@@ -117,11 +117,12 @@ class QwenBackend:
         inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
         return self._generate(inputs)
 
-    def read_video(self, path, prompt, *, num_frames=8):
+    def read_video(self, path, prompt, *, num_frames=8, max_new_tokens=128):
         """Infer one local window. Times in the response refer to this local clip.
 
         The pinned official processor samples frames and carries decoder FPS/frame
-        indices into timestamp tokens. This does not implement possession cutting.
+        indices into timestamp tokens. The segmentation service controls windows
+        and validates temporal responses separately.
         """
         if isinstance(num_frames, bool) or not isinstance(num_frames, int) or not 4 <= num_frames <= 64 or num_frames % 2:
             raise ValueError("num_frames must be an even integer from 4 to 64")
@@ -130,8 +131,10 @@ class QwenBackend:
             raise FileNotFoundError(path)
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("A nonempty video prompt is required")
+        if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int) or not 32 <= max_new_tokens <= 4096:
+            raise ValueError("max_new_tokens must be an integer from 32 to 4096")
         messages = [{"role": "user", "content": [
             {"type": "video", "video": str(path)}, {"type": "text", "text": prompt}]}]
         inputs = self.processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True,
             return_dict=True, return_tensors="pt", num_frames=num_frames, fps=None)
-        return self._generate(inputs)
+        return self._generate(inputs, max_new_tokens=max_new_tokens)

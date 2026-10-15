@@ -16,6 +16,7 @@ import uuid
 import numpy as np
 
 from pipeline.identity.cross_clip import part_distances
+from contracts.lineage import track_uid
 
 
 def digest(value):
@@ -254,6 +255,8 @@ class PlayerRegistry:
         members, node_people, local_people, track_people = {}, {}, {}, {}
         for row in self.db.execute("SELECT * FROM observations ORDER BY clip,id"):
             node = json.loads(row["payload"])
+            node.setdefault("clip_id", node["clip_name"])
+            node.setdefault("track_uids", [track_uid(node["clip_id"], tid) for tid in node["raw_track_ids"]])
             node["manually_detached"] = bool(row["detached"])
             node["gallery_eligible"] = bool(row["gallery"] and not row["detached"])
             members.setdefault(row["player"], []).append(node)
@@ -264,12 +267,17 @@ class PlayerRegistry:
         events = []
         for row in self.db.execute("SELECT * FROM events ORDER BY clip,id"):
             event = json.loads(row["payload"])
-            owners = {track_people[(row["clip"], tid)] for tid in event.get("raw_track_ids", []) if (row["clip"], tid) in track_people}
-            pid = next(iter(owners)) if len(owners) == 1 else None
+            tids = event.get("raw_track_ids", [])
+            owners = {track_people.get((row["clip"], tid)) for tid in tids}
+            pid = next(iter(owners)) if len(owners) == 1 and None not in owners else None
             if not event.get("raw_track_ids"):
                 pid = local_people.get((row["clip"], event.get("local_person_id")))
             events.append({**event, "event_id": row["id"], "source_event_id": event["event_id"],
-                           "id": pid, "global_person_id": pid, "identity_status": "mapped" if pid else "unmapped"})
+                           "clip_id": event.get("clip_id", row["clip"]),
+                           "track_uids": event.get("track_uids", [track_uid(event.get("clip_id", row["clip"]), t) for t in tids]),
+                           "match_id": self.meta("match_id"),
+                           "id": pid, "player_id": pid, "global_person_id": pid,
+                           "identity_status": "mapped" if pid else "unmapped"})
         people, mappings = [], []
         for player in self.db.execute("SELECT * FROM players WHERE alias_of IS NULL ORDER BY id"):
             group = members.get(player["id"], [])
@@ -283,14 +291,18 @@ class PlayerRegistry:
             counts = {}
             for e in own_events:
                 counts[e["event"]] = counts.get(e["event"], 0) + 1
-            people.append({"global_person_id": player["id"], "identity_label": player["label"],
+            people.append({"global_person_id": player["id"], "player_id": player["id"],
+                "match_id": self.meta("match_id"), "identity_label": player["label"],
                 "status": player["status"], "members": group, "cover_node_id": cover["node_id"],
                 "clip_count": len({n["clip_name"] for n in group}), "local_archive_count": len(group),
                 "manual_member_count": len(group) if player["status"] == "manual_grouping" else 0,
                 "event_count": len(own_events), "event_types": counts, "jersey": jersey})
             for node in group:
-                mappings.append({"global_person_id": player["id"], **{k: node[k] for k in
-                    ("node_id", "clip_name", "video_id", "local_person_id", "raw_track_ids", "intervals")}})
+                mappings.append({"global_person_id": player["id"], "player_id": player["id"],
+                    "match_id": self.meta("match_id"), **{k: node[k] for k in
+                    ("node_id", "clip_name", "clip_id", "video_id", "local_person_id", "raw_track_ids", "track_uids", "intervals",
+                     "source_video_id", "source_path", "source_sha256", "source_clip_start_s", "source_clip_end_s",
+                     "clip_sha256", "timestamp_quantization_s") if k in node}})
         aliases = {}
         for row in self.db.execute("SELECT id,alias_of FROM players WHERE alias_of IS NOT NULL"):
             pid, seen = row["alias_of"], {row["id"]}

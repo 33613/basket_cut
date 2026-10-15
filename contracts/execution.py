@@ -68,3 +68,6 @@ class ExecutionSettings:
     ffmpeg: str = field(
         default_factory=lambda: os.environ.get("BASKET_FFMPEG", "ffmpeg")
     )
+    ffprobe: str = field(
+        default_factory=lambda: os.environ.get("BASKET_FFPROBE", "ffprobe")
+    )

@@ -131,6 +131,8 @@ class CommandBuilder:
             ]
             if options.get("max_frames"):
                 command.extend(["--max-frames", str(int(options["max_frames"]))])
+            if options.get("clip_id"):
+                command.extend(["--video-id", options["clip_id"]])
             if options.get("tracking_det_threshold") is not None:
                 command.extend(
                     ["--det-thresh", str(float(options["tracking_det_threshold"]))]

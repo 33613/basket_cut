@@ -87,10 +87,9 @@ conda run -n basket-action python -m pip install --no-deps -e MMAction2
 
 ## 5. 本地 Qwen3-VL 视觉模型
 
-统一使用 `Qwen3-VL-8B-Instruct` 处理号码图片和有帧数限制的视频窗口。CUDA上优先BF16，不支持时FP16，使用SDPA；视频输入不等同于已经实现篮球回合切分。
+统一使用 `Qwen3-VL-8B-Instruct` 处理号码图片和有帧数限制的视频窗口。CUDA 上优先 BF16，不支持时 FP16，使用 SDPA。长视频切分采用分窗口粗看与边界复核，操作见 [完整流程](workflow.md)。
 
-现有Qwen2.5环境可以先克隆到新前缀，再安装 `requirements-qwen.txt`，复用torch2.6.0及torchvision0.21.0。清理过Conda包缓存后，克隆可能需要联网补齐基础包，不应强制离线；用新前缀的 `bin/python` 是否可执行来判断创建成功，不能只判断目录存在。新的独立环境采用transformers4.57.1，不能只改模型路径继续用旧加载器。若从空环境安装，PyTorch CUDA轮子单独选用原有兼容源，再安装其余依赖。
-
+独立环境使用 Python 3.10、torch 2.6.0、torchvision 0.21.0 和 transformers 4.57.1。先验证解释器可执行，再安装依赖。
 ```bash
 conda create -n basket-qwen3 python=3.10 -y
 conda run -n basket-qwen3 python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
@@ -120,7 +119,7 @@ conda run -n basket-qwen3 python -m cli.smoke_qwen \
 
 该检查验证质量抽样、号码JSON、缓存及视频输入/输出，不评估识别准确率。只有命令成功结束，且 `qwen-smoke.json` 的status为completed_not_accuracy_evaluated、架构为qwen3_vl、video_model_invoked为true，才完成本次功能验收。
 
-成功后更新私有env的 `BASKET_QWEN_PYTHON` 和 `BASKET_QWEN_MODEL_DIR`，备份旧env；之后可以删除旧Qwen2.5模型目录及旧环境，保留历史输出、裁剪图和球员库。新模型的证据合同和缓存摘要会变化，后续真实处理使用新的运行目录，避免把旧模型号码证据混入新实验。
+在私人配置中设置 `BASKET_QWEN_PYTHON` 和 `BASKET_QWEN_MODEL_DIR`。切换模型后的真实处理使用新的运行目录，避免混用不同模型的号码证据。
 
 ## 6. 私人运行配置
 

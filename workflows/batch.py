@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -9,6 +10,8 @@ from pathlib import Path
 
 from contracts.schema import write_json
 from workflows.commands import CommandBuilder
+from pipeline.media import sha256_file
+from contracts.lineage import clip_id_for
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
@@ -50,7 +53,8 @@ def stages_for(target: str, jersey: bool = True) -> list[str]:
 
 def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
               selection: Path | None = None, target: str = "full", options: dict | None = None,
-              force: bool = False, dry_run: bool = False, execute=None) -> dict:
+              force: bool = False, dry_run: bool = False, execute=None,
+              clips_manifest: Path | None = None) -> dict:
     if target not in {"identity", "full"}:
         raise ValueError("target must be identity or full")
     options = dict(options or {})
@@ -64,6 +68,24 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
             or not math.isfinite(options.get("player_min_margin", .05))
             or options.get("player_min_margin", .05) < 0):
         raise ValueError("Invalid player distance/margin parameters")
+    lineage_by_input = {}
+    if clips_manifest:
+        clips_manifest = clips_manifest.resolve()
+        if clips_manifest.parent != input_dir.resolve():
+            raise ValueError("Input directory must be the clips manifest directory")
+        segmented = json.loads(clips_manifest.read_text())
+        for row in segmented["videos"]:
+            if row["path"] in lineage_by_input or row["clip_id"] in {r["clip_id"] for r in lineage_by_input.values()}:
+                raise ValueError("Duplicate exported clip path or ID")
+            if not re.fullmatch(r"CL-[0-9a-f]{20}", row["clip_id"]):
+                raise ValueError("Invalid segmentation clip ID")
+            if (row["source_video_id"] != segmented["source"]["source_video_id"]
+                    or row["source_sha256"] != segmented["source"]["sha256"]
+                    or row["source_path"] != segmented["source"]["path"]
+                    or row["clip_id"] != clip_id_for(row["source_video_id"], row["start_s"], row["end_s"])):
+                raise ValueError("Clip source/ID differs from its export provenance")
+            lineage_by_input[row["path"]] = row
+        selection = selection or clips_manifest
     sources = select_inputs(input_dir, limit, selection)
     output = output_dir.resolve()
     # Outputs must never be mixed into the data tree or overlap source inputs.
@@ -71,8 +93,8 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
     if output == data or output.is_relative_to(data) or data.is_relative_to(output):
         raise ValueError("Batch output and input trees must not overlap")
     builder = CommandBuilder(settings, validate_resources=not dry_run)
-    def command_for(stage, paths):
-        command = builder.command(stage, paths, options)
+    def command_for(stage, paths, clip_options):
+        command = builder.command(stage, paths, clip_options)
         if stage == 'render':
             for flag in ('--actions', '--identity-map'):
                 if flag in command:
@@ -90,13 +112,23 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
         relative = source.relative_to(data).as_posix()
         slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in source.stem)[:70]
         name = f"{slug}-{hashlib.sha256(relative.encode()).hexdigest()[:8]}"
+        lineage = lineage_by_input.get(relative)
+        if clips_manifest and lineage is None:
+            raise ValueError("Selected clip is absent from the segmentation manifest")
+        if lineage:
+            if sha256_file(source) != lineage["sha256"]:
+                raise ValueError(f"Exported clip checksum mismatch: {source}")
+            name = lineage["clip_id"]
         paths = builder.paths({"source_path": str(source), "output_dir": str(output / name)})
         stages = stages_for(target, bool(options["jersey_qwen"]))
-        commands = {stage: command_for(stage, paths) for stage in stages}
+        clip_options = {**options, **({"clip_id": name} if lineage else {})}
+        commands = {stage: command_for(stage, paths, clip_options) for stage in stages}
         # Separate clip identity from stage configuration so identity-only runs
         # can gain actions later without re-extracting registered KPR evidence.
         identity = {"input": relative, "size": source.stat().st_size,
                     "mtime_ns": source.stat().st_mtime_ns, "options": options, "code": code_files}
+        if lineage:
+            identity["lineage"] = lineage
         fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         stage_fingerprints = {}
         for stage, command in commands.items():
@@ -105,9 +137,13 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
             stage_fingerprints[stage] = hashlib.sha256(json.dumps(
                 [fingerprint, command, resources], sort_keys=True).encode()).hexdigest()
         entries.append({"name": name, "input": relative, "fingerprint": fingerprint,
+                        **({"clip_id": name, "lineage": lineage} if lineage else {}),
                         "commands": commands, "stage_fingerprints": stage_fingerprints, "paths": paths})
     plan = {"schema_version": 2, "match_id": options["match_id"], "target": target, "options": options,
-            "clips": [{k: e[k] for k in ("name", "input", "fingerprint")} for e in entries]}
+            "clips": [{k: e[k] for k in ("name", "input", "fingerprint", "clip_id", "lineage") if k in e} for e in entries]}
+    if clips_manifest:
+        plan["segmentation"] = {"clips_manifest": str(clips_manifest),
+                                "plan_path": str(clips_manifest.parent / "segmentation.json")}
     manifest = output / "batch_manifest.json"
     if manifest.is_file():
         previous_plan = json.loads(manifest.read_text())
@@ -160,6 +196,7 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
                     status["stages"][stage] = "failed"
                     raise RuntimeError(f"{stage} exited {code}; see pipeline.log")
                 if not builder.artifact_exists(stage, paths):
+                    status["stages"][stage] = "failed"
                     raise RuntimeError(f"{stage} returned success without fresh required artifacts")
                 status["stages"][stage] = "completed"
                 write_json(status_path, status)

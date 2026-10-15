@@ -552,3 +552,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (max-width: 1200px) { .stage-rail { grid-template-columns: repeat(4,minmax(0,1fr)); } .topbar-center .eyebrow { display: none; } }
 @media (max-width: 800px) { .inspection-intro, .workflow-heading { flex-direction: column; align-items: start; } .upload-section, .workflow-branches { grid-template-columns: 1fr; } .workflow-shared.workflow-final { grid-template-columns: 1fr; } .workflow-output-grid { grid-template-columns: 1fr; } .library-members { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .topbar { grid-template-columns: 1fr auto; } .topbar-center { display: none; } .main-content { padding: 14px; } .stage-rail { grid-template-columns: repeat(2,minmax(0,1fr)); } .assignment-row { grid-template-columns: 1fr 1fr; } .workflow-shared { grid-template-columns: 1fr; } }
+/* Source lineage and CPU action exports in the match library. */
+.source-lineage { padding: 16px; margin: 16px 0; border: 1px solid var(--line); border-radius: 12px; overflow-wrap: anywhere; }
+.source-lineage article { padding: 8px 0; border-top: 1px solid var(--line); }
+.library-event-row { border-bottom: 1px solid var(--line); }
+.library-event-row .library-event { width: 100%; }
+.event-export-actions { display: flex; gap: 8px; padding: 0 12px 12px; flex-wrap: wrap; }

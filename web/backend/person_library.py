@@ -152,6 +152,7 @@ def library_events(settings, store, project_id, *, person_id="", event="", q="",
         selected.append({**row, "web_video_id": video["video_id"], "filename": video["filename"]})
     selected.sort(key=lambda row: (row["filename"], row["start"], row["event_id"]))
     return {"items": selected[offset:offset + limit], "total": len(selected), "offset": offset, "limit": limit,
+            "revision": context["manifest"]["review_revision"],
             "time_scope": "source_clip_seconds", "warning": "Events are cached model predictions, not verified actions"}
 
 
@@ -166,6 +167,8 @@ def clip_player_assignments(settings, store, project_id, video):
         for member in person["members"]:
             if member["clip_name"] == clip:
                 items.append({"global_person_id": person["global_person_id"],
+                    "player_id": person["global_person_id"], "clip_id": member.get("clip_id", member["clip_name"]),
+                    "track_uids": member.get("track_uids", []),
                     "identity_label": person.get("identity_label"), "status": person["status"],
                     **{key: member.get(key) for key in ("local_person_id", "raw_track_ids", "decision",
                         "gallery_eligible", "hold_reasons", "manually_detached")}})

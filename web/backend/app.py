@@ -19,7 +19,7 @@ from web.backend.artifacts import (
     project_people_index,
     read_jsonl,
 )
-from web.backend.imports import import_results, within_root
+from web.backend.imports import import_results, within_root, source_media_path
 from web.backend.inspection import build_inspection_bundle
 from web.backend.runner import PipelineRunner
 from web.backend.evidence import EvidenceJobs, evidence_root
@@ -33,6 +33,7 @@ from web.backend.store import ProjectStore, safe_slug
 from web.backend.catalog import catalog, material_catalog, next_review_video, review_page, video_catalog
 from web.backend.person_library import library_catalog, library_person, library_events, edit_library, clip_player_assignments
 from web.backend.workflow import evidence_page
+from web.backend.exports import export_event, segmentation_page
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 settings = WebSettings()
@@ -92,6 +93,16 @@ class LibraryEdit(BaseModel):
     person_id: str | None = Field(default=None, max_length=80)
     node_id: str | None = Field(default=None, max_length=80)
     label: str | None = Field(default=None, max_length=120)
+
+
+class EventExport(BaseModel):
+    player_id: str = Field(min_length=1, max_length=80)
+    event_id: str = Field(min_length=1, max_length=120)
+    expected_revision: str = Field(min_length=1, max_length=80)
+    before_s: float = Field(default=1, ge=0, le=30, allow_inf_nan=False)
+    after_s: float = Field(default=1, ge=0, le=30, allow_inf_nan=False)
+    scope: Literal["event", "clip"] = "event"
+    media_source: Literal["clip", "original"] = "clip"
 
 
 def not_found(exc: FileNotFoundError) -> HTTPException:
@@ -320,6 +331,36 @@ def get_library_events(project_id: str, person_id: str = Query(default="", max_l
 def get_library_person(project_id: str, person_id: str):
     try:
         return library_person(settings, store, project_id, person_id)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/projects/{project_id}/person-library/export")
+def export_library_event(project_id: str, value: EventExport):
+    try:
+        return export_event(settings, store, project_id, **value.model_dump())
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/exports/{filename}")
+def exported_event_video(project_id: str, filename: str):
+    store.get_project(project_id)
+    if not re.fullmatch(r"[0-9a-f]{24}\.mp4", filename):
+        raise HTTPException(status_code=400, detail="Invalid export filename")
+    root = within_root(store.output_root / safe_slug(project_id) / "exports", store.output_root)
+    return FileResponse(safe_child(root, filename), media_type="video/mp4", filename=filename)
+
+
+@app.get("/api/projects/{project_id}/segmentation")
+def get_segmentation(project_id: str, offset: int = Query(default=0, ge=0),
+                     limit: int = Query(default=20, ge=1, le=100)):
+    try:
+        return segmentation_page(settings, store, project_id, offset=offset, limit=limit)
     except FileNotFoundError as exc:
         raise not_found(exc) from exc
     except ValueError as exc:
@@ -594,7 +635,7 @@ def video_log(
 @app.get("/api/projects/{project_id}/videos/{video_id}/source")
 def source_video(project_id: str, video_id: str) -> FileResponse:
     video = get_video(project_id, video_id)
-    path = Path(video["source_path"])
+    path = source_media_path(video["source_path"], settings, derived=video.get("generated_source", False))
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Source video not found")
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"

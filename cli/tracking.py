@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Export MOTIP person tracks from one video"
     )
     parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--video-id", help="Explicit clip ID supplied by the match manifest")
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--motip-root", type=Path, default=REPOSITORY_ROOT / "MOTIP")
@@ -61,6 +62,7 @@ def main() -> None:
             fp32=args.fp32,
             max_frames=args.max_frames,
             overwrite=args.overwrite,
+            video_id=args.video_id,
         ),
         create_visualization=not args.no_visualization,
     )

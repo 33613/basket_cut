@@ -28,7 +28,7 @@ def export_library(registry, root, output, *, signatures=None, options=None, cli
     event_types = {}
     for event in events:
         event_types[event["event"]] = event_types.get(event["event"], 0) + 1
-    manifest = {"schema_version": 2, "scope": "match_incremental", "match_id": snapshot["match_id"],
+    manifest = {"schema_version": 3, "scope": "match_incremental", "match_id": snapshot["match_id"],
         "expected_clips": len(names), "batch_clip_names": names, "batch_target": "full",
         "global_person_count": len(people), "local_archive_count": len(snapshot["mappings"]),
         "merged_group_count": sum(p["local_archive_count"] > 1 for p in people),
@@ -36,7 +36,7 @@ def export_library(registry, root, output, *, signatures=None, options=None, cli
         "event_count": len(events), "unmapped_event_count": sum(e["global_person_id"] is None for e in events),
         "event_types": event_types, "review_revision": snapshot["revision"],
         "input_fingerprint": snapshot["revision"], "feature_contract": snapshot["feature_contract"],
-        "index_dir": "indexes/" + (snapshot["revision"] or "empty"),
+        "index_dir": "indexes/" + (snapshot["revision"] or "empty") + "-v3",
         "source_artifacts": sources, "player_aliases": snapshot["aliases"], "settings": options or previous.get("settings", {}),
         "jersey_constraints": (options or previous.get("settings", {})).get("use_jersey_evidence", False),
         "warnings": warnings or [], "warning": "Stable match-scoped IDs; candidate identities and action scores are not verified accuracy."}

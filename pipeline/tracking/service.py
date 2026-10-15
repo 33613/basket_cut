@@ -39,6 +39,7 @@ class TrackingOptions:
     fp32: bool = False
     max_frames: int | None = None
     overwrite: bool = False
+    video_id: str | None = None
 
 
 def video_id_for(path: Path) -> str:
@@ -130,7 +131,7 @@ def track_video(options: TrackingOptions) -> dict[str, Any]:
         device=options.device,
     )
     tracker = backend.create_tracker(height=height, width=width)
-    video_id = video_id_for(input_path)
+    video_id = options.video_id or video_id_for(input_path)
     summaries: dict[int, dict[str, Any]] = {}
     processed_frames = 0
 

@@ -72,16 +72,31 @@ function renderWorkflow() {
     const stage = workflowStages.find(row => row[0] === key), status = video.stages[key]?.status || 'pending';
     return `<button class="workflow-node ${escapeHtml(status)}" data-workflow-stage="${key}"><small>${stage[1]} · ${workflowStatus[status] || escapeHtml(status)}</small><strong>${stage[2]}</strong><span>${escapeHtml(counts[key])}</span></button>`;
   };
-  $('#tabContent').innerHTML = `<div class="workflow-heading"><div><h3>从片段到球员与事件</h3><p>点击节点检查对应结果。上方阶段栏按实际执行顺序排列，单张 GPU 上依次处理。</p></div><button class="ghost-button" id="workflowRefresh">刷新当前片段</button></div>
+  const lineage = video.lineage || {}, clipId = video.clip_id || video.video_id;
+  $('#tabContent').innerHTML = `<div class="workflow-heading"><div><h3>原视频 → 片段 → 轨迹 → 球员 → 动作剪辑</h3><p>点击节点检查对应结果。上方阶段栏按实际执行顺序排列，单张 GPU 上依次处理。</p></div><button class="ghost-button" id="workflowRefresh">刷新当前片段</button></div>
+    <section class="source-lineage"><h4>Qwen3-VL 长视频切分</h4><p>片段 ID：${escapeHtml(clipId)}</p>${lineage.source_video_id ? `<p>原视频：${escapeHtml(lineage.source_video_id)} · ${formatTime(lineage.source_clip_start_s)} → ${formatTime(lineage.source_clip_end_s)} · ${lineage.segmentation_needs_review ? '含待复核边界' : '无未决候选边界；尚未评估准确率'}</p><details><summary>分窗口粗看与边界复核记录</summary><div id="segmentationEvidence">正在读取…</div><div id="segmentationPagination"></div></details>` : '<p>此片段直接导入，未附带长视频切分来源。</p>'}</section>
     <div class="workflow-map"><div class="workflow-shared">${node('tracking')}${node('quality')}</div>
     <div class="workflow-branches"><section><h4>动作支路</h4>${node('action')}${node('aggregate')}</section>
     <section><h4>身份支路</h4>${node('identity')}${node('resolution')}${node('jersey')}${node('players')}</section></div>
     <div class="workflow-shared workflow-final">${node('link')}${node('render')}${node('review')}</div></div>
-    <section class="assignment-section"><h3>本片段 → 比赛球员 ID</h3><p>原始轨迹 T* → 片段档案 P* → 本场比赛球员 PL-*。这里读取球员库的当前归属。</p><div id="clipAssignments">正在读取球员登记…</div></section>
+    <section class="assignment-section"><h3>本片段 → 比赛球员 ID</h3><p>轨迹由片段 ID + T* 唯一定位，经局部档案 P* 关联到本场球员 PL-*。动作使用同一对应关系，球员库支持检索后下载动作或片段。</p><div id="clipAssignments">正在读取球员登记…</div></section>
     <details class="workflow-files"><summary>检查各阶段产物与下载</summary><div class="workflow-output-grid">${workflowStages.map(([key, model, label]) => `<article><strong>${label}</strong><ul>${(summaries[key]?.files || []).map(file => `<li>${file.exists ? `<a href="${escapeHtml(artifactHref(file.path))}" target="_blank" rel="noopener">${escapeHtml(file.path)}</a><small>${formatBytes(file.size_bytes)}</small>` : `<span>${escapeHtml(file.path)}</span><small>未生成</small>`}</li>`).join('') || '<li>旧结果未记录产物清单</li>'}</ul></article>`).join('')}</div></details>`;
   bindWorkflowLinks($('#tabContent'));
   $('#workflowRefresh').addEventListener('click', refreshCurrentVideo);
   renderClipAssignments();
+  if ($('#segmentationEvidence')) renderSegmentationEvidence();
+}
+
+async function renderSegmentationEvidence(offset = 0) {
+  const projectId = state.project.project_id, videoId = state.videoId;
+  try {
+    const data = await api(`/api/projects/${projectId}/segmentation?offset=${offset}&limit=20`);
+    if (projectId !== state.project?.project_id || videoId !== state.videoId || !$('#segmentationEvidence')) return;
+    $('#segmentationEvidence').innerHTML = data.available ? `<p>${data.window_count} 个粗看窗口 · ${data.clip_count} 个自动候选片段 · ${data.unresolved_count} 个未决边界</p>${data.items.map(row => `<article><strong>${formatTime(row.source_range_s[0])} → ${formatTime(row.source_range_s[1])}</strong><p>${escapeHtml(row.kind)} · ${row.needs_review || row.source_boundary_s == null ? '未采用 / 待复核' : row.confirmed ? `候选切点 ${formatTime(row.source_boundary_s)}` : '已拒绝'} · ${escapeHtml(row.evidence)}</p></article>`).join('')}` : '<p>没有长视频切分记录。</p>';
+    pager('segmentationPagination', data.offset || 0, data.limit || 20, data.total || 0, renderSegmentationEvidence);
+  } catch (error) {
+    if (videoId === state.videoId && $('#segmentationEvidence')) $('#segmentationEvidence').textContent = error.message;
+  }
 }
 
 async function renderClipAssignments() {

@@ -121,7 +121,7 @@ async function selectLibraryPerson(personId) {
       <div class="library-label-editor"><label>球队 / 号码 / 姓名标签<input id="libraryIdentityLabel" maxlength="120" value="${escapeHtml(p.identity_label || '')}" placeholder="如：白队 #23 / 球员姓名" /></label><button class="secondary-button" id="labelLibraryPerson">保存标签 / 合并同标签</button><button class="secondary-button" id="confirmLibraryPerson">确认当前身份分组</button><button class="ghost-button" id="excludeLibraryPerson">标记为非球员</button></div><p class="scope-warning">同标签身份会人工合并并保留 ID 别名；同时出现的不同轨迹不能合并。可拆出错误成员，混人轨迹回到轨迹页检查。</p>
       <div class="library-members">${p.members.map(m => `<article class="library-member">
         ${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="局部档案来源" loading="lazy" />` : ''}
-        <div><strong>${escapeHtml(m.filename)}</strong><small>${escapeHtml(m.local_person_id)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))} · ${m.sample_count} 个 KPR 样本</small><p class="member-decision">${escapeHtml({matched: '匹配已有球员', new_candidate: '建立新候选身份', pending: '待定观察'}[m.decision] || m.decision || '旧结果未记录匹配决策')} · ${m.gallery_eligible ? '已进入外观图库' : '未进入外观图库'}</p><p>${escapeHtml((m.hold_reasons || []).join(' / ') || '查看原轨迹与时序外观确认身份')}</p>${libraryJersey(m.jersey, true)}
+        <div><strong>${escapeHtml(m.filename)}</strong><small>片段 ${escapeHtml(m.clip_id || m.clip_name)} · ${escapeHtml(m.local_person_id)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))} · ${m.sample_count} 个 KPR 样本</small>${m.source_video_id ? `<small>原视频 ${escapeHtml(m.source_video_id)} · ${formatTime(m.source_clip_start_s)} → ${formatTime(m.source_clip_end_s)}</small>` : ''}<p class="member-decision">${escapeHtml({matched: '匹配已有球员', new_candidate: '建立新候选身份', pending: '待定观察'}[m.decision] || m.decision || '旧结果未记录匹配决策')} · ${m.gallery_eligible ? '已进入外观图库' : '未进入外观图库'}</p><p>${escapeHtml((m.hold_reasons || []).join(' / ') || '查看原轨迹与时序外观确认身份')}</p>${libraryJersey(m.jersey, true)}
         <div class="library-preview-row">${m.exemplars.filter(s => s.crop_url).map(s => `<img src="${escapeHtml(s.crop_url)}" alt="时序外观证据" loading="lazy" />`).join('')}</div>
         <button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button><button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '撤销拆出' : '从人物组拆出'}</button></div></article>`).join('')}</div>
       <details class="library-pair-evidence"><summary>最近匹配证据（${p.pairs.length} 对；距离不是置信度）</summary>${p.pairs.map(pair => `<div class="library-pair"><div>${[pair.left, pair.right].map(m => `<span>${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="匹配来源" loading="lazy" />` : ''}${escapeHtml(m.filename)} / ${escapeHtml(m.local_person_id)}</span>`).join('')}</div><p>距离 ${pair.distance == null ? '无可比部位' : Number(pair.distance).toFixed(3)} · ${pair.same_global_person ? '当前同组' : '当前分开'} · ${escapeHtml(pair.auto_block_reasons.join(' / ') || '满足候选条件')}</p></div>`).join('') || '<p>没有可用匹配对。</p>'}</details>`;
@@ -153,7 +153,7 @@ async function loadLibraryEvents() {
     const data = await api(`/api/projects/${projectId}/person-library/events?${query}`);
     if (projectId !== state.project?.project_id || request !== libraryState.eventRequest) return;
     if (data.total && libraryState.eventOffset >= data.total) { libraryState.eventOffset = Math.floor((data.total - 1) / 20) * 20; return loadLibraryEvents(); }
-    $('#libraryEvents').innerHTML = data.items.map((e, index) => `<button class="library-event" data-library-event="${index}"><div><strong>${escapeHtml(e.event)}</strong><span>${escapeHtml(e.filename)}</span><small>${escapeHtml(e.global_person_id)} · 局部 ${escapeHtml(e.local_person_id)}</small></div><div><strong>${formatTime(e.start)} → ${formatTime(e.end)}</strong><small>raw_score ${Number(e.raw_score).toFixed(3)} · ${(e.end - e.start).toFixed(2)}s · 跳转原片段 ↗</small></div></button>`).join('') || emptyState('没有符合条件的事件', '切换人物 / 事件类型或降低原始分数筛选。无事件不代表该人物没有做动作。');
+    $('#libraryEvents').innerHTML = data.items.map((e, index) => `<article class="library-event-row"><button class="library-event" data-library-event="${index}"><div><strong>${escapeHtml(e.event)}</strong><span>${escapeHtml(e.filename)}</span><small>球员 ${escapeHtml(e.global_person_id)} · 片段 ${escapeHtml(e.clip_id || e.clip_name)} · 轨迹 ${escapeHtml((e.raw_track_ids || []).join(', '))}</small></div><div><strong>${formatTime(e.start)} → ${formatTime(e.end)}</strong>${e.source_start_s != null ? `<small>原视频 ${formatTime(e.source_start_s)} → ${formatTime(e.source_end_s)}</small>` : ''}<small>raw_score ${Number(e.raw_score).toFixed(3)} · 跳转片段 ↗</small></div></button>${e.global_person_id ? `<div class="event-export-actions"><button class="secondary-button" data-export-event="${index}" data-scope="event">下载动作 ±1秒</button><button class="ghost-button" data-export-event="${index}" data-scope="clip">下载对应片段</button></div>` : ''}</article>`).join('') || emptyState('没有符合条件的事件', '切换人物 / 事件类型或降低原始分数筛选。无事件不代表该人物没有做动作。');
     $('#libraryEvents').querySelectorAll('[data-library-event]').forEach(button => button.addEventListener('click', async () => {
       const e = data.items[Number(button.dataset.libraryEvent)];
       await selectVideo(e.web_video_id, false); if (state.videoId !== e.web_video_id) return;
@@ -162,6 +162,20 @@ async function loadLibraryEvents() {
       const player = $('#resultVideo'), seek = () => { player.currentTime = e.start; player.play().catch(() => {}); };
       if (player.readyState >= 1) seek(); else player.addEventListener('loadedmetadata', seek, {once: true});
       $('#inspector').scrollIntoView({behavior: 'smooth', block: 'start'});
+    }));
+    $('#libraryEvents').querySelectorAll('[data-export-event]').forEach(button => button.addEventListener('click', async () => {
+      const row = data.items[Number(button.dataset.exportEvent)];
+      button.disabled = true;
+      const label = button.textContent; button.textContent = '正在剪辑…';
+      try {
+        const result = await api(`/api/projects/${projectId}/person-library/export`, {method: 'POST',
+          body: JSON.stringify({player_id: row.global_person_id, event_id: row.event_id,
+            expected_revision: data.revision || libraryState.revision, scope: button.dataset.scope})});
+        if (projectId !== state.project?.project_id) return;
+        const link = document.createElement('a'); link.href = result.download_url; link.download = '';
+        document.body.appendChild(link); link.click(); link.remove();
+      } catch (error) { toast('剪辑失败', error.message, 'error'); }
+      finally { button.disabled = false; button.textContent = label; }
     }));
     pager('libraryEventsPagination', data.offset, data.limit, data.total, offset => { libraryState.eventOffset = offset; loadLibraryEvents(); });
   } catch (error) { if (projectId === state.project?.project_id) toast('事件检索失败', error.message, 'error'); }

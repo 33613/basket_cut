@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from contracts.schema import read_jsonl, write_json, write_jsonl_line
+from contracts.lineage import track_uid
 
 
 @dataclass(frozen=True)
@@ -48,11 +49,14 @@ def link_actions_to_people(options: LinkEventsOptions) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mappings = load_identity_map(identity_map_path)
     players = {}
+    contexts = {}
     if options.player_map:
         for row in read_jsonl(options.player_map):
             if row["clip_name"] == options.clip_name:
                 for tid in row["raw_track_ids"]:
                     players[int(tid)] = row["global_person_id"]
+                    contexts[int(tid)] = {key: row[key] for key in ("clip_id", "source_video_id",
+                        "source_clip_start_s", "source_clip_end_s") if key in row}
 
     record_count = 0
     mapped_count = 0
@@ -84,6 +88,11 @@ def link_actions_to_people(options: LinkEventsOptions) -> dict[str, Any]:
             enriched["raw_track_id"] = raw_track_id
             enriched["person_id"] = person_id
             enriched["player_id"] = players.get(raw_track_id)
+            enriched.update(contexts.get(raw_track_id, {}))
+            enriched["clip_id"] = enriched.get("clip_id", options.clip_name or action["video_id"])
+            enriched["track_uid"] = track_uid(enriched["clip_id"], raw_track_id)
+            if "source_clip_start_s" in enriched:
+                enriched["source_timestamp_s"] = enriched["source_clip_start_s"] + float(action["timestamp_s"])
             enriched["identity_label"] = (
                 mapping.get("identity_label") if mapping else None
             )
