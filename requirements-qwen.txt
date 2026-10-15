@@ -1,8 +1,12 @@
 # Install in a separate Python 3.10/3.11 environment on the GPU machine.
-torch>=2.6,<3
-transformers>=4.51,<5
+# The existing CUDA 12.4 torch 2.6.0 / torchvision 0.21.0 wheels satisfy these pins.
+torch==2.6.0
+torchvision==0.21.0
+transformers==4.57.1
 accelerate>=1.6,<2
 safetensors>=0.5,<1
 Pillow>=10,<12
 opencv-python-headless>=4.8,<4.12
 numpy>=1.24,<2
+av>=14,<15
+modelscope==1.31.0

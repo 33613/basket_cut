@@ -62,6 +62,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, default=ExecutionSettings().qwen_model_dir)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--with-video", action="store_true", help="Also test Qwen3-VL local video input")
     args = parser.parse_args()
     output = args.output_dir.expanduser().resolve()
     if output.exists() and any(output.iterdir()):
@@ -70,6 +71,8 @@ def main():
         raise FileNotFoundError("Local Qwen config.json is missing")
     output.mkdir(parents=True, exist_ok=True)
 
+    from pipeline.identity.qwen_backend import QwenBackend, ensure_gpu_idle
+    ensure_gpu_idle()
     import torch
     from pipeline.identity.jersey_qwen import recognize_jerseys_qwen
     if not torch.cuda.is_available():
@@ -77,15 +80,22 @@ def main():
     video, tracks, mapping = prepare_smoke_clip(output)
     torch.cuda.reset_peak_memory_stats()
     print("开始质量抽样、模型文件校验和本地 Qwen 加载；文件校验需要读取全部权重。", flush=True)
+    backend = QwenBackend(args.model_dir)
     summary = recognize_jerseys_qwen(
         video, tracks, mapping, output / "identity", args.model_dir,
-        max_samples=3, min_gap_s=.25,
+        max_samples=3, min_gap_s=.25, backend=backend,
     )
+    video_response = None
+    if args.with_video:
+        video_response = backend.read_video(video,
+            'Briefly describe only visible changes in this clip. Do not infer identities or game events. '
+            'Return exactly JSON: {"summary":"a short description"}.', num_frames=8)
     torch.cuda.synchronize()
     evidence = list(read_jsonl(output / "identity/jersey_tracks.jsonl"))
     readings = [r for row in evidence for r in row["readings"]]
     result = {
-        "status": "completed_not_accuracy_evaluated",
+        "status": "inference_completed_pending_contract_check",
+        "model_architecture": backend.provenance["architecture"],
         "gpu": torch.cuda.get_device_name(0),
         "sample_count": summary["sample_count"],
         "model_invoked": summary["model_invoked"],
@@ -93,6 +103,8 @@ def main():
         "cache_hit_count": summary["cache_hit_count"],
         "peak_allocated_gib": round(torch.cuda.max_memory_allocated() / 1024**3, 3),
         "raw_responses": [r["raw_response"] for r in readings],
+        "video_model_invoked": args.with_video,
+        "video_raw_response": video_response,
         "output_dir": str(output),
     }
     write_json(output / "qwen-smoke.json", result)
@@ -100,6 +112,10 @@ def main():
         raise RuntimeError("Qwen smoke did not exercise multiple sampled frames")
     if any(set(r["rejection_reasons"]) & {"invalid_model_json", "invalid_number"} for r in readings):
         raise RuntimeError("Qwen response did not satisfy the number JSON contract; inspect qwen-smoke.json")
+    if args.with_video and not video_response.strip():
+        raise RuntimeError("Qwen video generation returned no text")
+    result["status"] = "completed_not_accuracy_evaluated"
+    write_json(output / "qwen-smoke.json", result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     print("Qwen 质量抽样 → GPU 推理 → 缓存与号码证据输出检查通过")
 

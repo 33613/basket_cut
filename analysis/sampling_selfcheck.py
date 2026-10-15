@@ -185,7 +185,7 @@ class SamplingChecks(unittest.TestCase):
         mapping.write_text(json.dumps({"raw_track_id": 0, "person_id": "P0000"}) + "\n")
         model = self.root / "model"
         model.mkdir()
-        (model / "config.json").write_text('{}')
+        (model / "config.json").write_text('{"model_type":"qwen3_vl"}')
         (model / "model.safetensors").write_bytes(b'provenance-only-fixture')
         with patch("pipeline.identity.jersey_qwen.QwenBackend", side_effect=AssertionError("No GPU")):
             result = recognize_jerseys_qwen(video, tracks, mapping, self.root / "identity", model)

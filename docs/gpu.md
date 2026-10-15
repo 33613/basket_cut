@@ -85,30 +85,42 @@ conda run -n basket-action python -m pip install --no-deps -e MMAction2
 
 从 [SlowFast MultiSports 模型说明](../MMAction2/configs/detection/slowfast/README.md) 获取相应动作检测权重，保存为 `runtime/models/action/slowfast_multisports.pth`。不是仅有 Kinetics 预训练的动作分类权重。
 
-## 5. 本地 Qwen 视觉模型
+## 5. 本地 Qwen3-VL 视觉模型
 
-适配 `Qwen2.5-VL-3B-Instruct` 和 `Qwen2.5-VL-7B-Instruct`，默认 7B，以 FP16、SDPA、逐张躯干图方式运行。模型权重下载可以并行，GPU 推理阶段串行。实际显存占用需要实机测量。
+统一使用 `Qwen3-VL-8B-Instruct` 处理号码图片和有帧数限制的视频窗口。CUDA上优先BF16，不支持时FP16，使用SDPA；视频输入不等同于已经实现篮球回合切分。
 
-```bash
-conda create -n basket-qwen python=3.10 -y
-conda run -n basket-qwen python -m pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-conda run -n basket-qwen python -m pip install -r requirements-qwen.txt transformers==4.51.3 accelerate==1.6.0
-conda run -n basket-qwen python -m pip install 'huggingface_hub>=0.25,<1'
-```
-
-从官方 [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) 下载完整快照到 `runtime/models/qwen/Qwen2.5-VL-7B-Instruct`，包括 safetensors、配置、tokenizer、processor 文件。为复现记录所用 snapshot commit SHA；可以通过 `huggingface_hub.snapshot_download` 的 `revision` 指定该 SHA。
-
-运行时 `local_files_only=True`，不联网下载权重；`trust_remote_code=False`，只加载 safetensors。适配器记录模型文件与提示词摘要并缓存单图读数。若要换成其他 Qwen 架构，需先调整适配器和验证，不能只替换路径。
-
-在 Qwen 环境执行独立功能检查，确认质量抽样、GPU 生成、JSON 解析、缓存和多帧证据文件能够衔接。命令会生成一个小视频及轨迹，输出目录必须为空；它不评估号码准确率，也不能证明 MOTIP 联合链路已通过。首次加载前会读取全部权重计算摘要，需要等待磁盘读取完成。
+现有Qwen2.5环境可以先克隆到新前缀，再安装 `requirements-qwen.txt`，复用torch2.6.0及torchvision0.21.0。新的独立环境采用transformers4.57.1，不能只改模型路径继续用旧加载器。若从空环境安装，PyTorch CUDA轮子单独选用原有兼容源，再安装其余依赖。
 
 ```bash
-conda run -n basket-qwen python -m cli.smoke_qwen \
-  --model-dir runtime/models/qwen/Qwen2.5-VL-7B-Instruct \
-  --output-dir runtime/checks/qwen-smoke-001
+conda create -n basket-qwen3 python=3.10 -y
+conda run -n basket-qwen3 python -m pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+conda run -n basket-qwen3 python -m pip install -r requirements-qwen.txt
 ```
 
-真实轨迹继续通过 `cli.jersey_qwen` 和批处理中的 `jersey` 阶段调用相同采样与识别服务。KPR 的 `--sample-min-gap-s` 默认 0.25 秒，批处理选项为 `identity_sample_min_gap_s`。新采样版本首次使用应建立新的运行目录，避免复用旧样本或将不同号码证据合同写入已有球员库。
+视频由官方processor读取原始本地窗口并保留解码器提供的FPS/采样帧索引。该固定版本优先torchcodec（若安装），否则使用torchvision/PyAV；推荐新环境不安装torchcodec，使用与torch2.6匹配的torchvision0.21及PyAV14，避免额外FFmpeg共享库/ABI配置。不要传已经被该版本忽略的 `video_load_backend` 参数来声称强制切换了解码器。
+
+通过ModelScope下载官方完整快照，使用本地目标目录，避免再复制一份模型缓存。下载时冻结远端文件清单和官方SHA256到模型目录之外的manifest，检查全部选中模型文件、权重分片索引和本地图片/视频processor。相同命令可以利用ModelScope下载断点；若远端master已变更则停止，不静默混用文件。可显式指定官方tag。
+
+```bash
+conda run -n basket-qwen3 python -u -m cli.download_qwen \
+  --output-dir runtime/models/qwen/Qwen3-VL-8B-Instruct \
+  --manifest runtime/manifests/qwen3-modelscope.json
+```
+
+运行时仅从本地加载safetensors，`local_files_only=True`、`trust_remote_code=False`。图片视觉预算256–512 tokens；视频默认总视觉预算上限约2048 tokens，并限制显式抽样帧数为4–64之间的偶数。视频烟测用8帧，不代表长视频任务的时间定位或回合准确率。
+
+GPU自检会先查询其他GPU进程，忙时停止，让已有MOTIP等任务先结束；下载、模型哈希和CPU processor检查不需要占用GPU。图片与视频共用同一个模型实例，逐次推理。
+
+```bash
+conda run -n basket-qwen3 python -m cli.smoke_qwen \
+  --model-dir runtime/models/qwen/Qwen3-VL-8B-Instruct \
+  --output-dir runtime/checks/qwen3-smoke-001 \
+  --with-video
+```
+
+该检查验证质量抽样、号码JSON、缓存及视频输入/输出，不评估识别准确率。只有命令成功结束，且 `qwen-smoke.json` 的status为completed_not_accuracy_evaluated、架构为qwen3_vl、video_model_invoked为true，才完成本次功能验收。
+
+成功后更新私有env的 `BASKET_QWEN_PYTHON` 和 `BASKET_QWEN_MODEL_DIR`，备份旧env；之后可以删除旧Qwen2.5模型目录及旧环境，保留历史输出、裁剪图和球员库。新模型的证据合同和缓存摘要会变化，后续真实处理使用新的运行目录，避免把旧模型号码证据混入新实验。
 
 ## 6. 私人运行配置
 

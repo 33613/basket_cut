@@ -1,4 +1,4 @@
-"""Recognize jersey numbers with a local Qwen2.5-VL model."""
+"""Recognize jersey numbers with a local Qwen3-VL model."""
 import argparse
 import json
 from pathlib import Path

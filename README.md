@@ -37,7 +37,7 @@ flowchart TD
 - 默认匹配距离 `0.2`，新人物距离 `0.5`，第一与第二候选距离差至少 `0.05`。这些是待验证的工程初值，不是概率或论文指标。
 - 质量不足、缺乏可比部位、候选接近或号码冲突时保留待定。同一片段中时间重叠的不同轨迹不能自动合并；时间分离的碎片可以匹配。
 - KPR 与号码识别共用 CPU 质量筛选，分别选择人物图与躯干图；综合清晰度、大小、裁剪完整度、曝光、检测分数和框稳定性，人物框重叠只作为降权线索。每个时间桶留一个候选，质量优先并软性偏好不同外观，最终样本至少间隔 0.25 秒；不强行凑满数量。质量分数是启发式指标，不能证明无遮挡或轨迹身份正确。
-- 号码使用本地 Qwen2.5-VL，默认 7B；可以拒识，`0` 与 `00` 分开保存；至少两个间隔 0.25 秒的支持帧才产生号码候选，有冲突不做多数票掩盖。裁剪图、质量分项、缓存和原始响应随结果保存。
+- 号码使用本地 Qwen3-VL，默认 8B；可以拒识，`0` 与 `00` 分开保存；至少两个间隔 0.25 秒的支持帧才产生号码候选，有冲突不做多数票掩盖。裁剪图、质量分项、缓存和原始响应随结果保存。
 - 相同号码不能单独证明同人。球队和姓名由人工标签补充，没有自动球队识别。裁判等人物可人工标记为非球员并停止用于图库匹配。
 - 每条轨迹及时间范围保留来源，模型事件保存原始轨迹 ID。人工拆出/合并后重新导出事件关联，不重新跑网络。目前修正粒度为整个轨迹档案；轨迹内部 ID 切换仍需复核，尚未提供时间段拆分界面。
 
@@ -144,7 +144,7 @@ CPU 自检覆盖身份稳定、追加/重跑、开放集待定、质量门槛、
 
 KPR 默认 `prompt_mode=none`；显式关键点提示需要另行提供，当前不自动生成关键点。第一版图库检索面向小规模比赛，尚未引入大规模向量索引或学习式拒识模型。
 
-采用模型：[MOTIP](https://github.com/MCG-NJU/MOTIP)、[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification)、[MMAction2](https://github.com/open-mmlab/mmaction2)、[Qwen2.5-VL](https://github.com/QwenLM/Qwen2.5-VL)。请遵守各上游模型、权重和数据许可。
+采用模型：[MOTIP](https://github.com/MCG-NJU/MOTIP)、[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification)、[MMAction2](https://github.com/open-mmlab/mmaction2)、[Qwen3-VL](https://github.com/QwenLM/Qwen3-VL)。请遵守各上游模型、权重和数据许可。
 
 TeamTrack 篮球标注数据可用独立入口 `cli.benchmark_teamtrack` 评估原始 MOTIP。支持 HOTA/DetA/AssA/MOTA/IDF1、逐帧 CLEAR 明细、分视角与总体指标，以及完整性校验和断点恢复。安装与测试步骤见 [TeamTrack 评估说明](docs/teamtrack.md)。
 
