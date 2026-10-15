@@ -63,8 +63,8 @@ def clear_trace(data, raw, directory, expected):
                 last[gt[rows]] = pred[cols]
                 previous[:] = np.nan
                 previous[gt[rows]] = pred[cols]
-            # Raw IDs and preprocessed detections have identical ordering: DO_PREPROC=False,
-            # generated GT has no ignored boxes. Only ID relabelling differs.
+            # Both supported inputs contain evaluable player GT only, so preprocessing
+            # preserves detection ordering. Only ID relabelling differs.
             raw_gt, raw_pred = raw['gt_ids'][t], raw['tracker_ids'][t]
             for i, j, switched in zip(rows, cols, switches):
                 writer.writerow(dict(frame=t+1, event='TP', gt_id=int(raw_gt[i]),
@@ -98,7 +98,7 @@ def serial(value):
     return value
 
 
-def evaluate_files(folder, sequences):
+def evaluate_files(folder, sequences, *, do_preproc=False):
     """Evaluate exactly the declared sequences; missing prediction files are errors."""
     trackeval = trackeval_module()
     metrics = {'HOTA': trackeval.metrics.HOTA(),
@@ -106,7 +106,7 @@ def evaluate_files(folder, sequences):
                'Identity': trackeval.metrics.Identity({'PRINT_CONFIG': False, 'THRESHOLD': .5})}
     dataset = trackeval.datasets.MotChallenge2DBox({
         'GT_FOLDER': str(folder / 'gt'), 'TRACKERS_FOLDER': str(folder / 'predictions'),
-        'TRACKERS_TO_EVAL': ['motip'], 'SKIP_SPLIT_FOL': True, 'DO_PREPROC': False,
+        'TRACKERS_TO_EVAL': ['motip'], 'SKIP_SPLIT_FOL': True, 'DO_PREPROC': do_preproc,
         'PRINT_CONFIG': False, 'SEQ_INFO': {s['sequence']: s['frames'] for s in sequences},
     })
     results = {}
@@ -115,6 +115,11 @@ def evaluate_files(folder, sequences):
     for seq in sequences:
         name = seq['sequence']
         raw = dataset.get_raw_seq_data('motip', name)
+        if do_preproc and any(
+            np.any(classes != 1) or np.any(extras['zero_marked'] == 0)
+            for classes, extras in zip(raw['gt_classes'], raw['gt_extras'])
+        ):
+            raise ValueError('Frame trace requires player-only GT without ignored rows; review the dataset protocol')
         data = dataset.get_preprocessed_seq_data(raw, 'pedestrian')
         results[name] = {key: metric.eval_sequence(data) for key, metric in metrics.items()}
         clear_trace(data, raw, destination / 'sequences' / name, results[name]['CLEAR'])
@@ -150,7 +155,7 @@ def evaluate_files(folder, sequences):
     write_csv(destination / 'hota_thresholds.csv', thresholds)
     save_json(destination / 'trackeval_raw.json', raw_groups)
     save_json(destination / 'metric_protocol.json', {
-        'implementation': 'MOTIP/TrackEval', 'do_preproc': False, 'class': 'player (MOT pedestrian=1)',
+        'implementation': 'MOTIP/TrackEval', 'do_preproc': do_preproc, 'class': 'player (MOT pedestrian=1)',
         'hota_thresholds': [round(float(a), 2) for a in metrics['HOTA'].array_labels],
         'clear_identity_iou': .5, 'csv_rate_units': 'percent', 'raw_json_rate_units': 'fraction',
         'aggregation': 'TrackEval combine_sequences, never arithmetic mean of sequence scores',
