@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 
+from analysis.possession_states import state_prompt, parse_states, state_candidates
 from pipeline.media import atomic_json, cut_video, sha256_file
 from pipeline.segmentation.prompts import coarse_prompt
 from pipeline.segmentation.service import SegmentOptions, parse_coarse
@@ -156,8 +157,8 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
     if isinstance(selected_frames, bool) or not isinstance(selected_frames, int) or selected_frames % 2 or not 4 <= selected_frames <= 64:
         raise ValueError("Frame count must be an even integer from 4 to 64")
     if not query_types or len(set(query_types)) != len(query_types) or any(
-            name not in {"description", "boundary"} for name in query_types):
-        raise ValueError("Use distinct query types selected from description and boundary")
+            name not in {"description", "boundary", "state"} for name in query_types):
+        raise ValueError("Use distinct query types selected from description, boundary and state")
     processor = getattr(backend, "processor", None)
     if video_tokens is not None and processor is None:
         raise ValueError("Changing the video budget requires a real processor")
@@ -169,6 +170,7 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
         "same_frame_count_as_original": selected_frames == options.coarse_frames,
         "requested_video_tokens": video_tokens, "query_types": list(query_types),
         "original_video_budget": original_budget, "effective_video_budget": effective_budget,
+        "state_probe_sha256": sha256_file(Path(__file__).with_name("possession_states.py")),
         "diagnostic_sha256": sha256_file(Path(__file__)), "results": []}
     result_path = output / "diagnostic.json"
     atomic_json(result_path, manifest)
@@ -187,7 +189,8 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
             # Reuse the exact saved original prompt when available, including context.
             prompt = previous.get("request", {}).get("prompt") or coarse_prompt(end - start, options.context)
             row = {**window, "previous_raw_response": previous.get("raw_response"), "queries": {}}
-            questions = {"description": DESCRIPTION_PROMPT, "boundary": prompt}
+            questions = {"description": DESCRIPTION_PROMPT, "boundary": prompt,
+                         "state": state_prompt(end - start, options.context)}
             for name in query_types:
                 question = questions[name]
                 request_dir = folder / name
@@ -215,14 +218,24 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
                     atomic_json(path, record)
                     if capture_inputs:
                         backend._generate = original_generate
-                if name == "boundary":
+                if name in {"boundary", "state"}:
                     try:
-                        record["parsed_boundaries"] = parse_coarse(record["raw_response"], end - start)
+                        if name == "boundary":
+                            record["parsed_boundaries"] = parse_coarse(record["raw_response"], end - start)
+                        else:
+                            record["parsed_states"] = parse_states(record["raw_response"], end - start)
+                            record["derived_candidates"] = [{**candidate,
+                                "source_time_range_s": [start + t for t in candidate["time_range_s"]]}
+                                for candidate in state_candidates(record["parsed_states"])]
                     except (ValueError, TypeError, KeyError) as exc:
                         record["parse_error"] = str(exc)
                     atomic_json(path, record)
                 row["queries"][name] = record
                 print(f"[{key}/{name}] {record['raw_response']}", flush=True)
+                if "parse_error" in record:
+                    print(f"[{key}/{name}] parse error: {record['parse_error']}", flush=True)
+                if "derived_candidates" in record:
+                    print("[state candidates] " + json.dumps(record["derived_candidates"], ensure_ascii=False), flush=True)
                 if "video_input" in record:
                     print("[model input] " + json.dumps(record["video_input"]), flush=True)
             manifest["results"].append(row)

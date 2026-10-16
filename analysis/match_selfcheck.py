@@ -183,6 +183,53 @@ class MatchChecks(unittest.TestCase):
         with self.assertRaises(ValueError): parse_boundary('{"confirmed":true,"boundary_s":null,"kind":"uncertain","evidence":"none","needs_review":false}', 3)
         with self.assertRaises(ValueError): parse_coarse('A basketball game.', 3)
 
+    def test_state_observations_unknowns_and_candidates_remain_unverified(self):
+        from analysis.possession_states import parse_states, state_candidates
+        states = [{"id": i, "phase": "free_throw" if i == 0 else "live_play",
+                   "attacking_team": "dark" if i == 0 else "light", "evidence": "synthetic visible state"}
+                  for i in range(4)]
+        parsed = parse_states(json.dumps({"states": states}), 20)
+        self.assertEqual([row["observation_s"] for row in parsed], [0, 5, 10, 15])
+        candidates = state_candidates(parsed)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["time_range_s"], [0, 10])
+        self.assertEqual(candidates[0]["kind"], "uncertain")
+        self.assertTrue(candidates[0]["needs_review"])
+        unknown = [{**row, "phase": "unknown", "attacking_team": "unknown"} for row in states]
+        self.assertEqual(state_candidates(parse_states(json.dumps({"states": unknown}), 20)), [])
+        same_team = [{**row, "attacking_team": "dark"} for row in states]
+        self.assertEqual(state_candidates(parse_states(json.dumps({"states": same_team}), 20)), [])
+        gap = [states[0], unknown[1], states[2], states[3]]
+        self.assertEqual(state_candidates(parse_states(json.dumps({"states": gap}), 20))[0]["time_range_s"], [0, 15])
+        for invalid in ([], states[:3], [states[0]] * 4,
+                        [{**row, "id": False} for row in states],
+                        [{**row, "phase": []} for row in states]):
+            with self.assertRaises(ValueError): parse_states(json.dumps({"states": invalid}), 20)
+        with self.assertRaises(ValueError): parse_states('{"boundaries":[]}', 20)
+
+    def test_state_probe_maps_broad_candidates_to_original_video(self):
+        from analysis.segmentation_diagnostic import diagnose, diagnostic_plan
+        self.analyze()
+        protocol, windows = diagnostic_plan(self.output, 3.5, 6.5)
+        payload = {"states": [{"id": i, "phase": "live_play",
+            "attacking_team": "dark" if i < 2 else "light", "evidence": "synthetic observation"}
+            for i in range(4)]}
+        calls = []
+        def read(path, prompt, **kwargs):
+            self.assertIn("observation_s", prompt)
+            self.assertEqual(kwargs["num_frames"], 16)
+            calls.append(path)
+            return json.dumps(payload)
+        backend = SimpleNamespace(provenance=protocol["model"], read_video=read)
+        result = diagnose(self.output, self.root / "state-probe", windows, protocol, backend,
+                          capture_inputs=False, query_types=("state",))
+        self.assertEqual(len(calls), 3)
+        query = result["results"][1]["queries"]["state"]
+        self.assertEqual(query["derived_candidates"][0]["time_range_s"], [1, 3])
+        self.assertEqual(query["derived_candidates"][0]["source_time_range_s"], [4, 6])
+        self.assertTrue(query["derived_candidates"][0]["needs_review"])
+        self.assertFalse((self.root / "state-probe/clips_manifest.json").exists())
+
     def test_empty_qwen_array_and_valid_boundary_arrays_are_accepted(self):
         for raw in ('[]', '{"boundaries": []}', '```json\n[]\n```', '```JSON\n[]\n```'):
             self.assertEqual(parse_coarse(raw, 20), [])

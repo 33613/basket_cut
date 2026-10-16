@@ -20,7 +20,7 @@ def main():
     parser.add_argument("--max-windows", type=int, default=8)
     parser.add_argument("--video-tokens", type=int,
                         help="Optional diagnostic total visual-token cap (256–8192)")
-    parser.add_argument("--queries", nargs="+", choices=("description", "boundary"),
+    parser.add_argument("--queries", nargs="+", choices=("description", "boundary", "state"),
                         default=["description", "boundary"])
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
