@@ -101,6 +101,56 @@ class MatchChecks(unittest.TestCase):
         with self.assertRaises(ValueError): parse_boundary('{"confirmed":true,"boundary_s":null,"kind":"uncertain","evidence":"none","needs_review":false}', 3)
         with self.assertRaises(ValueError): parse_coarse('A basketball game.', 3)
 
+    def test_empty_qwen_array_and_valid_boundary_arrays_are_accepted(self):
+        for raw in ('[]', '{"boundaries": []}', '```json\n[]\n```', '```JSON\n[]\n```'):
+            self.assertEqual(parse_coarse(raw, 20), [])
+        candidate = {"time_range_s": [1, 2], "kind": "possession_change",
+                     "evidence": "opponent controls rebound", "needs_review": False}
+        self.assertEqual(parse_coarse(json.dumps([candidate]), 20),
+                         parse_coarse(json.dumps({"boundaries": [candidate]}), 20))
+        for raw in ('null', 'true', '0', '"no boundaries"', '{}', '[{}]', '{"boundaries":null}'):
+            with self.assertRaises(ValueError): parse_coarse(raw, 20)
+        with self.assertRaises(ValueError): parse_coarse(json.dumps([{**candidate, "time_range_s": [1, 21]}]), 20)
+
+    def test_format_retry_preserves_all_answers_and_changes_only_prompt(self):
+        class Backend(SyntheticQwen):
+            def read_video(self, path, prompt, **kwargs):
+                if not self.calls:
+                    self.calls += 1
+                    return "null"
+                return super().read_video(path, prompt, **kwargs)
+        backend = Backend()
+        result = self.analyze(backend)
+        self.assertEqual(len(result["segments"]), 3)
+        self.assertEqual(backend.calls, 6)
+        saved = json.loads((self.output / "responses/coarse-000000.json").read_text())
+        self.assertEqual(len(saved["attempts"]), 2)
+        self.assertEqual(saved["attempts"][0]["raw_response"], "null")
+        self.assertIn("error", saved["attempts"][0])
+        self.assertIn("OUTPUT FORMAT RETRY", saved["attempts"][1]["prompt"])
+        self.assertNotIn("error", saved)
+        self.assertEqual(len(saved["normalized_response"]), 1)
+        backend.read_video = lambda *a, **kw: self.fail("Successful retry must be cached")
+        self.analyze(backend)
+
+    def test_all_empty_arrays_finish_without_boundary_review(self):
+        class Backend:
+            provenance = SyntheticQwen.provenance
+            def read_video(self, *args, **kwargs): return "[]"
+        backend = Backend()
+        result = self.analyze(backend)
+        self.assertEqual(result["boundaries"], [])
+        self.assertEqual(len(result["segments"]), 1)
+        self.assertFalse(result["needs_review"])
+        # Revalidate a cached response marked failed by an older parser, rather
+        # than spending another GPU invocation or losing the raw evidence.
+        path = self.output / "responses/coarse-000001.json"
+        saved = json.loads(path.read_text()); saved["error"] = "Model response must be a JSON object"
+        write_json(path, saved)
+        backend.read_video = lambda *a, **kw: self.fail("Valid empty arrays must be reused")
+        self.analyze(backend)
+        self.assertNotIn("error", json.loads(path.read_text()))
+
     def test_real_window_cuts_review_merge_source_offsets_and_resume(self):
         backend = SyntheticQwen()
         result = self.analyze(backend)
@@ -132,6 +182,8 @@ class MatchChecks(unittest.TestCase):
         response = json.loads((self.output / "responses/coarse-000000.json").read_text())
         self.assertEqual(response["raw_response"], "not JSON")
         self.assertIn("error", response)
+        self.assertEqual(len(response["attempts"]), 3)
+        self.assertTrue(all(r["raw_response"] == "not JSON" and r["error"] for r in response["attempts"]))
         self.assertFalse((self.output / "segmentation.json").exists())
 
     def test_uncertain_boundaries_are_retained_without_inventing_cuts(self):

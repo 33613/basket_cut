@@ -10,13 +10,15 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import shutil
 
 from pipeline.media import atomic_json, cut_video, probe_video, sha256_file
-from pipeline.segmentation.prompts import RULES, coarse_prompt, boundary_prompt
+from pipeline.segmentation.prompts import RULES, coarse_prompt, boundary_prompt, retry_prompt
 from contracts.lineage import clip_id_for
 
 KINDS = {"possession_change", "camera_cut", "uncertain"}
+MAX_FORMAT_ATTEMPTS = 3
 
 
 def digest(value):
@@ -67,12 +69,15 @@ def plan_windows(duration_s, options):
     return windows
 
 
-def parse_json(raw):
-    text = raw.strip()
-    if text.startswith("```json") and text.endswith("```"):
-        text = text[7:-3].strip()
+def parse_json(raw, *, allow_array=False):
+    if not isinstance(raw, str):
+        raise ValueError("Model response must be text containing JSON")
+    text = raw.strip().lstrip("\ufeff").strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if fenced:
+        text = fenced[1]
     result = json.loads(text, parse_constant=lambda x: (_ for _ in ()).throw(ValueError(x)))
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) and not (allow_array and isinstance(result, list)):
         raise ValueError("Model response must be a JSON object")
     return result
 
@@ -92,7 +97,10 @@ def evidence(value):
 
 
 def parse_coarse(raw, duration_s):
-    values = parse_json(raw).get("boundaries")
+    value = parse_json(raw, allow_array=True)
+    # These wrappers carry the same evidence. Validate every item below; never
+    # convert null, malformed JSON or missing fields into 'no boundaries'.
+    values = value if isinstance(value, list) else value.get("boundaries")
     if not isinstance(values, list) or len(values) > 12:
         raise ValueError("Expected at most 12 candidate boundaries")
     result = []
@@ -199,26 +207,49 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
         cache = output / "responses" / f"{key}.json"
         request = {"protocol_sha256": signature, "start_s": start, "end_s": end,
                    "prompt": prompt, "num_frames": frames, "max_new_tokens": 2048}
+        attempts = []
         if cache.is_file():
             saved = json.loads(cache.read_text())
             if saved.get("request") != request:
                 raise ValueError("Cached Qwen request differs from this run")
-            if "error" not in saved:
-                return parser(saved["raw_response"], end - start)
+            attempts = list(saved.get("attempts", []))
+            try:
+                result = parser(saved["raw_response"], end - start)
+            except (ValueError, TypeError, KeyError):
+                if not attempts:
+                    attempts.append({"prompt": prompt, "raw_response": saved.get("raw_response"),
+                                     "error": saved.get("error", "Cached response failed current validation")})
+            else:
+                if "error" in saved:
+                    saved.pop("error")
+                    atomic_json(cache, {**saved, "normalized_response": result})
+                return result
         reserve(output, options.min_free_gb)
         window = window_root / (key + ".mp4")
         cut_video(source, window, start, end, ffmpeg=ffmpeg, ffprobe=ffprobe, metadata=meta, preview=True)
         print(f"[segmentation] {key} {start:.2f}–{end:.2f}s, {frames} frames", flush=True)
         try:
-            raw = backend.read_video(window, prompt, num_frames=frames, max_new_tokens=2048)
-            saved = {"request": request, "raw_response": raw}
-            atomic_json(cache, saved)
-            try:
-                result = parser(raw, end - start)
-            except (ValueError, TypeError, KeyError) as exc:
-                atomic_json(cache, {**saved, "error": str(exc)})
-                raise ValueError(f"Invalid Qwen response; inspect {cache}: {exc}") from exc
-            return result
+            previous_error = attempts[-1].get("error") if attempts else None
+            for attempt in range(MAX_FORMAT_ATTEMPTS):
+                actual_prompt = retry_prompt(prompt, previous_error) if previous_error else prompt
+                raw = backend.read_video(window, actual_prompt, num_frames=frames, max_new_tokens=2048)
+                item = {"prompt": actual_prompt, "raw_response": raw}
+                attempts.append(item)
+                saved = {"request": request, "raw_response": raw, "attempts": attempts}
+                # Persist before validation so a crash never loses raw evidence.
+                atomic_json(cache, saved)
+                try:
+                    result = parser(raw, end - start)
+                except (ValueError, TypeError, KeyError) as exc:
+                    previous_error = str(exc)
+                    item["error"] = previous_error
+                    atomic_json(cache, {**saved, "error": previous_error})
+                    if attempt + 1 == MAX_FORMAT_ATTEMPTS:
+                        raise ValueError(f"Invalid Qwen response after {MAX_FORMAT_ATTEMPTS} attempts; inspect {cache}: {exc}") from exc
+                    print(f"[segmentation] {key} format retry {attempt + 1}/{MAX_FORMAT_ATTEMPTS - 1}: {exc}", flush=True)
+                else:
+                    atomic_json(cache, {**saved, "normalized_response": result})
+                    return result
         finally:
             window.unlink(missing_ok=True)
 

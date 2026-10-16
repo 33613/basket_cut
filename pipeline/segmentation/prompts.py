@@ -23,7 +23,19 @@ evidence, not hidden reasoning. Return JSON only, at most 12 boundaries:
 {{"boundaries": [{{"time_range_s": [1.0, 2.0],
 "kind": "possession_change", "evidence": "opponent controls rebound",
 "needs_review": false}}]}}
-kind must be possession_change, camera_cut or uncertain. Empty list is valid.
+kind must be possession_change, camera_cut or uncertain.
+If there are no candidate boundaries, return exactly {{"boundaries": []}}.
+The top-level value must be an object with the boundaries key, not null or a list.
+"""
+
+
+def retry_prompt(prompt, error):
+    return prompt + f"""
+OUTPUT FORMAT RETRY: The previous response failed validation: {error}.
+Inspect the SAME supplied video and follow the JSON schema above exactly.
+Use numeric local seconds, the required keys and JSON booleans. No prose or
+Markdown. Do not invent events or timestamps to satisfy the schema; an empty
+boundaries list or an uncertain review is allowed as specified above.
 """
 
 
