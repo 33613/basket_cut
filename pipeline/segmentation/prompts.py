@@ -44,7 +44,8 @@ def boundary_prompt(duration_s, candidate, context):
 Match context: {context}
 Local video duration: {duration_s:.6f} seconds.
 Verify this candidate in local seconds: {candidate}
-Find the first visible instant establishing the new control state or shot.
+For possession_change, find the first visible instant establishing opponent control.
+A shot, foul or free-throw setup alone is not a possession change.
 Reject a false candidate. If the instant is ambiguous, return boundary_s=null
 and needs_review=true. Do not force a precise number without visible evidence.
 Return JSON only:

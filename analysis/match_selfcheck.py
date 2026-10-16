@@ -230,6 +230,62 @@ class MatchChecks(unittest.TestCase):
         self.assertTrue(query["derived_candidates"][0]["needs_review"])
         self.assertFalse((self.root / "state-probe/clips_manifest.json").exists())
 
+    def test_candidate_review_requires_control_change_and_valid_local_evidence(self):
+        from analysis.possession_review import parse_review
+        value = {"decision": "confirmed", "before_team": "dark", "after_team": "light",
+            "time_range_s": [3, 4], "before_evidence": "old team holds ball",
+            "after_evidence": "opponent has visible control", "reason": "synthetic transition"}
+        result = parse_review(json.dumps(value), 8, [2, 6])
+        self.assertTrue(result["needs_human_review"])
+        for change in ({"after_team": "dark"}, {"before_team": "unknown"},
+                       {"time_range_s": [1, 3]}, {"time_range_s": [3, 7]},
+                       {"time_range_s": [3, 3]}, {"time_range_s": [True, 4]},
+                       {"before_evidence": ""}):
+            with self.assertRaises(ValueError): parse_review(json.dumps(value | change), 8, [2, 6])
+        rejected = value | {"decision": "rejected", "after_team": "dark", "time_range_s": None}
+        self.assertEqual(parse_review(json.dumps(rejected), 8, [2, 6])["decision"], "rejected")
+        with self.assertRaises(ValueError):
+            parse_review(json.dumps(rejected | {"after_team": "light"}), 8, [2, 6])
+        uncertain = value | {"decision": "uncertain", "before_team": "unknown", "time_range_s": None}
+        self.assertEqual(parse_review(json.dumps(uncertain), 8, [2, 6])["decision"], "uncertain")
+
+    def test_independent_candidate_review_rejects_and_confirms_without_cutting(self):
+        from analysis.possession_review import review_plan, review_candidates
+        from pipeline.identity.qwen_backend import VIDEO_BUDGET
+        self.analyze()
+        protocol = json.loads((self.output / "protocol.json").read_text())
+        diagnostic = {"source": protocol["source"], "model": protocol["model"], "results": [
+            {"window_id": "coarse-000000", "start_s": 0, "end_s": 4, "queries": {"state": {
+                "derived_candidates": [{"source_time_range_s": [1, 2], "evidence": "bad prior label"}]}}},
+            {"window_id": "coarse-000001", "start_s": 3, "end_s": 7, "queries": {"state": {
+                "derived_candidates": [{"source_time_range_s": [4, 6], "evidence": "bad prior label"}]}}}]}
+        candidates = review_plan(diagnostic, .5)
+        self.assertEqual(candidates[1]["local_candidate_range_s"], [.5, 2.5])
+        self.assertNotIn("evidence", candidates[0])
+        processor = SimpleNamespace(video_processor=SimpleNamespace(size=dict(VIDEO_BUDGET),
+            patch_size=16, merge_size=2, temporal_patch_size=2))
+        answers = [
+            {"decision": "rejected", "before_team": "dark", "after_team": "dark", "time_range_s": None},
+            {"decision": "confirmed", "before_team": "dark", "after_team": "light", "time_range_s": [1, 2]}]
+        def read(path, prompt, **kwargs):
+            self.assertTrue(path.is_file())
+            self.assertNotIn("bad prior label", prompt)
+            self.assertEqual(processor.video_processor.size["longest_edge"], 16777216)
+            value = answers.pop(0) | {"before_evidence": "synthetic before control",
+                "after_evidence": "synthetic after control", "reason": "synthetic review"}
+            return json.dumps(value)
+        backend = SimpleNamespace(provenance=protocol["model"], processor=processor, read_video=read)
+        result = review_candidates(diagnostic, candidates, self.root / "reviews", backend, capture_inputs=False)
+        self.assertEqual([row["review"]["decision"] for row in result["results"]], ["rejected", "confirmed"])
+        self.assertEqual(result["results"][1]["source_transition_range_s"], [4.5, 5.5])
+        self.assertEqual(processor.video_processor.size, VIDEO_BUDGET)
+        self.assertFalse((self.root / "reviews/clips_manifest.json").exists())
+        with patch.object(backend, "read_video", side_effect=RuntimeError("synthetic review failure")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic review failure"):
+                review_candidates(diagnostic, candidates, self.root / "reviews-failed", backend, capture_inputs=False)
+        self.assertEqual(processor.video_processor.size, VIDEO_BUDGET)
+        self.assertEqual(json.loads((self.root / "reviews-failed/candidate-review.json").read_text())["status"], "failed")
+
     def test_empty_qwen_array_and_valid_boundary_arrays_are_accepted(self):
         for raw in ('[]', '{"boundaries": []}', '```json\n[]\n```', '```JSON\n[]\n```'):
             self.assertEqual(parse_coarse(raw, 20), [])

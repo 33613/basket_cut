@@ -74,6 +74,16 @@
 
 程序从已知进攻方变化，或进攻方不明的罚球→活球变化提出宽时间范围；相邻状态为 `unknown` 不会被补写成某支球队。所有候选均是 `uncertain`、`needs_review=true`，保存局部/原视频范围及对应观察点，终端打印 `[state candidates]`。这些候选不自动导出片段，不写球员库，也不等于人工确认的回合转换。宽范围后续需要足够长的复核窗口；先人工核对这小段观察结果，再决定是否更改正式粗看流程。
 
+复核上述状态候选可运行（默认每个候选前后各加 2 秒，16 帧、8192 视觉 token 上限）：
+
+```bash
+/path/to/qwen3/bin/python -u -m cli.review_segmentation_candidates --env-file .env \
+  --diagnostic-dir runtime/diagnostics/game-001-states \
+  --output-dir runtime/diagnostics/game-001-state-reviews
+```
+
+命令先打印候选及源视频范围，模型只加载一次，最多默认 8 次请求。复核提示词不提供粗看猜测的球队方向或文字证据；这仍是同一个模型的新请求，不是独立模型或人工验证。每条回答必须为 `confirmed`、`rejected`、`uncertain`，分别保留前后控球证据和理由。确认需要不同的已知控制方及候选内部的过渡范围；排除需要同一已知控制方，模糊情况保留不确定。格式错误单独保存，不当作排除。`candidate-review.json` 保存模型回答和原视频过渡范围，原始窗口及实际输入图保留供人工检查；即使模型确认也保留 `needs_human_review=true`，不会导出正式片段或写球员库。
+
 只分析并保留人工检查机会：
 
 ```bash
