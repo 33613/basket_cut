@@ -8,6 +8,9 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
+
+import numpy as np
 
 from analysis.person_library_selfcheck import make_library_fixture, rows
 from contracts.schema import read_jsonl, write_json
@@ -91,6 +94,60 @@ class MatchChecks(unittest.TestCase):
         self.assertEqual(len(plan_windows(.2, self.options)), 1)
         for kwargs in ({"overlap_s": 4}, {"window_s": float("nan")}, {"coarse_frames": 5}, {"min_free_gb": -1}):
             with self.assertRaises(ValueError): replace(self.options, **kwargs).validate()
+
+    def test_qwen_diagnostic_reconstructs_actual_processed_pixels(self):
+        from analysis.segmentation_diagnostic import reconstruct_video, save_video_inputs
+        frames = np.linspace(-1, 1, 4 * 3 * 64 * 96, dtype=np.float32).reshape(4, 3, 64, 96)
+        # The independent forward layout from the pinned HF Qwen3 processor.
+        patches = frames.reshape(2, 2, 3, 2, 2, 16, 3, 2, 16).transpose(
+            0, 3, 6, 4, 7, 2, 1, 5, 8).reshape(2 * 4 * 6, 3 * 2 * 16 * 16)
+        decoded = reconstruct_video(patches, [2, 4, 6], patch_size=16, temporal_patch_size=2, merge_size=2)
+        np.testing.assert_array_equal(decoded, frames)
+        processor = SimpleNamespace(video_processor=SimpleNamespace(patch_size=16,
+            temporal_patch_size=2, merge_size=2, do_normalize=True, image_std=[.5] * 3,
+            image_mean=[.5] * 3, do_rescale=True, rescale_factor=1 / 255),
+            batch_decode=lambda *args, **kwargs: ["0.04<|image_pad|><|image_pad|>0.20"])
+        inputs = {"pixel_values_videos": patches, "video_grid_thw": np.array([[2, 4, 6]]),
+                  "input_ids": np.ones((1, 100))}
+        output = self.root / "diagnostic-tensors"
+        summary = save_video_inputs(processor, inputs, output)
+        self.assertEqual((summary["processed_frames"], summary["processed_height"], summary["processed_width"]), (4, 64, 96))
+        self.assertGreater(summary["adjacent_frame_mean_absolute_difference"], 0)
+        self.assertTrue((output / "model-input.jpg").is_file())
+        self.assertEqual((output / "input-text.txt").read_text(), "0.04[visual tokens omitted]0.20")
+        with self.assertRaises(ValueError):
+            reconstruct_video(patches[:1], [2, 4, 6], patch_size=16, temporal_patch_size=2, merge_size=2)
+
+    def test_segmentation_diagnostic_preserves_original_evidence_and_errors(self):
+        from analysis.segmentation_diagnostic import diagnose, diagnostic_plan
+        self.analyze()
+        protocol, windows = diagnostic_plan(self.output, 3.5, 6.5)
+        self.assertEqual([w["window_id"] for w in windows], ["coarse-000000", "coarse-000001", "coarse-000002"])
+        original = {str(p): p.read_bytes() for p in self.output.rglob("*.json")}
+        class Backend:
+            provenance = protocol["model"]
+            def read_video(self, path, prompt, **kwargs):
+                assert path.is_file() and kwargs["num_frames"] == 16
+                return "visible basketball play" if "chronological order" in prompt else "null"
+        backend = Backend()
+        output = self.root / "diagnostic"
+        result = diagnose(self.output, output, windows, protocol, backend, capture_inputs=False)
+        self.assertEqual(result["status"], "completed_not_accuracy_evaluated")
+        self.assertEqual(len(result["results"]), 3)
+        for row in result["results"]:
+            self.assertIn("parse_error", row["queries"]["boundary"])
+            self.assertNotIn("parsed_boundaries", row["queries"]["boundary"])
+            self.assertTrue((output / row["window_id"] / "window.mp4").is_file())
+        self.assertEqual(original, {str(p): p.read_bytes() for p in self.output.rglob("*.json")})
+        with self.assertRaises(FileExistsError):
+            diagnose(self.output, output, windows, protocol, backend, capture_inputs=False)
+        with self.assertRaises(ValueError):
+            diagnose(self.output, self.output / "wrong", windows, protocol, backend, capture_inputs=False)
+        backend.provenance = {"model_sha256": "different"}
+        with self.assertRaisesRegex(ValueError, "model differs"):
+            diagnose(self.output, self.root / "different", windows, protocol, backend, capture_inputs=False)
+        with self.assertRaises(ValueError):
+            diagnostic_plan(self.output, -1, 3)
 
     def test_parser_rejects_out_of_window_and_false_precision(self):
         valid = {"boundaries": [{"time_range_s": [1, 2], "kind": "uncertain", "evidence": "occluded", "needs_review": True}]}

@@ -42,6 +42,19 @@
 
 无候选时要求输出 `{"boundaries": []}`，解析器也接受字段完全合格的直接数组（包括 `[]`）。`null`、缺字段和越界时间不会被当作空结果。格式失败时在同一视频窗口上最多再请求两次，每次提示词、原始回答及错误保存在 `responses/<window>.json` 的 `attempts` 中；重试耗尽会明确停止。格式处理或提示词更新后使用新运行目录，不覆盖旧请求证据。
 
+如果人工确认存在换球权，但粗看全部返回空列表，先诊断一小段，避免重复跑整场。以下命令选择与原视频 120–180 秒相交的原始粗看窗口，对每个窗口分别请求画面描述与原来的边界提示词；模型只加载一次：
+
+```bash
+/path/to/qwen3/bin/python -u -m cli.diagnose_segmentation --env-file .env \
+  --segmentation-dir runtime/outputs/game-001/segmentation \
+  --output-dir runtime/diagnostics/game-001-first \
+  --start-s 120 --end-s 180
+```
+
+默认保留原始采样帧数和边界提示词，对比原始回答；最多诊断 8 个窗口。诊断输出独立保存 `diagnostic.json`、每个窗口的 `window.mp4`、两种提示词及回答。`model-input.jpg` 从实际送入模型的 Qwen3 像素张量还原，`input-summary.json` 记录实际帧数、处理后尺寸、token 数和帧差，`input-text.txt` 保留时间戳文本并压缩重复视觉占位符。序号是采样顺序，不能当作秒数。这些文件用于核查视觉输入与任务理解，不是人工标注或准确率评估。
+
+若实际输入画面及描述正常、边界回答仍为空，再检查边界定义及提示词；若漏掉短暂变化，可在另一个输出目录加 `--frames 32` 做单变量采样对照。不要同时修改窗口、提示词与分辨率。诊断不更新正式片段、缓存或球员库；CPU 自检只验证张量还原与诊断链路，真实视频效果需在 GPU 上检查。
+
 只分析并保留人工检查机会：
 
 ```bash
