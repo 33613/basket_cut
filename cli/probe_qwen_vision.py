@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import time
 
-from analysis.segmentation_diagnostic import array, save_video_inputs, video_rgb_frames
+from analysis.segmentation_diagnostic import array, save_video_inputs, video_rgb_frames, set_video_budget
 from contracts.execution import ExecutionSettings, normalize_omp_threads
 from pipeline.media import atomic_json, sha256_file
 
@@ -23,22 +23,6 @@ def attention_state(model):
     return {name: getattr(config, "_attn_implementation", None) for name, config in (
         ("model", model.config), ("vision", model.config.vision_config),
         ("text", model.config.text_config))}
-
-
-def set_video_budget(processor, tokens):
-    vp = processor.video_processor
-    original = dict(vp.size)
-    if tokens is None:
-        return original
-    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 256 <= tokens <= 8192:
-        raise ValueError("Video token cap must be an integer between 256 and 8192")
-    # Qwen3 compresses merge_size**2 spatial patches and temporal_patch_size frames.
-    pixels_per_token = (vp.patch_size * vp.merge_size) ** 2 * vp.temporal_patch_size
-    budget = {**original, "longest_edge": tokens * pixels_per_token}
-    if budget["longest_edge"] < budget["shortest_edge"]:
-        raise ValueError("Requested video budget is below the processor's minimum")
-    vp.size = budget
-    return original
 
 
 def compare(backend, image_inputs, video_inputs, output, *, modes=("sdpa", "eager")):

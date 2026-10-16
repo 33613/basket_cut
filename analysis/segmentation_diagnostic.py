@@ -26,6 +26,21 @@ Do not decide clip boundaries yet. Answer in concise Chinese prose.
 """
 
 
+def set_video_budget(processor, tokens):
+    vp = processor.video_processor
+    original = dict(vp.size)
+    if tokens is None:
+        return original
+    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 256 <= tokens <= 8192:
+        raise ValueError("Video token cap must be an integer between 256 and 8192")
+    pixels_per_token = (vp.patch_size * vp.merge_size) ** 2 * vp.temporal_patch_size
+    budget = {**original, "longest_edge": tokens * pixels_per_token}
+    if budget["longest_edge"] < budget["shortest_edge"]:
+        raise ValueError("Requested video budget is below the processor's minimum")
+    vp.size = budget
+    return original
+
+
 def array(value):
     if hasattr(value, "detach"):
         value = value.detach().cpu().float().numpy()
@@ -121,7 +136,8 @@ def diagnostic_plan(segmentation_dir, start_s, end_s):
 
 
 def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=None,
-             ffmpeg="ffmpeg", ffprobe="ffprobe", capture_inputs=True):
+             ffmpeg="ffmpeg", ffprobe="ffprobe", capture_inputs=True,
+             video_tokens=None, query_types=("description", "boundary")):
     root, output = Path(segmentation_dir).resolve(), Path(output).resolve()
     source = protocol["source"]
     if backend.provenance != protocol["model"]:
@@ -139,10 +155,20 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
     selected_frames = frames if frames is not None else options.coarse_frames
     if isinstance(selected_frames, bool) or not isinstance(selected_frames, int) or selected_frames % 2 or not 4 <= selected_frames <= 64:
         raise ValueError("Frame count must be an even integer from 4 to 64")
+    if not query_types or len(set(query_types)) != len(query_types) or any(
+            name not in {"description", "boundary"} for name in query_types):
+        raise ValueError("Use distinct query types selected from description and boundary")
+    processor = getattr(backend, "processor", None)
+    if video_tokens is not None and processor is None:
+        raise ValueError("Changing the video budget requires a real processor")
+    original_budget = set_video_budget(processor, video_tokens) if processor else None
+    effective_budget = dict(processor.video_processor.size) if processor else None
     output.mkdir(parents=True, exist_ok=True)
     manifest = {"status": "running", "accuracy_evaluated": False, "source": source,
         "model": backend.provenance, "requested_frames": selected_frames,
         "same_frame_count_as_original": selected_frames == options.coarse_frames,
+        "requested_video_tokens": video_tokens, "query_types": list(query_types),
+        "original_video_budget": original_budget, "effective_video_budget": effective_budget,
         "diagnostic_sha256": sha256_file(Path(__file__)), "results": []}
     result_path = output / "diagnostic.json"
     atomic_json(result_path, manifest)
@@ -161,10 +187,13 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
             # Reuse the exact saved original prompt when available, including context.
             prompt = previous.get("request", {}).get("prompt") or coarse_prompt(end - start, options.context)
             row = {**window, "previous_raw_response": previous.get("raw_response"), "queries": {}}
-            for name, question in (("description", DESCRIPTION_PROMPT), ("boundary", prompt)):
+            questions = {"description": DESCRIPTION_PROMPT, "boundary": prompt}
+            for name in query_types:
+                question = questions[name]
                 request_dir = folder / name
                 request_dir.mkdir()
-                record = {"prompt": question, "num_frames": selected_frames, "max_new_tokens": 2048}
+                record = {"prompt": question, "num_frames": selected_frames, "max_new_tokens": 2048,
+                          "video_budget": effective_budget}
                 path = request_dir / "response.json"
                 atomic_json(path, record)
                 original_generate = backend._generate if capture_inputs else None
@@ -203,6 +232,8 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
         manifest.update(status="failed", error=str(exc))
         raise
     finally:
+        if processor:
+            processor.video_processor.size = original_budget
         atomic_json(result_path, manifest)
     print(f"Diagnostic saved: {result_path}", flush=True)
     return manifest

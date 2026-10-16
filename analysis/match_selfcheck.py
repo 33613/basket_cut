@@ -139,6 +139,31 @@ class MatchChecks(unittest.TestCase):
             self.assertNotIn("parsed_boundaries", row["queries"]["boundary"])
             self.assertTrue((output / row["window_id"] / "window.mp4").is_file())
         self.assertEqual(original, {str(p): p.read_bytes() for p in self.output.rglob("*.json")})
+        from pipeline.identity.qwen_backend import VIDEO_BUDGET
+        processor = SimpleNamespace(video_processor=SimpleNamespace(size=dict(VIDEO_BUDGET),
+            patch_size=16, merge_size=2, temporal_patch_size=2))
+        backend.processor = processor
+        single = diagnose(self.output, self.root / "boundary-only", windows, protocol, backend,
+                          capture_inputs=False, query_types=("boundary",), video_tokens=8192)
+        self.assertEqual(single["original_video_budget"], VIDEO_BUDGET)
+        self.assertEqual(single["effective_video_budget"]["longest_edge"], 16777216)
+        self.assertTrue(all(set(row["queries"]) == {"boundary"} for row in single["results"]))
+        self.assertEqual(processor.video_processor.size, VIDEO_BUDGET)
+        with patch.object(backend, "read_video", side_effect=RuntimeError("synthetic inference failure")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic inference failure"):
+                diagnose(self.output, self.root / "failed-budget", windows, protocol, backend,
+                         capture_inputs=False, query_types=("boundary",), video_tokens=8192)
+        self.assertEqual(processor.video_processor.size, VIDEO_BUDGET)
+        failed = json.loads((self.root / "failed-budget/diagnostic.json").read_text())
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["effective_video_budget"]["longest_edge"], 16777216)
+        import sys
+        planned = subprocess.run([sys.executable, "-m", "cli.diagnose_segmentation",
+            "--segmentation-dir", str(self.output), "--output-dir", str(self.root / "dry"),
+            "--start-s", "3.5", "--end-s", "6.5", "--queries", "boundary",
+            "--video-tokens", "8192", "--dry-run"], capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(planned.stdout)["model_queries"], 3)
+        self.assertFalse((self.root / "dry").exists())
         with self.assertRaises(FileExistsError):
             diagnose(self.output, output, windows, protocol, backend, capture_inputs=False)
         with self.assertRaises(ValueError):
