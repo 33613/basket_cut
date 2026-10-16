@@ -12,7 +12,7 @@ from unittest.mock import patch
 from analysis.person_library_selfcheck import make_library_fixture, rows
 from contracts.schema import read_jsonl, write_json
 from contracts.lineage import track_uid
-from pipeline.media import probe_video, cut_video, sha256_file
+from pipeline.media import probe_video, cut_video, sha256_file, frame_sync_args, preflight_video
 from pipeline.segmentation.service import (SegmentOptions, analyze_video, export_segments,
     make_segments, parse_boundary, parse_coarse, plan_windows)
 from pipeline.identity.player_registry import PlayerRegistry
@@ -362,7 +362,7 @@ class MatchChecks(unittest.TestCase):
     def test_vfr_input_is_normalized_without_losing_source_offset(self):
         vfr = self.root / "vfr.mp4"
         subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(self.source),
-            "-vf", "setpts='if(lt(N,40),N/(10*TB),(4+(N-40)/5)/TB)'", "-vsync", "vfr",
+            "-vf", "setpts='if(lt(N,40),N/(10*TB),(4+(N-40)/5)/TB)'", *frame_sync_args(mode="vfr"),
             "-c:v", "libx264", "-threads", "1", str(vfr)], check=True)
         target = self.root / "vfr-cut.mp4"
         metadata = cut_video(vfr, target, 6, 8)
@@ -379,6 +379,58 @@ class MatchChecks(unittest.TestCase):
             self.assertLess(float(np.abs(expected.astype(float) - actual).mean()), 6)
         finally:
             expected_reader.release(); actual_reader.release()
+
+    def ffmpeg_wrapper(self, option, *, broken_encode=False):
+        import sys
+        path = self.root / ("modern-ffmpeg" if option == "-fps_mode" else "legacy-ffmpeg")
+        path.write_text(f"#!{sys.executable}\n" +
+            "import os, sys\nargs = sys.argv[1:]\n" +
+            f"if args == ['-hide_banner', '-h', 'full']:\n    print({option!r} + ' <> frame synchronization')\n    sys.exit(0)\n" +
+            f"if {('-vsync' if option == '-fps_mode' else '-fps_mode')!r} in args:\n    sys.exit('Unrecognized option')\n" +
+            ("sys.exit('synthetic decoder failure')\n" if broken_encode else
+             f"os.execv({shutil.which('ffmpeg')!r}, [{shutil.which('ffmpeg')!r}] + args)\n"))
+        path.chmod(0o755)
+        return str(path)
+
+    def test_modern_ffmpeg_without_vsync_can_cut_and_preflight(self):
+        ffmpeg = self.ffmpeg_wrapper("-fps_mode")
+        self.assertEqual(frame_sync_args(ffmpeg), ["-fps_mode", "cfr"])
+        self.assertEqual(preflight_video(self.source, ffmpeg=ffmpeg)["status"], "passed")
+        target = self.root / "modern.mp4"
+        cut_video(self.source, target, 1, 3, ffmpeg=ffmpeg)
+        self.assertAlmostEqual(probe_video(target)["duration_s"], 2, places=2)
+
+    def test_legacy_ffmpeg_falls_back_to_vsync(self):
+        ffmpeg = self.ffmpeg_wrapper("-vsync")
+        self.assertEqual(frame_sync_args(ffmpeg), ["-vsync", "cfr"])
+        self.assertEqual(preflight_video(self.source, ffmpeg=ffmpeg)["status"], "passed")
+
+    def test_failed_media_preflight_never_loads_qwen_or_queries_gpu(self):
+        import sys
+        from types import SimpleNamespace
+        from cli.segment_video import main as segment_main
+        from pipeline.identity import qwen_backend
+        ffmpeg = self.ffmpeg_wrapper("-fps_mode", broken_encode=True)
+        settings = SimpleNamespace(ffmpeg=ffmpeg, ffprobe=shutil.which("ffprobe"),
+                                   qwen_model_dir=self.root / "no-model")
+        argv = ["segment_video", "--input", str(self.source), "--output-dir", str(self.output), "--stage", "analyze"]
+        with patch.object(sys, "argv", argv), patch("cli.segment_video.ExecutionSettings", return_value=settings), \
+                patch.object(qwen_backend, "QwenBackend") as model, patch.object(qwen_backend, "ensure_gpu_idle") as gpu:
+            with self.assertRaisesRegex(RuntimeError, "synthetic decoder failure"):
+                segment_main()
+            model.assert_not_called(); gpu.assert_not_called()
+
+    def test_invalid_omp_values_are_repaired_and_valid_lists_preserved(self):
+        from contracts.execution import normalize_omp_threads
+        for value in ("", "0", "-1", "None", "auto", "4,", "2.5", "99999999999999999999999"):
+            env = {"OMP_NUM_THREADS": value}
+            self.assertTrue(normalize_omp_threads(env))
+            self.assertGreater(int(env["OMP_NUM_THREADS"]), 0)
+        for value in ("1", "4", "4,2", " 4 , 2 "):
+            env = {"OMP_NUM_THREADS": value}
+            self.assertFalse(normalize_omp_threads(env))
+            self.assertEqual(env["OMP_NUM_THREADS"], value)
+        self.assertFalse(normalize_omp_threads({}))
 
 
 def main():

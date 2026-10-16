@@ -1,11 +1,15 @@
 """CPU media operations with explicit, video-relative time and atomic outputs."""
 
 from fractions import Fraction
+from functools import lru_cache
 import hashlib
 import json
 import math
 from pathlib import Path
+import re
+import shutil
 import subprocess
+import tempfile
 
 
 def sha256_file(path):
@@ -50,6 +54,41 @@ def probe_video(path, *, ffprobe="ffprobe"):
             "time_scope": "seconds_from_first_video_presentation_timestamp"}
 
 
+@lru_cache(maxsize=16)
+def _sync_option(executable, size, mtime_ns):
+    """Detect the selected binary's API, invalidating cache on replacement."""
+    result = subprocess.run([executable, "-hide_banner", "-h", "full"],
+                            capture_output=True, text=True, timeout=20)
+    help_text = result.stdout + result.stderr
+    if result.returncode:
+        raise RuntimeError(f"Cannot inspect FFmpeg {executable}: {help_text[-2000:]}")
+    for option in ("-fps_mode", "-vsync"):
+        if re.search(r"(?m)^\s*" + re.escape(option) + r"(?=[\s\[:])", help_text):
+            return option
+    raise RuntimeError(f"FFmpeg {executable} supports neither -fps_mode nor -vsync; select a full FFmpeg build")
+
+
+def frame_sync_args(ffmpeg="ffmpeg", mode="cfr"):
+    if mode not in {"cfr", "vfr"}:
+        raise ValueError("Frame synchronization mode must be cfr or vfr")
+    executable = shutil.which(str(ffmpeg))
+    if executable is None:
+        raise FileNotFoundError(f"FFmpeg executable not found: {ffmpeg}")
+    stat = Path(executable).stat()
+    return [_sync_option(executable, stat.st_size, stat.st_mtime_ns), mode]
+
+
+def preflight_video(source, *, ffmpeg="ffmpeg", ffprobe="ffprobe"):
+    """Exercise the real input decoder, scaler and H.264 encoder before GPU load."""
+    metadata = probe_video(source, ffprobe=ffprobe)
+    sync = frame_sync_args(ffmpeg)
+    with tempfile.TemporaryDirectory(prefix="basket-media-preflight-") as temporary:
+        cut_video(source, Path(temporary) / "preview.mp4", 0, min(1, metadata["duration_s"]),
+                  ffmpeg=ffmpeg, ffprobe=ffprobe, metadata=metadata, preview=True)
+    return {"ffmpeg": shutil.which(str(ffmpeg)), "frame_sync": sync,
+            "duration_s": metadata["duration_s"], "status": "passed"}
+
+
 def cut_video(source, output, start_s, end_s, *, ffmpeg="ffmpeg", ffprobe="ffprobe",
               metadata=None, preview=False):
     """Accurate transcoding seek, CFR output for frame_idx/fps based backends.
@@ -76,7 +115,7 @@ def cut_video(source, output, start_s, end_s, *, ffmpeg="ffmpeg", ffprobe="ffpro
                     "-crf", "23"]
     else:
         command += ["-map", "0:a:0?", "-c:a", "aac", "-r", meta["frame_rate"], "-crf", "18"]
-    command += ["-vsync", "cfr", "-c:v", "libx264", "-preset", "fast", "-threads", "2",
+    command += frame_sync_args(ffmpeg) + ["-c:v", "libx264", "-preset", "fast", "-threads", "2",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary)]
     try:
         result = subprocess.run(command, capture_output=True, text=True)

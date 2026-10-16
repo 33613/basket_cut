@@ -4,8 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
-from contracts.execution import ExecutionSettings
-from pipeline.media import probe_video
+from contracts.execution import ExecutionSettings, normalize_omp_threads
+from pipeline.media import probe_video, preflight_video
 from pipeline.segmentation.service import SegmentOptions, analyze_video, export_segments, plan_windows
 
 
@@ -63,7 +63,9 @@ def main():
             "output_dir": str(args.output_dir.resolve())}, ensure_ascii=False, indent=2))
         return
     if args.stage in ("analyze", "all"):
-        probe_video(args.input, ffprobe=settings.ffprobe)
+        normalize_omp_threads()
+        check = preflight_video(args.input, ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe)
+        print("[segmentation] CPU media preflight passed: " + json.dumps(check), flush=True)
         from pipeline.identity.qwen_backend import QwenBackend, ensure_gpu_idle
         ensure_gpu_idle()
         backend = QwenBackend(args.model_dir or settings.qwen_model_dir)

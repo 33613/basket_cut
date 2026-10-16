@@ -7,7 +7,7 @@ import shlex
 import subprocess
 
 from cli.segment_video import add_options, options_from
-from contracts.execution import ExecutionSettings
+from contracts.execution import ExecutionSettings, normalize_omp_threads
 from workflows.batch import run_batch
 
 
@@ -53,6 +53,7 @@ def main():
             "segmentation_command": shlex.join(command), "results_dir": str(results),
             "next": "Each exported clip resets MOTIP. KPR + Qwen evidence update one match library; actions join by clip/track."}, indent=2))
         return
+    normalize_omp_threads()
     if args.stage in ("segment", "full"):
         root.mkdir(parents=True, exist_ok=True)
         # Subprocess exit releases the Qwen model before MOTIP starts.

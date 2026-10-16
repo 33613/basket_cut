@@ -9,6 +9,20 @@ from contracts.paths import KPR_FILENAME, model_path, runtime_root
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
+
+def normalize_omp_threads(environ=None):
+    """Preserve valid OpenMP thread lists; repair invalid inherited values."""
+    environ = os.environ if environ is None else environ
+    if "OMP_NUM_THREADS" not in environ:
+        return False
+    parts = environ["OMP_NUM_THREADS"].split(",")
+    if all(part.strip().isascii() and part.strip().isdigit()
+           and 0 < int(part.strip()) <= 2**31 - 1 for part in parts):
+        return False
+    environ["OMP_NUM_THREADS"] = str(min(4, os.cpu_count() or 1))
+    print(f"Invalid OMP_NUM_THREADS replaced with {environ['OMP_NUM_THREADS']} before model imports", flush=True)
+    return True
+
 def _path_env(name: str, default: str | Path) -> Path:
     return Path(os.environ.get(name, str(default))).expanduser().resolve()
 
