@@ -177,6 +177,42 @@ class QwenChecks(unittest.TestCase):
         self.assertFalse(backend.model.generate.call_args.kwargs['do_sample'])
         self.assertEqual(backend.processor.batch_decode.call_args.args[0].tolist(), [[3,4]])
 
+    def test_vision_probe_reuses_inputs_checks_switch_and_restores_on_failure(self):
+        from cli.probe_qwen_vision import compare
+        class Model:
+            def __init__(self):
+                self.config = SimpleNamespace(_attn_implementation='sdpa',
+                    vision_config=SimpleNamespace(_attn_implementation='sdpa'),
+                    text_config=SimpleNamespace(_attn_implementation='sdpa'))
+            def set_attn_implementation(self, mode):
+                for config in (self.config, self.config.vision_config, self.config.text_config):
+                    config._attn_implementation = mode
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Model()
+            calls = []
+            image, video = object(), object()
+            def generate(inputs, **kwargs):
+                calls.append((inputs, model.config._attn_implementation))
+                return 'synthetic response, not a visual prediction'
+            backend = SimpleNamespace(model=model, _generate=generate)
+            result = compare(backend, image, video, Path(temporary) / 'success')
+            self.assertEqual(calls, [(image, 'sdpa'), (video, 'sdpa'), (image, 'eager'), (video, 'eager')])
+            self.assertEqual(len(result['queries']), 4)
+            self.assertEqual(result['restored_attention'], result['original_attention'])
+            def failure(inputs, **kwargs):
+                if model.config._attn_implementation == 'eager':
+                    raise RuntimeError('synthetic eager failure')
+                return 'saved baseline'
+            backend._generate = failure
+            output = Path(temporary) / 'failed'
+            with self.assertRaisesRegex(RuntimeError, 'synthetic eager failure'):
+                compare(backend, image, video, output)
+            saved = json.loads((output / 'attention-comparison.json').read_text())
+            self.assertEqual(saved['status'], 'failed')
+            self.assertEqual(saved['queries'][0]['raw_response'], 'saved baseline')
+            self.assertEqual(saved['queries'][-1]['error'], 'synthetic eager failure')
+            self.assertEqual(saved['restored_attention'], saved['original_attention'])
+
     def test_gpu_smoke_refuses_other_jobs_but_ignores_own_context(self):
         from pipeline.identity.qwen_backend import ensure_gpu_idle
         with patch('subprocess.run', return_value=SimpleNamespace(stdout='6835, motip-python\n')):

@@ -51,6 +51,22 @@ def reconstruct_video(pixels, grid, *, patch_size, temporal_patch_size, merge_si
         0, 6, 5, 1, 3, 7, 2, 4, 8).reshape(t * tp, 3, h * p, w * p)
 
 
+def video_rgb_frames(processor, inputs):
+    """Recover full-resolution RGB frames after the processor's resize."""
+    grids = array(inputs["video_grid_thw"]).astype(int).tolist()
+    if len(grids) != 1:
+        raise ValueError("Diagnostic requires exactly one video per model request")
+    vp = processor.video_processor
+    frames = reconstruct_video(inputs["pixel_values_videos"], grids[0],
+        patch_size=vp.patch_size, temporal_patch_size=vp.temporal_patch_size, merge_size=vp.merge_size)
+    values = frames.transpose(0, 2, 3, 1)
+    if vp.do_normalize:
+        values = values * np.asarray(vp.image_std) + np.asarray(vp.image_mean)
+    if vp.do_rescale:
+        values = values / vp.rescale_factor
+    return np.clip(np.rint(values), 0, 255).astype(np.uint8)
+
+
 def save_video_inputs(processor, inputs, output):
     """Save the actual processed frames sent to the model, not a second sampler."""
     from PIL import Image, ImageDraw
@@ -73,12 +89,7 @@ def save_video_inputs(processor, inputs, output):
                                   clean_up_tokenization_spaces=False)[0]
     text = re.sub(r"(?:<\|(?:image|video)_pad\|>)+", "[visual tokens omitted]", text)
     (output / "input-text.txt").write_text(text, encoding="utf-8")
-    values = frames.transpose(0, 2, 3, 1)
-    if vp.do_normalize:
-        values = values * np.asarray(vp.image_std) + np.asarray(vp.image_mean)
-    if vp.do_rescale:
-        values = values / vp.rescale_factor
-    values = np.clip(np.rint(values), 0, 255).astype(np.uint8)
+    values = video_rgb_frames(processor, inputs)
     sheet = Image.new("RGB", (4 * 320, math.ceil(len(values) / 4) * 204), "white")
     draw = ImageDraw.Draw(sheet)
     for index, value in enumerate(values):
