@@ -37,7 +37,6 @@ def main():
             numbers = json.loads((args.run_dir / "bootstrap/numbers.json").read_text())
             if (Path(original["source"]["path"]).resolve() != args.input.resolve()
                     or original["count"] != args.photos or original["seed"] != args.seed
-                    or original["code_sha256"] != bootstrap.sha256_file(Path(bootstrap.__file__))
                     or (original.get("detector") or {}).get("checkpoint_sha256") != bootstrap.sha256_file(settings.motip_checkpoint)
                     or features["metadata"]["checkpoint_sha256"] != bootstrap.sha256_file(settings.kpr_checkpoint)
                     or numbers["signature"]["model"] != model_provenance(settings.qwen_model_dir)):

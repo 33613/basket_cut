@@ -62,7 +62,8 @@ def match_report(match_root):
         "bootstrap": seed, "planned_processing_clips": expected, "selected_processing_clips": len(rows),
         "completed_clips": completed, "failed_clips": failed, "clips": rows,
         "library": {k: library.get(k) for k in ("global_person_count", "bootstrap_photo_count", "event_count",
-            "unmapped_event_count", "held_archive_count", "review_revision")},
+            "unmapped_event_count", "held_archive_count", "review_revision", "candidate_person_count",
+            "memory_status_counts", "gallery_template_count", "memory_policy")},
         "possession_evaluation": evaluation or {"status": "not_annotated", "accuracy_evaluated": False},
         "tracking_identity_action_accuracy": {"status": "not_annotated", "accuracy_evaluated": False},
         "warning": "Workflow counts and successful execution are not detection, identity or action accuracy."}

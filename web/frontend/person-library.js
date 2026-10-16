@@ -1,12 +1,13 @@
 /* Match library browsing is separate from clip-local inspection. */
-const libraryState = {offset: 0, q: '', status: 'all', person: null, event: '', eventOffset: 0,
+const libraryState = {offset: 0, q: '', status: 'active', person: null, event: '', eventOffset: 0,
   eventQuery: '', minScore: 0.2, revision: null, request: 0, eventRequest: 0, personRequest: 0,
   editing: false, available: false, opened: false};
 
 function libraryJersey(jersey, showEvidence = false) {
   if (!jersey) return '';
   const label = jersey.number != null ? `Qwen 号码候选 #${jersey.number}` :
-    jersey.status === 'conflict' ? '号码读数冲突' : '号码未知 / 证据不足';
+    jersey.status === 'conflict' ? '号码读数冲突' :
+    jersey.candidate_numbers?.length === 1 ? `弱证据号码候选 #${jersey.candidate_numbers[0]} · 未确认` : '号码未知 / 证据不足';
   const readings = [...(jersey.readings || []), ...(jersey.tracks || []).flatMap(t => t.readings || [])];
   return `<p class="jersey-badge">${escapeHtml(label)}</p>${showEvidence && readings.length ?
     `<details><summary>读号中间结果（${readings.length} 帧）</summary><div class="number-readings">${readings.map(r =>
@@ -17,6 +18,8 @@ function bindPersonLibrary() {
   $('#openPersonLibraryButton').addEventListener('click', openPersonLibrary);
   $('#closePersonLibrary').addEventListener('click', closePersonLibrary);
   $('#refreshPersonLibrary').addEventListener('click', loadPersonLibrary);
+  $('#reprocessPlayerMemory').addEventListener('click', () => editPersonLibrary('reprocess'));
+  $('#rollbackPlayerMemory').addEventListener('click', () => { if (window.confirm('撤销最近一次图库更新，恢复身份归属和模板？原始轨迹与动作保留。')) editPersonLibrary('rollback_memory'); });
   $('#librarySearch').addEventListener('input', debounce(event => {
     libraryState.q = event.target.value; libraryState.offset = 0; loadPersonLibrary();
   }));
@@ -44,10 +47,11 @@ function bindPersonLibrary() {
 
 function resetPersonLibrary() {
   ++libraryState.request; ++libraryState.eventRequest; ++libraryState.personRequest;
-  Object.assign(libraryState, {offset: 0, q: '', status: 'all', person: null, event: '', eventOffset: 0,
+  Object.assign(libraryState, {offset: 0, q: '', status: 'active', person: null, event: '', eventOffset: 0,
     eventQuery: '', revision: null, available: false, opened: false});
   $('#personLibrarySection').classList.add('hidden'); $('#libraryPersonDetail').classList.add('hidden');
-  $('#librarySearch').value = ''; $('#libraryStatus').value = 'all'; $('#libraryEventSearch').value = '';
+  $('#librarySearch').value = ''; $('#libraryStatus').value = 'active'; $('#libraryEventSearch').value = '';
+  $('#rollbackPlayerMemory').disabled = true;
 }
 
 async function openPersonLibrary() {
@@ -102,16 +106,17 @@ async function loadPersonLibrary() {
     const s = data.summary;
     loadMatchReport();
     const statuses = s.player_status_counts || {};
+    $('#rollbackPlayerMemory').disabled = !s.memory_rollback_available;
     $('#personLibrarySummary').innerHTML = [[s.expected_clips, '已登记片段', `本场比赛：${s.match_id}`],
-      [s.global_person_count, '比赛级身份', `候选 ${statuses.candidate || 0} · 人工确认 ${statuses.manual_grouping || 0} · 非球员 ${statuses.non_player || 0}`],
-      [statuses.needs_review || 0, '待定身份', `图库观察 ${s.gallery_observation_count ?? '未记录'} · 局部档案 ${s.local_archive_count}`],
+      [s.candidate_person_count ?? s.global_person_count, '已建候选 / 确认球员', `候选 ${statuses.candidate || 0} · 人工确认 ${statuses.manual_grouping || 0} · 非球员 ${statuses.non_player || 0}`],
+      [statuses.needs_review || 0, '待定身份', `模板 ${s.gallery_template_count ?? s.gallery_observation_count ?? '未记录'} · 淘汰 ${s.memory_status_counts?.rejected ?? 0} · 重复 ${s.memory_status_counts?.duplicate ?? 0}`],
       [s.event_count, '可检索事件区间', `暂未关联身份 ${s.unmapped_event_count ?? 0}`]].map(([value, label, note]) =>
       `<div class="batch-stat"><strong>${escapeHtml(value)}</strong><span>${label}</span><small>${escapeHtml(note)}</small></div>`).join('');
-    $('#personLibraryWarning').textContent = `本场比赛 ${s.match_id} · 匹配距离 ${s.settings.max_distance ?? '未记录'} · 新身份距离 ${s.settings.novelty_distance ?? '未记录'}。${s.jersey_constraints ? 'KPR 外观与 Qwen 号码证据联合匹配。' : 'KPR 外观匹配。'}图库持续追加合格观察，待定观察暂不进入图库。`;
+    $('#personLibraryWarning').textContent = s.memory_policy ? `本场比赛 ${s.match_id} · 外观严格距离 ${s.memory_policy.strong_distance} · 有一致号码候选时距离 ${s.memory_policy.supported_distance} · 每人最多 ${s.memory_policy.gallery_limit} 个模板。合格待定观察会重新参与分组；候选身份仍需核验。` : `本场比赛 ${s.match_id} · 匹配距离 ${s.settings.max_distance ?? '未记录'} · 新身份距离 ${s.settings.novelty_distance ?? '未记录'}。${s.jersey_constraints ? 'KPR 外观与 Qwen 号码证据联合匹配。' : 'KPR 外观匹配。'}图库持续追加合格观察，待定观察暂不进入图库。`;
     const labels = {candidate: '候选身份', needs_review: '待检查 / 未自动匹配', manual_grouping: '人工确认', non_player: '非球员'};
     $('#personLibraryGrid').innerHTML = data.items.map(p => `<button class="library-card ${libraryState.person === p.global_person_id ? 'selected' : ''}" data-library-person="${escapeHtml(p.global_person_id)}">
       <div class="library-cover">${p.cover?.crop_url ? `<img src="${escapeHtml(p.cover.crop_url)}" alt="候选人物代表图" loading="lazy" />` : '<span>暂无代表图</span>'}<span class="library-status">${labels[p.status] || escapeHtml(p.status)}</span></div>
-      <div class="library-card-copy"><strong>${escapeHtml(p.identity_label || p.global_person_id)}</strong><small>${escapeHtml(p.global_person_id)}</small>${libraryJersey(p.jersey)}<p>${p.clip_count} 个片段 · ${p.bootstrap_photo_count || 0} 张初始化照片 · ${p.event_count} 个事件</p>
+      <div class="library-card-copy"><strong>${escapeHtml(p.identity_label || p.global_person_id)}</strong><small>${escapeHtml(p.global_person_id)}</small>${libraryJersey(p.jersey)}<p>${p.clip_count} 个片段 · ${p.bootstrap_photo_count || 0} 张初始化照片 · 模板 ${p.gallery_template_count ?? 0} · ${p.event_count} 个事件</p>
       <div class="library-preview-row">${p.previews.filter(c => c.crop_url).map(c => `<img src="${escapeHtml(c.crop_url)}" alt="来源外观" loading="lazy" />`).join('')}</div><span class="library-card-link">核查来源 · 查看人物事件 ↗</span></div></button>`).join('') || emptyState('没有符合条件的人物', '清除搜索或切换筛选条件。');
     $$('#personLibraryGrid [data-library-person]').forEach(button => button.addEventListener('click', () => selectLibraryPerson(button.dataset.libraryPerson)));
     pager('personLibraryPagination', data.offset, data.limit, data.total, offset => { libraryState.offset = offset; loadPersonLibrary(); });
@@ -138,9 +143,9 @@ async function selectLibraryPerson(personId) {
       <div class="library-label-editor"><label>球队 / 号码 / 姓名标签<input id="libraryIdentityLabel" maxlength="120" value="${escapeHtml(p.identity_label || '')}" placeholder="如：白队 #23 / 球员姓名" /></label><button class="secondary-button" id="labelLibraryPerson">保存标签 / 合并同标签</button><button class="secondary-button" id="confirmLibraryPerson">确认当前身份分组</button><button class="ghost-button" id="excludeLibraryPerson">标记为非球员</button></div><p class="scope-warning">同标签身份会人工合并并保留 ID 别名；同时出现的不同轨迹不能合并。可拆出错误成员，混人轨迹回到轨迹页检查。</p>
       <div class="library-members">${p.members.map(m => `<article class="library-member">
         ${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="局部档案来源" loading="lazy" />` : ''}
-        <div><strong>${escapeHtml(m.filename)}</strong><small>${m.evidence_kind === 'bootstrap_photo' ? `初始化照片 · 原视频 ${formatTime(m.timestamp_s)}` : `片段 ${escapeHtml(m.clip_id || m.clip_name)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))}`} · ${m.sample_count} 个 KPR 样本</small>${m.source_video_id && m.evidence_kind !== 'bootstrap_photo' ? `<small>原视频 ${escapeHtml(m.source_video_id)} · ${formatTime(m.source_clip_start_s)} → ${formatTime(m.source_clip_end_s)}</small>` : ''}<p class="member-decision">${escapeHtml({matched: '匹配已有球员', new_candidate: '建立新候选身份', pending: '待定观察'}[m.decision] || m.decision || '旧结果未记录匹配决策')} · ${m.gallery_eligible ? '已进入外观图库' : '未进入外观图库'}</p><p>${escapeHtml((m.hold_reasons || []).join(' / ') || '查看来源外观确认身份')}</p>${libraryJersey(m.jersey, true)}
+        <div><strong>${escapeHtml(m.filename)}</strong><small>${m.evidence_kind === 'bootstrap_photo' ? `初始化照片 · 原视频 ${formatTime(m.timestamp_s)}` : `片段 ${escapeHtml(m.clip_id || m.clip_name)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))}`} · ${m.sample_count} 个 KPR 样本</small>${m.source_video_id && m.evidence_kind !== 'bootstrap_photo' ? `<small>原视频 ${escapeHtml(m.source_video_id)} · ${formatTime(m.source_clip_start_s)} → ${formatTime(m.source_clip_end_s)}</small>` : ''}<p class="member-decision">${escapeHtml({matched: '匹配已有球员', new_candidate: '建立新候选身份', pending: '待定观察', memory_matched: '图库候选关联', accepted: '候选关联', rejected: '已淘汰', duplicate: '重复观察'}[m.decision] || m.decision || '旧结果未记录匹配决策')} · ${m.gallery_eligible ? '已进入外观图库' : '未进入外观图库'}</p><p>${escapeHtml((m.hold_reasons || []).join(' / ') || '查看来源外观确认身份')}</p>${libraryJersey(m.jersey, true)}${m.memory ? `<p>质量 ${Number(m.memory.quality || 0).toFixed(3)} · ${escapeHtml({accepted:'候选关联',pending:'待核验',rejected:'已淘汰',duplicate:'重复观察'}[m.memory.status] || m.memory.status)} · 已选模板 ${(m.memory.templates || []).length}</p><div class="library-preview-row">${(m.memory.templates || []).filter(t => t.crop_url).map(t => `<img src="${escapeHtml(t.crop_url)}" alt="当前匹配模板" loading="lazy" />`).join('')}</div>` : ''}
         <div class="library-preview-row">${m.exemplars.filter(s => s.crop_url).map(s => `<img src="${escapeHtml(s.crop_url)}" alt="时序外观证据" loading="lazy" />`).join('')}</div>
-        ${m.web_video_id ? `<button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button>` : ''}<button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '撤销拆出' : '从人物组拆出'}</button></div></article>`).join('')}</div>
+        <button class="ghost-button" data-memory-reject="${escapeHtml(m.node_id)}" data-operation="${m.memory?.manual_rejected ? 'reinstate_observation' : 'reject_observation'}">${m.memory?.manual_rejected ? '重新检查此观察' : '从图库淘汰此观察'}</button>${m.web_video_id ? `<button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button>` : ''}<button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '撤销拆出' : '从人物组拆出'}</button></div></article>`).join('')}</div>
       <details class="library-pair-evidence"><summary>最近匹配证据（${p.pairs.length} 对；距离不是置信度）</summary>${p.pairs.map(pair => `<div class="library-pair"><div>${[pair.left, pair.right].map(m => `<span>${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="匹配来源" loading="lazy" />` : ''}${escapeHtml(m.filename)} / ${escapeHtml(m.local_person_id)}</span>`).join('')}</div><p>距离 ${pair.distance == null ? '无可比部位' : Number(pair.distance).toFixed(3)} · ${pair.same_global_person ? '当前同组' : '当前分开'} · ${escapeHtml(pair.auto_block_reasons.join(' / ') || '满足候选条件')}</p></div>`).join('') || '<p>没有可用匹配对。</p>'}</details>`;
     $('#confirmLibraryPerson').addEventListener('click', () => editPersonLibrary('confirm', {person_id: personId, label: p.identity_label}));
     $('#excludeLibraryPerson').addEventListener('click', () => { if (window.confirm('标记整组为非球员并停止用于自动匹配？')) editPersonLibrary('exclude', {person_id: personId}); });
@@ -157,6 +162,7 @@ async function selectLibraryPerson(personId) {
     detail.querySelectorAll('[data-library-detach]').forEach(button => button.addEventListener('click', () => {
       if (window.confirm('修改这个局部档案的跨片段归组？原轨迹、片段内档案和事件预测不变。')) editPersonLibrary(button.dataset.operation, {node_id: button.dataset.libraryDetach});
     }));
+    detail.querySelectorAll('[data-memory-reject]').forEach(button => button.addEventListener('click', () => editPersonLibrary(button.dataset.operation, {node_id: button.dataset.memoryReject})));
     await loadLibraryEvents(); detail.scrollIntoView({behavior: 'smooth', block: 'start'});
   } catch (error) { if (projectId === state.project?.project_id) toast('人物来源读取失败', error.message, 'error'); }
 }
@@ -210,7 +216,7 @@ async function editPersonLibrary(operation, extra = {}) {
     libraryState.revision = result.revision; libraryState.person = null; libraryState.eventOffset = 0;
     ++libraryState.personRequest; $('#libraryPersonDetail').classList.add('hidden');
     $('#librarySelectedPerson').textContent = '全部人物'; await loadPersonLibrary();
-    toast('人物库已更新', '人工修正独立保存；原始模型输出保持不变。');
+    toast('人物库已更新', '归属与模板已更新；原始轨迹、特征和动作证据保留。');
   } catch (error) { if (projectId === state.project?.project_id) toast('归组未修改', error.message, 'error'); }
   finally {
     libraryState.editing = false; $('#personLibrarySection').classList.remove('library-busy');

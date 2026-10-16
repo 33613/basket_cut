@@ -213,8 +213,16 @@ def register(run, match_id, *, max_distance=.2, novelty_distance=.5, min_margin=
     with (library / ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with PlayerRegistry(library / "players.sqlite3", match_id) as registry:
+            from pipeline.identity.gallery_memory import MemoryPolicy
+            from workflows.gallery_curation import curate_records
+            policy = (MemoryPolicy(**json.loads(registry.meta("memory_policy"))) if registry.meta("memory_policy") else
+                MemoryPolicy(strong_distance=min(.12, max_distance), supported_distance=max_distance,
+                    novelty_distance=novelty_distance, min_margin=min_margin))
+            records = [{"node": n, "features": [vectors[i].tolist() for i in n["feature_indices"]],
+                "visibility": [visibility[i].tolist() for i in n["feature_indices"]]} for n in nodes]
             registry.ingest(nodes, vectors, visibility, [], contract,
-                max_distance=max_distance, novelty_distance=novelty_distance, min_margin=min_margin)
+                max_distance=max_distance, novelty_distance=novelty_distance, min_margin=min_margin,
+                memory_policy=policy, curation=curate_records(root, records))
             signatures = {"bootstrap/" + name: [p.stat().st_size, p.stat().st_mtime_ns]
                 for name in ("photos.json", "features.npz", "feature_contract.json", "numbers.json")
                 for p in [seed / name]}

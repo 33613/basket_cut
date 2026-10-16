@@ -62,6 +62,26 @@ def library_context(settings, store, project_id):
 
 
 def decorate_member(project_id, context, member):
+    member = dict(member)
+    state = member.get("memory")
+    if state:
+        decorated = []
+        for template in state.get("templates", []):
+            item = dict(template)
+            relative = item.get("crop_path")
+            if relative:
+                if item.get("media_kind") == "bootstrap":
+                    path = within_root(context["run"] / "bootstrap" / relative, context["run"] / "bootstrap/media")
+                    item["crop_url"] = f'/api/projects/{project_id}/bootstrap-media/{quote(path.name)}'
+                else:
+                    kind = item.get("media_kind", "identity")
+                    if kind not in {"identity", "identity_raw"}: raise ValueError("Invalid memory media kind")
+                    video = context["videos"][member["clip_name"]]
+                    media_root = Path(video["output_dir"]) / kind
+                    within_root(media_root / relative, media_root)
+                    item["crop_url"] = f'/api/projects/{project_id}/videos/{video["video_id"]}/artifacts/{kind}/' + quote(relative, safe="/")
+            decorated.append(item)
+        member["memory"] = {**state, "templates": decorated}
     if member.get("evidence_kind") == "bootstrap_photo":
         cover = dict(member["cover"])
         photo = within_root(context["run"] / "bootstrap" / cover["crop_path"], context["run"] / "bootstrap/media")
@@ -109,6 +129,8 @@ def library_catalog(settings, store, project_id, *, offset=0, limit=12, q="", st
                          *((person.get("jersey") or {}).get("candidate_numbers", [])),
                          *(member["filename"] for member in person["members"])])
         matches = {"all": person["status"] != "non_player", "candidate": person["status"] == "candidate", "non_player": person["status"] == "non_player", "merged": person["clip_count"] > 1,
+                   "active": person["status"] in {"candidate", "manual_grouping"},
+                   "rejected": all(m.get("memory", {}).get("status") in {"rejected", "duplicate"} for m in person["members"]),
                    "singleton": person["local_archive_count"] == 1,
                    "needs_review": person["status"] == "needs_review",
                    "manual_grouping": person["status"] == "manual_grouping"}
@@ -120,7 +142,7 @@ def library_catalog(settings, store, project_id, *, offset=0, limit=12, q="", st
         rows.append({**{key: value for key, value in person.items() if key != "members"},
                      "cover": decorate_member(project_id, context, cover)["cover"],
                      "previews": [decorate_member(project_id, context, member)["cover"]
-                                  for member in person["members"][:4]]})
+                                  for member in sorted(person["members"], key=lambda m: not m.get("gallery_eligible",False))[:4]]})
     summary = {key: value for key, value in context["manifest"].items()
                if key not in {"source_artifacts", "merges", "feature_contract"}}
     summary["player_status_counts"] = dict(Counter(p["status"] for p in context["people"]))
@@ -205,7 +227,11 @@ def edit_library(settings, store, project_id, operation, *, expected_revision=No
         with (context["base"] / ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             with PlayerRegistry(context["base"] / "players.sqlite3", context["manifest"]["match_id"]) as registry:
+                curation = None
+                if operation == "reprocess" or (not registry.meta("memory_policy") and operation in {"reject_observation", "reinstate_observation"}):
+                    from workflows.gallery_curation import curate_records
+                    curation = curate_records(context["run"], registry.memory_records())
                 revision = registry.review(operation, expected_revision=expected_revision,
-                    person_id=person_id, node_id=node_id, label=label)
+                    person_id=person_id, node_id=node_id, label=label, curation=curation)
                 summary = export_library(registry, context["run"], context["base"])
         return {"revision": revision, "summary": summary}

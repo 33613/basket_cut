@@ -85,6 +85,18 @@ class BootstrapAuditChecks(unittest.TestCase):
         value["match_evidence"]["candidates"][0]["distance"]=.3
         self.assertIn("match_threshold_exceeded",decision_reasons(value))
 
+    def test_audit_uses_current_memory_decisions_instead_of_raw_ingest_payload(self):
+        with PlayerRegistry(self.run/"library/players.sqlite3","synthetic-match") as registry:
+            revision=registry.meta("revision")
+            registry.review('reject_observation',node_id='photo-0-person-0',expected_revision=revision)
+        report,_=audit(self.run,self.root/'memory-audit')
+        self.assertEqual(report['memory_policy']['version'],2)
+        rows=json.loads((self.root/'memory-audit/observations.json').read_text())
+        rejected=next(r for r in rows if r['sample_id']=='photo-0-person-0')
+        self.assertEqual(rejected['decision'],'rejected')
+        self.assertIn('manually_rejected',rejected['blocking_reasons'])
+        self.assertNotIn('novelty_threshold_not_reached',report['pending_gate_counts'])
+
     def test_changed_features_and_overlapping_output_are_rejected(self):
         with self.assertRaises(ValueError): audit(self.run,self.run/"audit")
         (self.seed/"features.npz").write_bytes(b"changed")

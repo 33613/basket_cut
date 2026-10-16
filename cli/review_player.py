@@ -10,7 +10,8 @@ from workflows.person_library import export_library
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run-dir', type=Path, required=True)
-    parser.add_argument('--operation', choices=('confirm', 'label_group', 'exclude', 'detach', 'restore'), required=True)
+    parser.add_argument('--operation', choices=('confirm', 'label_group', 'exclude', 'detach', 'restore',
+        'reprocess', 'rollback_memory', 'reject_observation', 'reinstate_observation'), required=True)
     parser.add_argument('--expected-revision', required=True)
     parser.add_argument('--person-id')
     parser.add_argument('--node-id')
@@ -24,8 +25,12 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         manifest = json.loads((output / 'library_manifest.json').read_text())
         with PlayerRegistry(output / 'players.sqlite3', manifest['match_id']) as registry:
+            curation = None
+            if args.operation == 'reprocess':
+                from workflows.gallery_curation import curate_records
+                curation = curate_records(root, registry.memory_records())
             registry.review(args.operation, expected_revision=args.expected_revision,
-                person_id=args.person_id, node_id=args.node_id, label=args.label)
+                person_id=args.person_id, node_id=args.node_id, label=args.label, curation=curation)
             result = export_library(registry, root, output)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

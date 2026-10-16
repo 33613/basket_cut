@@ -28,7 +28,8 @@ class PersonLibraryOptions:
     clip_names: tuple[str, ...] | None = None
     novelty_distance: float = 0.5
     min_margin: float = 0.05
-    gallery_limit: int = 12
+    gallery_limit: int = 8
+    memory_enabled: bool = True
 
 
 def safe_relative(root: Path, relative: str) -> Path:

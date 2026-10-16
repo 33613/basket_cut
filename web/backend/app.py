@@ -88,7 +88,7 @@ class ReviewSave(BaseModel):
 
 
 class LibraryEdit(BaseModel):
-    operation: Literal["label_group", "confirm", "exclude", "detach", "restore"]
+    operation: Literal["label_group", "confirm", "exclude", "detach", "restore", "reprocess", "rollback_memory", "reject_observation", "reinstate_observation"]
     expected_revision: str | None = None
     person_id: str | None = Field(default=None, max_length=80)
     node_id: str | None = Field(default=None, max_length=80)
@@ -333,7 +333,7 @@ def get_match_report(project_id: str):
 def get_person_library(project_id: str, offset: int = Query(default=0, ge=0),
                        limit: int = Query(default=12, ge=1, le=50),
                        q: str = Query(default="", max_length=120),
-                       status: Literal["all", "candidate", "merged", "singleton", "needs_review", "manual_grouping", "non_player"] = "all"):
+                       status: Literal["all", "active", "rejected", "candidate", "merged", "singleton", "needs_review", "manual_grouping", "non_player"] = "all"):
     try:
         return library_catalog(settings, store, project_id, offset=offset, limit=limit, q=q, status=status)
     except FileNotFoundError as exc:

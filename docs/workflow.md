@@ -139,7 +139,7 @@
   --output-dir runtime/outputs/game-001 --stage initialize
 ```
 
-各模型通过独立子进程顺序执行，释放显存后进入下一个模型。初始化和片段共享 `results/library/players.sqlite3` 与同一 KPR 特征合同。已登记的照片、特征与号码不能改写；参数或模型变化请新建运行目录。`--skip-bootstrap` 可用于不需要照片初始图库的对照。
+各模型通过独立子进程顺序执行，释放显存后进入下一个模型。初始化和片段共享 `results/library/players.sqlite3` 与同一 KPR 特征合同。已登记的照片、特征与号码不能改写；模型、抽帧或证据变化请新建运行目录。图库匹配/模板策略可按后文维护命令显式修订，不重新提取特征。`--skip-bootstrap` 可用于不需要照片初始图库的对照。
 
 ```bash
 .venv/bin/python -u -m cli.process_match --env-file .env \
@@ -151,7 +151,7 @@
 
 ## 初始化图库只读复核
 
-当照片观察很多、实际图库仅有少数样本时，先保留原库并诊断，暂不放宽匹配阈值。初始化当前复用了增量登记规则：待定身份不参与后续匹配；而“可比较距离”还包含被同帧冲突排除的身份，可能阻止新身份建立。这是需要核查的初始化策略问题，不能由此直接判断 KPR 模型效果差。
+当照片观察很多、实际图库仅有少数样本时，先保留原库并诊断，暂不放宽匹配阈值。旧版初始化复用了增量登记规则：待定身份不参与后续匹配；“可比较距离”还包含被同帧冲突排除的身份，可能阻止新身份建立。v2 已改用候选分组和有限模板机制；旧库通过后文维护命令预览/迁移，不能由旧版登记阻塞直接判断 KPR 模型效果差。
 
 ```bash
 .venv/bin/python -m cli.audit_bootstrap \
@@ -161,7 +161,7 @@
 
 只读取现成照片、特征、号码和 SQLite 快照，不调用 GPU、不改原库，使用新诊断目录。输出 `index.html`、`summary.json`、`observations.csv`、`pairs.csv` 和同名 `.tar.gz`；下载压缩包解开后，可直接本地打开 HTML 查看裁剪、跨帧近邻及拒绝原因。包内包含原特征和配置，但不含模型权重或完整视频。
 
-先检查裁剪里是否混入裁判/观众、严重遮挡或过小人物，再检查每张图的跨帧近邻是否外观一致。统计区分匹配距离超限、候选距离差不足、没有无冲突候选、新身份距离门槛未达到，并报告待定样本之间是否存在距离较近但未参与原登记的观察。
+先检查裁剪里是否混入裁判/观众、严重遮挡或过小人物，再检查每张图的跨帧近邻是否外观一致。旧库统计区分匹配距离超限、候选距离差不足、没有无冲突候选、新身份距离门槛未达到；v2 读取当前维护状态和真实拒绝原因，不把原始入库占位状态当成当前决定。两者均报告待定样本之间的近邻。
 
 页面还提供多个阈值下的完整连接分组对照，组内任意两张图均满足距离上限，并禁止同帧不同检测合并。它只生成独立诊断假设，不写入球员库，不将号码读数作为合并依据；组数少不代表准确率高，同帧限制也不能替代人工真值。CPU 验证入口为 `cli.check_bootstrap`。
 
@@ -214,12 +214,48 @@
 
 网页导入 `results/` 后可查看每个片段的来源和 Qwen 边界证据，并在球员动作列表直接下载。长视频切分从 CLI 启动，网页 GPU 队列仍处理单片段；边界修订当前使用上述 JSON 文件。
 
+## 图库初始化、增量复查与撤销
+
+图库 v2 将原始观察、候选身份和实际匹配模板分开。独立照片先做质量/重复/重叠目标筛选，再进行带号码冲突、同帧互斥和组内兼容约束的分组；单张照片保持待定，跨时刻支持或合格多帧轨迹才产生候选。先建立严格外观种子，已有号码共识或明确同队证据才允许有条件地放宽距离；两次单帧同号输出不能独立证明同人。未知号码不会被丢弃。
+
+每人默认最多 8 个模板，按清晰度、尺寸、曝光、已有视角标签和外观差异选择，替换低价值模板，保留来源。片段有 `identity_raw/kpr_samples.npz` 与对应 JSONL 时实际使用逐帧图片特征；旧结果只有轨迹原型时标记 `track_prototype`，不伪装成多视角图片。KPR 权重不进行在线训练。正常增量只暴露当前选定模板，待定样本每次新入库时重新参与候选分组；人工/显式全量复查可重新选择历史观察，处理拆分或错误污染。
+
+原始模型证据不可覆盖。低质量、重复和人工淘汰是匹配库中的逻辑删除：停止作为模板、保留原因和可追溯记录，不自动删除源视频/原始裁剪/NPZ，否则旧检查、回滚与重新取样会失去依据。重叠几何仅筛出可疑多人框，不能自动保证目标纯净或识别所有裁判。默认不强制聚成 10 人，也不把候选组数当准确率。
+
+已有结果先生成独立 CPU 预览，不加载 GPU、不更改原库：
+
+```bash
+.venv/bin/python -m cli.maintain_players \
+  --run-dir runtime/outputs/game-001/results \
+  --operation preview --output-dir runtime/diagnostics/gallery-v2-001
+```
+
+终端打印前后数量；预览目录包含 `memory_report.json`、独立 SQLite/JSON 索引、`index.html` 和缩略图。预览索引引用原始结果，不要作为新的比赛导入。可通过 `--strong-distance`、`--supported-distance`、`--gallery-limit` 做独立对照；默认 `0.12/0.2/8`。缩略图和流程统计不等于身份 precision/recall。
+
+核对后应用到原库，必须使用当前修订号。若 `process_match` 仍持有比赛锁（包括暂停状态），先正常停止该任务；独立预览不需要停止它。
+
+```bash
+CV_RUN=runtime/outputs/game-001/results
+CV_REV=$(.venv/bin/python -c 'import json,sys; from pathlib import Path; print(json.loads((Path(sys.argv[1])/"library/library_manifest.json").read_text())["review_revision"])' "$CV_RUN")
+.venv/bin/python -m cli.maintain_players --run-dir "$CV_RUN" \
+  --operation reprocess --expected-revision "$CV_REV"
+```
+
+应用前保存 `library/backups/<revision>.sqlite3`；状态和模板变更在事务内完成。后续普通入库沿用库内策略；通过维护命令显式更改策略，不会因恢复处理的默认参数覆盖已校准设置。最多 2000 个观察、4096 个工作模板的 CPU 规划预算可防止无界分配，超出时事务失败，保留原库；需要分批核查或显式调整 `MemoryPolicy`，不能静默丢观察。
+
+`--operation rollback_memory --expected-revision <当前修订>` 撤销最近一次可撤销更新；原始观察和事件仍保存，查询按恢复后的身份重新关联。已有后续修订时，旧修订不能覆盖新结果。`--operation reject_observation --node-id <观察ID>` 淘汰误检/混人观察，`reinstate_observation` 解除人工淘汰并重新检查；两者同样要求当前修订号。
+
+前端默认显示已建候选/人工确认球员，待定和淘汰观察单独筛选；提供重新处理、淘汰和撤销操作，详情展示当前实际模板。照片还可以人工标记为非球员。自动候选不是人工确认，待定/淘汰观察的事件保留为未关联，不强挂球员。
+
+实现借鉴 [KPR（ECCV 2024）](https://arxiv.org/abs/2407.18112) 的可见部位匹配、[SpCL（NeurIPS 2020）](https://arxiv.org/abs/2006.02713) 的保守伪标签思路和 [iCaRL（CVPR 2017）](https://arxiv.org/abs/1611.07725) 的有限样本记忆原则。这里的规则是工程实现，没有运行 SpCL/iCaRL 训练或声称复现论文效果；多人目标关键点提示仍需独立的姿态证据和 GPU 对照。
+
 ## 无 GPU 验证
 
 ```bash
 .venv/bin/python -m cli.check_match
 .venv/bin/python -m cli.check_batch
 .venv/bin/python -m cli.check_person_library
+.venv/bin/python -m cli.check_gallery
 .venv/bin/python -m cli.check_qwen
 .venv/bin/python -m cli.check_web
 ```

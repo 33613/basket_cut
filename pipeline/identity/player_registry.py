@@ -6,6 +6,7 @@ never source artifacts. A rejected observation is not a new training class.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 import hashlib
 import json
 import math
@@ -17,13 +18,15 @@ import numpy as np
 
 from pipeline.identity.cross_clip import part_distances
 from contracts.lineage import track_uid
+from pipeline.identity.memory_store import MemoryStore
+from pipeline.identity.gallery_memory import number_hint
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
-class PlayerRegistry:
+class PlayerRegistry(MemoryStore):
     def __init__(self, path: Path, match_id: str):
         if not match_id or len(match_id) > 120:
             raise ValueError("match_id must contain 1–120 characters")
@@ -47,6 +50,10 @@ class PlayerRegistry:
             CREATE TABLE IF NOT EXISTS history(
                 revision TEXT PRIMARY KEY, operation TEXT NOT NULL, payload TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS memory_evidence(id TEXT PRIMARY KEY REFERENCES observations(id), data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS memory_state(id TEXT PRIMARY KEY REFERENCES observations(id), data TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS memory_updates(revision TEXT PRIMARY KEY REFERENCES history(revision),
+                before_state TEXT NOT NULL, operation TEXT NOT NULL);
         """)
         current = self.meta("match_id")
         if current is not None and current != match_id:
@@ -92,7 +99,8 @@ class PlayerRegistry:
         return None
 
     def ingest(self, nodes, features, visibility, events, contract, *, max_distance=.2,
-               novelty_distance=.5, min_margin=.05, min_common_parts=2, gallery_limit=12):
+               novelty_distance=.5, min_margin=.05, min_common_parts=2, gallery_limit=12,
+               memory_policy=None, curation=None):
         if (max_distance is not None and (not math.isfinite(max_distance) or max_distance < 0)):
             raise ValueError("Invalid match distance")
         if (not math.isfinite(novelty_distance) or novelty_distance <= (max_distance or 0)
@@ -103,6 +111,11 @@ class PlayerRegistry:
             if not contract:
                 raise ValueError("KPR feature provenance is required")
         changed = []
+        if memory_policy is None and self.meta("memory_policy"):
+            from pipeline.identity.gallery_memory import MemoryPolicy
+            memory_policy = MemoryPolicy(**json.loads(self.meta("memory_policy")))
+        if memory_policy is not None:
+            memory_policy.validate()
         with self.db:
             if contract:
                 serialized = json.dumps(contract, sort_keys=True)
@@ -130,7 +143,7 @@ class PlayerRegistry:
                     continue
                 candidates, comparable = [], []
                 players = self.db.execute("SELECT * FROM players WHERE alias_of IS NULL AND status NOT IN ('needs_review','non_player') ORDER BY id").fetchall()
-                for player in players:
+                for player in ([] if memory_policy is not None else players):
                     members = self.db.execute("SELECT * FROM observations WHERE player=?", (player["id"],)).fetchall()
                     conflict = any(self._conflict(payload, json.loads(m["payload"])) for m in members)
                     galleries = [m for m in members if m["gallery"] and not m["detached"]]
@@ -152,7 +165,9 @@ class PlayerRegistry:
                 best = candidates[0][0] if candidates else math.inf
                 second = candidates[1][0] if len(candidates) > 1 else math.inf
                 reasons = list(payload.get("hold_reasons", []))
-                if (not reasons and max_distance is not None and best <= max_distance
+                if memory_policy is not None:
+                    pid, decision = self._new_player("needs_review"), "pending"
+                elif (not reasons and max_distance is not None and best <= max_distance
                         and second - best >= min_margin):
                     pid, decision = candidates[0][1], "matched"
                 elif not reasons and (not players or (comparable and min(comparable) >= novelty_distance)):
@@ -185,15 +200,36 @@ class PlayerRegistry:
                     self.db.execute("INSERT INTO events VALUES(?,?,?)", (eid, event["clip_name"], serialized))
                     changed.append(eid)
             if changed:
-                self._record("ingest", {"added": changed})
+                if memory_policy is not None:
+                    before = self._memory_projection()
+                    self._refresh_memory(memory_policy, evidence=curation, incremental=True)
+                    self._save_memory_update(before, "memory_ingest", {"added": changed})
+                else:
+                    self._record("ingest", {"added": changed})
+            elif memory_policy is not None and (
+                    self.meta("memory_policy") != json.dumps(asdict(memory_policy), sort_keys=True)
+                    or any((self.db.execute("SELECT data FROM memory_evidence WHERE id=?", (key,)).fetchone() or [None])[0]
+                           != json.dumps(value, allow_nan=False) for key, value in (curation or {}).items())):
+                before = self._memory_projection()
+                self._refresh_memory(memory_policy, evidence=curation, incremental=True)
+                if before != self._memory_projection():
+                    self._save_memory_update(before, "memory_reprocess")
         return self.snapshot()
 
-    def review(self, operation, *, expected_revision=None, person_id=None, node_id=None, label=None):
+    def review(self, operation, *, expected_revision=None, person_id=None, node_id=None, label=None, curation=None):
         with self.db:
             # Acquire the write lock before checking revision across worker processes.
             self.db.execute("UPDATE metadata SET value=value WHERE key='match_id'")
             if self.meta("revision") != expected_revision:
                 raise RuntimeError("Player library changed; refresh before editing")
+            before = self._memory_projection()
+            if operation == "rollback_memory":
+                return self._rollback_memory()
+            if operation == "reprocess":
+                self._refresh_memory(evidence=curation)
+                if before == self._memory_projection():
+                    return self.meta("revision")
+                return self._save_memory_update(before, "memory_reprocess")
             if operation in {"label_group", "confirm"}:
                 player = self.db.execute("SELECT * FROM players WHERE id=? AND alias_of IS NULL", (person_id,)).fetchone()
                 if not player:
@@ -246,24 +282,44 @@ class PlayerRegistry:
                     if any(self._conflict(json.loads(row["payload"]), json.loads(m[0])) for m in members):
                         raise ValueError("Restoring this observation conflicts with current player evidence")
                     self.db.execute("UPDATE observations SET player=?, detached=0 WHERE id=?", (pid, node_id))
+            elif operation in {"reject_observation", "reinstate_observation"}:
+                row = self.db.execute("SELECT * FROM observations WHERE id=?", (node_id,)).fetchone()
+                if not row:
+                    raise FileNotFoundError("Unknown observation")
+                previous = self.db.execute("SELECT data FROM memory_state WHERE id=?", (node_id,)).fetchone()
+                state = json.loads(previous[0]) if previous else {}
+                state["manual_rejected"] = operation == "reject_observation"
+                self.db.execute("INSERT OR REPLACE INTO memory_state VALUES(?,?)", (node_id, json.dumps(state)))
             else:
                 raise ValueError("Unsupported review operation; persistent identity history cannot be reset")
-            revision = self._record(operation, {"player": person_id, "node": node_id, "label": label})
+            if self.meta("memory_policy") or operation in {"reject_observation", "reinstate_observation"}:
+                self._refresh_memory(evidence=curation)
+                revision = self._save_memory_update(before, operation, {"player": person_id, "node": node_id, "label": label})
+            else:
+                revision = self._record(operation, {"player": person_id, "node": node_id, "label": label})
         return revision
 
     def snapshot(self):
         members, node_people, local_people, track_people = {}, {}, {}, {}
+        memory = {r["id"]: json.loads(r["data"]) for r in self.db.execute("SELECT * FROM memory_state")}
+        memory_managed = bool(self.meta("memory_policy") or self.db.execute("SELECT 1 FROM memory_updates LIMIT 1").fetchone())
         for row in self.db.execute("SELECT * FROM observations ORDER BY clip,id"):
             node = json.loads(row["payload"])
             node.setdefault("clip_id", node["clip_name"])
             node.setdefault("track_uids", [track_uid(node["clip_id"], tid) for tid in node["raw_track_ids"]])
             node["manually_detached"] = bool(row["detached"])
             node["gallery_eligible"] = bool(row["gallery"] and not row["detached"])
+            if row["id"] in memory:
+                state = memory[row["id"]]
+                node["memory"] = state
+                node["decision"] = state["decision"]
+                node["hold_reasons"] = state["reasons"]
             members.setdefault(row["player"], []).append(node)
             node_people[node["node_id"]] = row["player"]
-            local_people[(node["clip_name"], node["local_person_id"])] = row["player"]
+            usable = not memory or (memory.get(row["id"], {}).get("status") == "accepted" and not row["detached"])
+            local_people[(node["clip_name"], node["local_person_id"])] = row["player"] if usable else None
             for tid in node["raw_track_ids"]:
-                track_people[(node["clip_name"], tid)] = row["player"]
+                track_people[(node["clip_name"], tid)] = row["player"] if usable else None
         events = []
         for row in self.db.execute("SELECT * FROM events ORDER BY clip,id"):
             event = json.loads(row["payload"])
@@ -272,6 +328,10 @@ class PlayerRegistry:
             pid = next(iter(owners)) if len(owners) == 1 and None not in owners else None
             if not event.get("raw_track_ids"):
                 pid = local_people.get((row["clip"], event.get("local_person_id")))
+            if pid and memory_managed:
+                status = self.db.execute("SELECT status FROM players WHERE id=?", (pid,)).fetchone()[0]
+                if status not in {"candidate", "manual_grouping"}:
+                    pid = None
             events.append({**event, "event_id": row["id"], "source_event_id": event["event_id"],
                            "clip_id": event.get("clip_id", row["clip"]),
                            "track_uids": event.get("track_uids", [track_uid(event.get("clip_id", row["clip"]), t) for t in tids]),
@@ -283,11 +343,13 @@ class PlayerRegistry:
             group = members.get(player["id"], [])
             if not group:
                 continue
-            cover = max(group, key=lambda n: float(n.get("cover", {}).get("archive_quality_score", 0)))
+            cover = max(group, key=lambda n: (n["gallery_eligible"],
+                n.get("memory", {}).get("quality", float(n.get("cover", {}).get("archive_quality_score", 0)))))
             own_events = [e for e in events if e["global_person_id"] == player["id"]]
             numbers = {n["jersey"]["number"] for n in group if (n.get("jersey") or {}).get("number") is not None}
+            hints = {number_hint(n) for n in group} - {None}
             jersey = {"number": next(iter(numbers)) if len(numbers) == 1 else None,
-                      "candidate_numbers": sorted(numbers), "status": "candidate_consensus" if len(numbers) == 1 else "conflict" if numbers else "unreadable"}
+                      "candidate_numbers": sorted(numbers | hints), "status": "candidate_consensus" if len(numbers) == 1 else "conflict" if len(numbers | hints) > 1 else "weak_candidate" if hints else "unreadable"}
             counts = {}
             for e in own_events:
                 counts[e["event"]] = counts.get(e["event"], 0) + 1
@@ -299,6 +361,7 @@ class PlayerRegistry:
                 "local_archive_count": len(group),
                 "manual_member_count": len(group) if player["status"] == "manual_grouping" else 0,
                 "event_count": len(own_events), "event_types": counts, "jersey": jersey})
+            people[-1]["gallery_template_count"] = sum(len(n.get("memory", {}).get("templates", [])) for n in group)
             for node in group:
                 mappings.append({"global_person_id": player["id"], "player_id": player["id"],
                     "match_id": self.meta("match_id"), **{k: node[k] for k in
@@ -318,4 +381,6 @@ class PlayerRegistry:
             else:
                 raise ValueError("Corrupt player alias cycle")
         return {"people": people, "mappings": mappings, "events": events, "aliases": aliases, "revision": self.meta("revision"),
-                "match_id": self.meta("match_id"), "feature_contract": self.meta("feature_contract")}
+                "match_id": self.meta("match_id"), "feature_contract": self.meta("feature_contract"),
+                "memory_policy": json.loads(self.meta("memory_policy")) if self.meta("memory_policy") else None,
+                "memory_rollback_available": bool(self.db.execute("SELECT 1 FROM memory_updates WHERE revision=?", (self.meta("revision"),)).fetchone())}

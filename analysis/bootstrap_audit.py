@@ -55,6 +55,8 @@ def quantiles(values):
 
 
 def decision_reasons(payload):
+    if "memory" in payload:
+        return list(payload["memory"].get("reasons", []))
     if payload.get("decision") != "pending":
         return []
     evidence = payload.get("match_evidence", {})
@@ -120,6 +122,8 @@ def audit(run_dir, output_dir, *, neighbors=5):
         records={r["id"]:dict(r) for r in connection.execute("SELECT * FROM observations")}
         players={r["id"]:dict(r) for r in connection.execute("SELECT * FROM players")}
         history=[dict(r) for r in connection.execute("SELECT * FROM history ORDER BY created_at,rowid")]
+        memory = ({r["id"]:json.loads(r["data"]) for r in connection.execute("SELECT * FROM memory_state")}
+                  if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_state'").fetchone() else {})
     absent=[s["sample_id"] for s in samples if s["sample_id"] not in records]
     if absent:
         raise ValueError("Some bootstrap observations are not registered; finish initialization first")
@@ -131,6 +135,9 @@ def audit(run_dir, output_dir, *, neighbors=5):
     for i,sample in enumerate(samples):
         record=records[sample["sample_id"]]
         payload=json.loads(record["payload"])
+        state = memory.get(sample["sample_id"])
+        if state:
+            payload.update(memory=state,decision=state["decision"],hold_reasons=state["reasons"])
         evidence=payload.get("match_evidence",{})
         ranked=[int(j) for j in np.argsort(cross[i],kind="stable") if np.isfinite(cross[i,j])][:neighbors]
         nearest.append(ranked)
@@ -142,6 +149,9 @@ def audit(run_dir, output_dir, *, neighbors=5):
             "timestamp_s":sample["timestamp_s"],"player_id":record["player"],
             "player_status":players[record["player"]]["status"],"decision":payload.get("decision"),
             "gallery_eligible":bool(record["gallery"] and not record["detached"]),
+            "memory_status":state.get("status") if state else None,
+            "memory_quality":state.get("quality") if state else None,
+            "gallery_template_count":len(state.get("templates",[])) if state else None,
             "box_width":sample["bbox_xyxy"][2]-sample["bbox_xyxy"][0],
             "box_height":sample["bbox_xyxy"][3]-sample["bbox_xyxy"][1],
             "det_score":sample["det_score"],"sharpness":sample["sharpness"],
@@ -165,6 +175,7 @@ def audit(run_dir, output_dir, *, neighbors=5):
         for i,r in enumerate(rows))
     report={"status":"completed_not_accuracy_evaluated","accuracy_evaluated":False,
         "match_id":metadata.get("match_id"),"registry_revision":metadata.get("revision"),
+        "memory_policy":json.loads(metadata["memory_policy"]) if metadata.get("memory_policy") else None,
         "source":photos["protocol"]["source"],"feature_contract":contract["metadata"],
         "photo_count":len(photos["frames"]),"crop_count":len(samples),
         "empty_photo_count":sum(not any(s["frame_id"]==f["frame_id"] for s in samples) for f in photos["frames"]),
@@ -195,7 +206,7 @@ def audit(run_dir, output_dir, *, neighbors=5):
     atomic_json(output/"summary.json",report)
     atomic_json(output/"observations.json",rows)
     atomic_json(output/"group-hypotheses.json",{"accuracy_evaluated":False,"groups":hypotheses})
-    atomic_json(output/"registry-evidence.json",{"metadata":metadata,"history":history,
+    atomic_json(output/"registry-evidence.json",{"metadata":metadata,"history":history,"memory_state":memory,
         "observations":[{**records[s["sample_id"]],"payload":json.loads(records[s["sample_id"]]["payload"])} for s in samples]})
     np.savez_compressed(output/"distances.npz",distances=matrix)
     csv_file(output/"observations.csv",rows,list(rows[0]) if rows else ["sample_id"])

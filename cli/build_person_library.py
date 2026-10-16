@@ -17,7 +17,7 @@ def main():
     parser.add_argument('--min-samples', type=int, default=2)
     parser.add_argument('--max-within-distance', type=float, default=.4)
     parser.add_argument('--min-common-parts', type=int, default=2)
-    parser.add_argument('--gallery-limit', type=int, default=12)
+    parser.add_argument('--gallery-limit', type=int, default=8)
     parser.add_argument('--use-jersey-evidence', action='store_true')
     parser.add_argument('--registration-output', type=Path)
     args = vars(parser.parse_args())

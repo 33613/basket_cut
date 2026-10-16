@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import shutil
 import fcntl
+import numpy as np
 
 from contracts.schema import write_json, write_jsonl_line
 from pipeline.identity.player_registry import PlayerRegistry
@@ -20,6 +21,8 @@ def export_library(registry, root, output, *, signatures=None, options=None, cli
     previous = json.loads(previous_path.read_text()) if previous_path.is_file() else {}
     sources = dict(previous.get("source_artifacts", {}))
     sources.update(signatures or {})
+    for row in registry.db.execute("SELECT data FROM memory_evidence"):
+        sources.update(json.loads(row[0]).get("source_stamps", {}))
     snapshot = registry.snapshot()
     people, events = snapshot["people"], snapshot["events"]
     names = sorted(set(previous.get("batch_clip_names", [])) | set(clips or []) |
@@ -36,6 +39,11 @@ def export_library(registry, root, output, *, signatures=None, options=None, cli
         "held_archive_count": sum(bool(m["hold_reasons"]) or m["manually_detached"] for p in people for m in p["members"]),
         "event_count": len(events), "unmapped_event_count": sum(e["global_person_id"] is None for e in events),
         "event_types": event_types, "review_revision": snapshot["revision"],
+        "memory_policy": snapshot["memory_policy"], "memory_rollback_available": snapshot["memory_rollback_available"],
+        "gallery_template_count": sum(p.get("gallery_template_count", 0) for p in people),
+        "memory_status_counts": {status: sum(m.get("memory", {}).get("status") == status for p in people for m in p["members"])
+            for status in ("accepted", "pending", "rejected", "duplicate")},
+        "candidate_person_count": sum(p["status"] in {"candidate", "manual_grouping"} for p in people),
         "input_fingerprint": snapshot["revision"], "feature_contract": snapshot["feature_contract"],
         "index_dir": "indexes/" + (snapshot["revision"] or "empty") + "-v3",
         "source_artifacts": sources, "player_aliases": snapshot["aliases"], "settings": options or previous.get("settings", {}),
@@ -87,10 +95,22 @@ def build_person_library(options: PersonLibraryOptions):
     with (requested / ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with PlayerRegistry(requested / "players.sqlite3", match_id) as registry:
+            policy, curation = None, None
+            if options.memory_enabled:
+                from pipeline.identity.gallery_memory import MemoryPolicy
+                from workflows.gallery_curation import curate_records
+                if options.max_distance is None:
+                    raise ValueError("Memory policy requires an explicit supported matching distance")
+                policy = MemoryPolicy(**json.loads(registry.meta("memory_policy"))) if registry.meta("memory_policy") else MemoryPolicy(strong_distance=min(.12, options.max_distance), supported_distance=options.max_distance,
+                    novelty_distance=options.novelty_distance, min_margin=options.min_margin,
+                    min_common_parts=options.min_common_parts, gallery_limit=options.gallery_limit)
+                records = [{"node": n, "features": [np.asarray(features[i]).tolist() for i in n["feature_indices"]],
+                    "visibility": [np.asarray(visible[i]).tolist() for i in n["feature_indices"]]} for n in nodes]
+                curation = curate_records(root, records)
             registry.ingest(nodes, features, visible, events, contract,
                 max_distance=options.max_distance, novelty_distance=options.novelty_distance,
                 min_margin=options.min_margin, min_common_parts=options.min_common_parts,
-                gallery_limit=options.gallery_limit)
+                gallery_limit=options.gallery_limit, memory_policy=policy, curation=curation)
             return export_library(registry, root, requested, signatures=signatures,
                                   options=settings, clips=clips, warnings=warnings)
 

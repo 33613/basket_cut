@@ -701,7 +701,7 @@ class MatchChecks(unittest.TestCase):
             updated = registry.ingest([node], np.array([[[1, 0], [1, 0]]]), np.ones((1,2)), [], json.loads(snap["feature_contract"]))
             person = next(p for p in updated["people"] if p["player_id"] == old)
             self.assertEqual(person["clip_count"], 1)
-            self.assertEqual(next(n for n in person["members"] if n["node_id"] == "actual-track")["decision"], "matched")
+            self.assertEqual(next(n for n in person["members"] if n["node_id"] == "actual-track")["decision"], "memory_matched")
         image = run / "bootstrap" / photos["samples"][0]["crop_path"]
         image.write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "evidence changed"):

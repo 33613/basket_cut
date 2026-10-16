@@ -179,7 +179,9 @@ class PersonLibraryChecks(unittest.TestCase):
 
     def test_ambiguous_second_candidate_margin_abstains(self):
         run = make_library_fixture(self.root / 'ambiguous', angles=(0, .1, .05))
-        opts = PersonLibraryOptions(run, max_distance=.02, novelty_distance=.04, min_margin=.03)
+        # Legacy compatibility: old databases used a single distance gate.
+        # V2 rival-group abstention has independent regression coverage.
+        opts = PersonLibraryOptions(run, max_distance=.02, novelty_distance=.04, min_margin=.03, memory_enabled=False)
         build_person_library(replace(opts, clip_names=('clip1',)))
         build_person_library(replace(opts, clip_names=('clip2',)))
         build_person_library(replace(opts, clip_names=('clip3',), max_distance=.2, novelty_distance=.5))
@@ -213,7 +215,10 @@ class PersonLibraryChecks(unittest.TestCase):
         self.assertEqual(result['global_person_count'], 3)
         with PlayerRegistry(run / 'library/players.sqlite3', 'synthetic-match') as registry:
             second = next(p for p in registry.snapshot()['people'] if p['members'][0]['clip_name'] == 'clip2')
-            self.assertEqual(second['status'], 'needs_review')
+            # Independent multi-frame support plus an incompatible number may
+            # seed a separate candidate without the old distance >= .5 gate.
+            self.assertEqual(second['status'], 'candidate')
+            self.assertEqual(len(second['members']), 1)
 
     def test_incremental_qwen_model_changes_refused(self):
         for name in ('clip1', 'clip2'):
@@ -305,6 +310,36 @@ class PersonLibraryChecks(unittest.TestCase):
             self.assertEqual(exclusion.status_code, 200, exclusion.text)
             self.assertEqual(client.get(base + '?status=non_player').json()['total'], 1)
             self.assertEqual(client.get(base).json()['total'], 2)
+
+    def test_http_memory_retirement_reprocessing_and_rollback(self):
+        from fastapi.testclient import TestClient
+        from web.backend import app as module
+        from web.backend.store import ProjectStore
+        from web.backend.settings import WebSettings
+        from web.backend.imports import import_results
+        build_person_library(self.options)
+        settings=replace(WebSettings(),data_root=self.root/'web-data',output_root=self.root/'web-output',
+            source_root=self.root/'data',import_root=self.root/'outputs')
+        store=ProjectStore(settings.data_root,settings.output_root)
+        project=import_results(settings,store,self.run)
+        with patch.object(module,'settings',settings),patch.object(module,'store',store),TestClient(module.app) as client:
+            base=f'/api/projects/{project["project_id"]}/person-library'
+            original=client.get(base+'?status=active').json()
+            person=next(p for p in original['items'] if p['clip_count']==2)
+            detail=client.get(base+'/people/'+person['player_id']).json()
+            node=detail['members'][0]['node_id']
+            request={'operation':'reject_observation','node_id':node,'expected_revision':original['revision']}
+            retired=client.post(base+'/review',json=request)
+            self.assertEqual(retired.status_code,200,retired.text)
+            self.assertEqual(client.post(base+'/review',json=request).status_code,409)
+            discarded=client.get(base+'?status=rejected').json()
+            self.assertGreaterEqual(discarded['total'],1)
+            undo=client.post(base+'/review',json={'operation':'rollback_memory','expected_revision':retired.json()['revision']})
+            self.assertEqual(undo.status_code,200,undo.text)
+            self.assertEqual(client.get(base+'?status=rejected').json()['total'],0)
+            revision=undo.json()['revision']
+            processed=client.post(base+'/review',json={'operation':'reprocess','expected_revision':revision})
+            self.assertEqual(processed.status_code,200,processed.text)
 
 
 def main():
