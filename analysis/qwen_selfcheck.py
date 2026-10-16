@@ -178,7 +178,17 @@ class QwenChecks(unittest.TestCase):
         self.assertEqual(backend.processor.batch_decode.call_args.args[0].tolist(), [[3,4]])
 
     def test_vision_probe_reuses_inputs_checks_switch_and_restores_on_failure(self):
-        from cli.probe_qwen_vision import compare
+        from cli.probe_qwen_vision import compare, set_video_budget
+        from pipeline.identity.qwen_backend import VIDEO_BUDGET
+        processor = SimpleNamespace(video_processor=SimpleNamespace(size=dict(VIDEO_BUDGET),
+            patch_size=16, merge_size=2, temporal_patch_size=2))
+        self.assertEqual(set_video_budget(processor, None), VIDEO_BUDGET)
+        self.assertEqual(set_video_budget(processor, 8192), VIDEO_BUDGET)
+        self.assertEqual(processor.video_processor.size, {
+            'shortest_edge': VIDEO_BUDGET['shortest_edge'], 'longest_edge': 16777216})
+        self.assertEqual(VIDEO_BUDGET['longest_edge'], 4194304)
+        for invalid in (128, 8193, True):
+            with self.assertRaises(ValueError): set_video_budget(processor, invalid)
         class Model:
             def __init__(self):
                 self.config = SimpleNamespace(_attn_implementation='sdpa',
@@ -199,6 +209,12 @@ class QwenChecks(unittest.TestCase):
             self.assertEqual(calls, [(image, 'sdpa'), (video, 'sdpa'), (image, 'eager'), (video, 'eager')])
             self.assertEqual(len(result['queries']), 4)
             self.assertEqual(result['restored_attention'], result['original_attention'])
+            calls.clear()
+            result = compare(backend, image, video, Path(temporary) / 'sdpa-only', modes=('sdpa',))
+            self.assertEqual(calls, [(image, 'sdpa'), (video, 'sdpa')])
+            self.assertEqual(result['requested_attention_modes'], ['sdpa'])
+            with self.assertRaisesRegex(ValueError, 'distinct attention modes'):
+                compare(backend, image, video, Path(temporary) / 'invalid', modes=('sdpa', 'sdpa'))
             def failure(inputs, **kwargs):
                 if model.config._attn_implementation == 'eager':
                     raise RuntimeError('synthetic eager failure')

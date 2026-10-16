@@ -25,18 +25,37 @@ def attention_state(model):
         ("text", model.config.text_config))}
 
 
-def compare(backend, image_inputs, video_inputs, output):
+def set_video_budget(processor, tokens):
+    vp = processor.video_processor
+    original = dict(vp.size)
+    if tokens is None:
+        return original
+    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 256 <= tokens <= 8192:
+        raise ValueError("Video token cap must be an integer between 256 and 8192")
+    # Qwen3 compresses merge_size**2 spatial patches and temporal_patch_size frames.
+    pixels_per_token = (vp.patch_size * vp.merge_size) ** 2 * vp.temporal_patch_size
+    budget = {**original, "longest_edge": tokens * pixels_per_token}
+    if budget["longest_edge"] < budget["shortest_edge"]:
+        raise ValueError("Requested video budget is below the processor's minimum")
+    vp.size = budget
+    return original
+
+
+def compare(backend, image_inputs, video_inputs, output, *, modes=("sdpa", "eager")):
     """Reuse the exact prepared tensors within each modality across attention modes."""
     output = Path(output)
+    if not modes or len(set(modes)) != len(modes) or any(mode not in {"sdpa", "eager"} for mode in modes):
+        raise ValueError("Use distinct attention modes selected from sdpa and eager")
     before = attention_state(backend.model)
     if set(before.values()) != {"sdpa"}:
         raise ValueError(f"Expected the original all-SDPA configuration, got {before}")
     result = {"status": "running", "accuracy_evaluated": False, "prompt": PROBE_PROMPT,
-              "max_new_tokens": 384, "original_attention": before, "queries": []}
+              "max_new_tokens": 384, "original_attention": before,
+              "requested_attention_modes": list(modes), "queries": []}
     path = output / "attention-comparison.json"
     atomic_json(path, result)
     try:
-        for mode in ("sdpa", "eager"):
+        for mode in modes:
             backend.model.set_attn_implementation(mode)
             actual = attention_state(backend.model)
             if set(actual.values()) != {mode}:
@@ -79,7 +98,15 @@ def main():
                         help="Actual sampled frame index, not seconds (default 8 of 16)")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--attention-modes", nargs="+", choices=("sdpa", "eager"),
+                        default=["sdpa", "eager"])
+    parser.add_argument("--video-tokens", type=int,
+                        help="Diagnostic total visual-token cap (256–8192); keeps frame count fixed")
     args = parser.parse_args()
+    if len(set(args.attention_modes)) != len(args.attention_modes):
+        parser.error("--attention-modes must not contain duplicates")
+    if args.video_tokens is not None and not 256 <= args.video_tokens <= 8192:
+        parser.error("--video-tokens must be between 256 and 8192")
     if args.window_id != Path(args.window_id).name:
         parser.error("--window-id must be a directory name")
     original = args.diagnostic_dir.resolve()
@@ -105,10 +132,11 @@ def main():
     normalize_omp_threads()
     from pipeline.identity.qwen_backend import QwenBackend, ensure_gpu_idle
     ensure_gpu_idle()
-    print("Loading local Qwen for four image/video and attention comparisons", flush=True)
+    print(f"Loading local Qwen for {2 * len(args.attention_modes)} image/video comparisons", flush=True)
     backend = QwenBackend(settings.qwen_model_dir)
     if backend.provenance != diagnostic["model"]:
         raise ValueError("Probe model differs from the audited model")
+    original_budget = set_video_budget(backend.processor, args.video_tokens)
     output.mkdir(parents=True, exist_ok=True)
     messages = [{"role": "user", "content": [
         {"type": "video", "video": str(video)}, {"type": "text", "text": PROBE_PROMPT}]}]
@@ -135,9 +163,13 @@ def main():
         "window_id": args.window_id, "source_range_s": [window["start_s"], window["end_s"]],
         "sampled_frame_index": args.frame_index, "window_sha256": sha256_file(video),
         "model": backend.provenance, "packages": packages, "video_input": summary,
-        "image_grid_thw": image_grid, "prompt": PROBE_PROMPT})
+        "image_grid_thw": image_grid, "prompt": PROBE_PROMPT,
+        "original_video_budget": original_budget,
+        "effective_video_budget": dict(backend.processor.video_processor.size),
+        "requested_video_tokens": args.video_tokens,
+        "attention_modes": args.attention_modes})
     print("Input prepared: " + json.dumps(summary), flush=True)
-    compare(backend, image_inputs, inputs, output)
+    compare(backend, image_inputs, inputs, output, modes=args.attention_modes)
     print(f"Probe saved: {output}", flush=True)
 
 
