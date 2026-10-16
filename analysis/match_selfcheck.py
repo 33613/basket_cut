@@ -237,6 +237,12 @@ class MatchChecks(unittest.TestCase):
             "after_evidence": "opponent has visible control", "reason": "synthetic transition"}
         result = parse_review(json.dumps(value), 8, [2, 6])
         self.assertTrue(result["needs_human_review"])
+        self.assertEqual(result["localization_status"], "model_narrowed_unverified")
+        unchanged = parse_review(json.dumps(value | {"time_range_s": [2, 6]}), 8, [2, 6])
+        self.assertEqual(unchanged["decision"], "confirmed")
+        self.assertEqual(unchanged["localization_status"], "unchanged_candidate_range")
+        self.assertFalse(unchanged["range_narrowed"])
+        self.assertTrue(unchanged["needs_human_review"])
         for change in ({"after_team": "dark"}, {"before_team": "unknown"},
                        {"time_range_s": [1, 3]}, {"time_range_s": [3, 7]},
                        {"time_range_s": [3, 3]}, {"time_range_s": [True, 4]},

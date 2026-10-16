@@ -58,12 +58,19 @@ def parse_review(raw, duration, candidate):
         if not 0 <= candidate[0] <= low < high <= candidate[1] <= duration:
             raise ValueError("Confirmed interval must stay within the proposed candidate")
         result["time_range_s"] = [low, high]
+        result["candidate_width_s"] = candidate[1] - candidate[0]
+        result["model_interval_width_s"] = high - low
+        result["range_narrowed"] = (high - low) < result["candidate_width_s"] - 1e-6
+        result["localization_status"] = (
+            "model_narrowed_unverified" if result["range_narrowed"] else "unchanged_candidate_range")
     else:
         if bounds is not None:
             raise ValueError("Rejected or uncertain reviews must have null time_range_s")
         if decision == "rejected" and (before != after or before == "unknown"):
             raise ValueError("Rejected review needs the same known team before and after")
         result["time_range_s"] = None
+        result["localization_status"] = "not_confirmed"
+        result["range_narrowed"] = False
     # Model confirmation is never a human-verified boundary or permission to cut.
     return {**result, "needs_human_review": True, "accuracy_evaluated": False}
 
