@@ -7,7 +7,7 @@ function libraryJersey(jersey, showEvidence = false) {
   if (!jersey) return '';
   const label = jersey.number != null ? `Qwen 号码候选 #${jersey.number}` :
     jersey.status === 'conflict' ? '号码读数冲突' : '号码未知 / 证据不足';
-  const readings = (jersey.tracks || []).flatMap(t => t.readings || []);
+  const readings = [...(jersey.readings || []), ...(jersey.tracks || []).flatMap(t => t.readings || [])];
   return `<p class="jersey-badge">${escapeHtml(label)}</p>${showEvidence && readings.length ?
     `<details><summary>读号中间结果（${readings.length} 帧）</summary><div class="number-readings">${readings.map(r =>
       `<span>${r.crop_url ? `<a href="${escapeHtml(r.crop_url)}" target="_blank" rel="noopener"><img src="${escapeHtml(r.crop_url)}" alt="Qwen 躯干裁剪" loading="lazy" /></a>` : ''}<small>${formatTime(r.timestamp_s)} · 帧 ${escapeHtml(r.frame_idx)} · ${r.text == null ? '不可读' : '#' + escapeHtml(r.text)}<br />质量 ${r.sampling_quality == null ? '未记录' : Number(r.sampling_quality).toFixed(3)}<br />${escapeHtml((r.rejection_reasons || []).join(' / ') || '候选支持帧')}</small><details><summary>原始回答</summary><pre>${escapeHtml(r.raw_response || '未记录')}</pre></details></span>`).join('')}</div></details>` : ''}`;
@@ -57,13 +57,29 @@ async function openPersonLibrary() {
   $('#uploadSection').classList.add('hidden');
   $('#personLibrarySection').scrollIntoView({behavior: 'smooth', block: 'start'});
   await loadPersonLibrary();
+  await loadMatchReport();
 }
 
-function closePersonLibrary() {
+async function loadMatchReport() {
+  const projectId = state.project?.project_id;
+  if (!projectId) return;
+  try {
+    const r = await api(`/api/projects/${projectId}/match-report`);
+    if (projectId !== state.project?.project_id) return;
+    const s = r.segmentation, l = r.library, e = r.possession_evaluation;
+    const metric = (label, value) => `<p><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? '未记录')}</strong></p>`;
+    $('#matchEvaluationSidebar').innerHTML = `<h3>流程统计</h3>${metric('回合候选', s.coarse_candidates)}${metric('已导出片段', s.exported_clips)}${metric('待复核边界', s.unresolved_boundaries)}${metric('完成处理', `${r.completed_clips}/${r.planned_processing_clips}`)}${metric('失败片段', r.failed_clips)}${metric('初始化照片 / 人物裁剪', `${r.bootstrap.photo_count ?? 0} / ${r.bootstrap.crop_count ?? 0}`)}${metric('比赛候选身份', l.global_person_count)}${metric('待定观察', l.held_archive_count)}${metric('未关联事件', l.unmapped_event_count)}<h3>回合切分评估</h3>${e.accuracy_evaluated ? e.ranges.map(m => `<section><strong>${escapeHtml(m.name)} · ${m.stage === 'coarse' ? '粗看候选' : '实际切点'}</strong>${metric('TP / FP / FN', `${m.TP} / ${m.FP} / ${m.FN}`)}${metric('Precision', m.precision == null ? '无预测' : (100*m.precision).toFixed(1)+'%')}${metric('Recall', m.recall == null ? '无参考回合' : (100*m.recall).toFixed(1)+'%')}${metric('FP / 分钟', m.FP_per_minute?.toFixed(2))}${metric('匹配误差 MAE（秒）', m.matched_midpoint_mae_s?.toFixed(2))}</section>`).join('') : '<p>待补齐人工边界标注，尚不能计算切分准确率。</p>'}<p class="scope-warning">人物数量、成功运行和事件数量都是流程统计。当前视频没有跟踪、身份和动作真值，相关准确率未评估。</p><details><summary>各片段阶段耗时</summary>${r.clips.map(c => `<section><strong>${escapeHtml(c.clip_id)}</strong>${Object.entries(c.stage_metrics || {}).map(([name,m]) => metric(name, `${m.elapsed_s ?? '未知'} 秒${m.reused ? '（缓存）' : ''}`)).join('')}</section>`).join('')}</details>`;
+  } catch (error) {
+    if (projectId === state.project?.project_id) $('#matchEvaluationSidebar').textContent = `统计暂不可用：${error.message}`;
+  }
+}
+
+async function closePersonLibrary() {
   libraryState.opened = false;
   $('#personLibrarySection').classList.add('hidden');
   $('#workspace').classList.toggle('hidden', !state.project?.videos.length);
   $('#uploadSection').classList.toggle('hidden', Boolean(state.project?.read_only));
+  if (!state.videoId && state.project?.videos.length) await selectVideo(state.project.videos[0].video_id, false);
 }
 
 async function loadPersonLibrary() {
@@ -84,6 +100,7 @@ async function loadPersonLibrary() {
       libraryState.offset = Math.floor((data.total - 1) / 12) * 12; return loadPersonLibrary();
     }
     const s = data.summary;
+    loadMatchReport();
     const statuses = s.player_status_counts || {};
     $('#personLibrarySummary').innerHTML = [[s.expected_clips, '已登记片段', `本场比赛：${s.match_id}`],
       [s.global_person_count, '比赛级身份', `候选 ${statuses.candidate || 0} · 人工确认 ${statuses.manual_grouping || 0} · 非球员 ${statuses.non_player || 0}`],
@@ -94,7 +111,7 @@ async function loadPersonLibrary() {
     const labels = {candidate: '候选身份', needs_review: '待检查 / 未自动匹配', manual_grouping: '人工确认', non_player: '非球员'};
     $('#personLibraryGrid').innerHTML = data.items.map(p => `<button class="library-card ${libraryState.person === p.global_person_id ? 'selected' : ''}" data-library-person="${escapeHtml(p.global_person_id)}">
       <div class="library-cover">${p.cover?.crop_url ? `<img src="${escapeHtml(p.cover.crop_url)}" alt="候选人物代表图" loading="lazy" />` : '<span>暂无代表图</span>'}<span class="library-status">${labels[p.status] || escapeHtml(p.status)}</span></div>
-      <div class="library-card-copy"><strong>${escapeHtml(p.identity_label || p.global_person_id)}</strong><small>${escapeHtml(p.global_person_id)}</small>${libraryJersey(p.jersey)}<p>${p.clip_count} 个片段 · ${p.local_archive_count} 个局部档案 · ${p.event_count} 个事件</p>
+      <div class="library-card-copy"><strong>${escapeHtml(p.identity_label || p.global_person_id)}</strong><small>${escapeHtml(p.global_person_id)}</small>${libraryJersey(p.jersey)}<p>${p.clip_count} 个片段 · ${p.bootstrap_photo_count || 0} 张初始化照片 · ${p.event_count} 个事件</p>
       <div class="library-preview-row">${p.previews.filter(c => c.crop_url).map(c => `<img src="${escapeHtml(c.crop_url)}" alt="来源外观" loading="lazy" />`).join('')}</div><span class="library-card-link">核查来源 · 查看人物事件 ↗</span></div></button>`).join('') || emptyState('没有符合条件的人物', '清除搜索或切换筛选条件。');
     $$('#personLibraryGrid [data-library-person]').forEach(button => button.addEventListener('click', () => selectLibraryPerson(button.dataset.libraryPerson)));
     pager('personLibraryPagination', data.offset, data.limit, data.total, offset => { libraryState.offset = offset; loadPersonLibrary(); });
@@ -121,9 +138,9 @@ async function selectLibraryPerson(personId) {
       <div class="library-label-editor"><label>球队 / 号码 / 姓名标签<input id="libraryIdentityLabel" maxlength="120" value="${escapeHtml(p.identity_label || '')}" placeholder="如：白队 #23 / 球员姓名" /></label><button class="secondary-button" id="labelLibraryPerson">保存标签 / 合并同标签</button><button class="secondary-button" id="confirmLibraryPerson">确认当前身份分组</button><button class="ghost-button" id="excludeLibraryPerson">标记为非球员</button></div><p class="scope-warning">同标签身份会人工合并并保留 ID 别名；同时出现的不同轨迹不能合并。可拆出错误成员，混人轨迹回到轨迹页检查。</p>
       <div class="library-members">${p.members.map(m => `<article class="library-member">
         ${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="局部档案来源" loading="lazy" />` : ''}
-        <div><strong>${escapeHtml(m.filename)}</strong><small>片段 ${escapeHtml(m.clip_id || m.clip_name)} · ${escapeHtml(m.local_person_id)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))} · ${m.sample_count} 个 KPR 样本</small>${m.source_video_id ? `<small>原视频 ${escapeHtml(m.source_video_id)} · ${formatTime(m.source_clip_start_s)} → ${formatTime(m.source_clip_end_s)}</small>` : ''}<p class="member-decision">${escapeHtml({matched: '匹配已有球员', new_candidate: '建立新候选身份', pending: '待定观察'}[m.decision] || m.decision || '旧结果未记录匹配决策')} · ${m.gallery_eligible ? '已进入外观图库' : '未进入外观图库'}</p><p>${escapeHtml((m.hold_reasons || []).join(' / ') || '查看原轨迹与时序外观确认身份')}</p>${libraryJersey(m.jersey, true)}
+        <div><strong>${escapeHtml(m.filename)}</strong><small>${m.evidence_kind === 'bootstrap_photo' ? `初始化照片 · 原视频 ${formatTime(m.timestamp_s)}` : `片段 ${escapeHtml(m.clip_id || m.clip_name)} · 原轨迹 ${escapeHtml(m.raw_track_ids.join(', '))}`} · ${m.sample_count} 个 KPR 样本</small>${m.source_video_id && m.evidence_kind !== 'bootstrap_photo' ? `<small>原视频 ${escapeHtml(m.source_video_id)} · ${formatTime(m.source_clip_start_s)} → ${formatTime(m.source_clip_end_s)}</small>` : ''}<p class="member-decision">${escapeHtml({matched: '匹配已有球员', new_candidate: '建立新候选身份', pending: '待定观察'}[m.decision] || m.decision || '旧结果未记录匹配决策')} · ${m.gallery_eligible ? '已进入外观图库' : '未进入外观图库'}</p><p>${escapeHtml((m.hold_reasons || []).join(' / ') || '查看来源外观确认身份')}</p>${libraryJersey(m.jersey, true)}
         <div class="library-preview-row">${m.exemplars.filter(s => s.crop_url).map(s => `<img src="${escapeHtml(s.crop_url)}" alt="时序外观证据" loading="lazy" />`).join('')}</div>
-        <button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button><button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '撤销拆出' : '从人物组拆出'}</button></div></article>`).join('')}</div>
+        ${m.web_video_id ? `<button class="ghost-button" data-library-open="${escapeHtml(m.node_id)}">检查原片段 ↗</button>` : ''}<button class="ghost-button" data-library-detach="${escapeHtml(m.node_id)}" data-operation="${m.manually_detached ? 'restore' : 'detach'}">${m.manually_detached ? '撤销拆出' : '从人物组拆出'}</button></div></article>`).join('')}</div>
       <details class="library-pair-evidence"><summary>最近匹配证据（${p.pairs.length} 对；距离不是置信度）</summary>${p.pairs.map(pair => `<div class="library-pair"><div>${[pair.left, pair.right].map(m => `<span>${m.cover.crop_url ? `<img src="${escapeHtml(m.cover.crop_url)}" alt="匹配来源" loading="lazy" />` : ''}${escapeHtml(m.filename)} / ${escapeHtml(m.local_person_id)}</span>`).join('')}</div><p>距离 ${pair.distance == null ? '无可比部位' : Number(pair.distance).toFixed(3)} · ${pair.same_global_person ? '当前同组' : '当前分开'} · ${escapeHtml(pair.auto_block_reasons.join(' / ') || '满足候选条件')}</p></div>`).join('') || '<p>没有可用匹配对。</p>'}</details>`;
     $('#confirmLibraryPerson').addEventListener('click', () => editPersonLibrary('confirm', {person_id: personId, label: p.identity_label}));
     $('#excludeLibraryPerson').addEventListener('click', () => { if (window.confirm('标记整组为非球员并停止用于自动匹配？')) editPersonLibrary('exclude', {person_id: personId}); });

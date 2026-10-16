@@ -42,8 +42,17 @@ def library_context(settings, store, project_id):
     review = {"revision": baseline.get("review_revision")}
     review_path, revised, stale = None, None, False
     videos = {Path(video["output_dir"]).name: video for video in project["videos"]}
+    photos, samples = None, {}
+    if any(m.get("evidence_kind") == "bootstrap_photo" for p in people for m in p["members"]):
+        photos = json.loads(within_root(run / "bootstrap/photos.json", run).read_text())
+        samples = {r["sample_id"]: r for r in photos["samples"]}
     for person in people:
         for member in person["members"]:
+            if member.get("evidence_kind") == "bootstrap_photo":
+                if (member["node_id"] not in samples or member.get("source_sha256") != photos["protocol"]["source"]["sha256"]
+                        or member["cover"]["crop_path"] != samples[member["node_id"]]["crop_path"]):
+                    raise ValueError("Invalid bootstrap photo provenance")
+                continue
             video = videos.get(member["clip_name"])
             if not video or Path(video["output_dir"]).resolve() != (run / member["clip_name"]).resolve():
                 raise ValueError("Person library references a clip outside this imported project")
@@ -53,6 +62,17 @@ def library_context(settings, store, project_id):
 
 
 def decorate_member(project_id, context, member):
+    if member.get("evidence_kind") == "bootstrap_photo":
+        cover = dict(member["cover"])
+        photo = within_root(context["run"] / "bootstrap" / cover["crop_path"], context["run"] / "bootstrap/media")
+        cover["crop_url"] = f'/api/projects/{project_id}/bootstrap-media/{quote(photo.name)}'
+        jersey = dict(member.get("jersey") or {})
+        readings = []
+        for reading in jersey.get("readings", []):
+            image = within_root(context["run"] / "bootstrap" / reading["crop_path"], context["run"] / "bootstrap/media")
+            readings.append({**reading, "crop_url": f'/api/projects/{project_id}/bootstrap-media/{quote(image.name)}'})
+        return {**member, "cover": cover, "jersey": {**jersey, "readings": readings},
+                "web_video_id": None, "exemplars": []}
     video = context["videos"][member["clip_name"]]
     def media(sample, kind="identity"):
         result = dict(sample)

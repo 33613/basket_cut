@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from contracts.schema import write_json
@@ -171,6 +172,7 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
             previous = {}  # A damaged status cannot authorize reuse of outputs.
         status = {"name": entry["name"], "input": entry["input"],
                   "fingerprint": entry["fingerprint"], "status": "running", "stages": {},
+                  "stage_metrics": {},
                   "stage_fingerprints": entry["stage_fingerprints"]}
         try:
             for stage, command in entry["commands"].items():
@@ -178,6 +180,7 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
                         and previous.get("stage_fingerprints", {}).get(stage) == entry["stage_fingerprints"][stage]
                         and builder.artifact_exists(stage, paths)):
                     status["stages"][stage] = "completed"
+                    status["stage_metrics"][stage] = {**previous.get("stage_metrics", {}).get(stage, {}), "reused": True}
                     continue
                 if shutil.disk_usage(output).free < float(options.get('min_free_gb', 2)) * 1024**3:
                     raise RuntimeError('Disk reserve reached; free or expand storage before resuming. Existing artifacts were preserved.')
@@ -187,11 +190,13 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
                     continue
                 status["stages"][stage] = "running"
                 write_json(status_path, status)
+                started = time.monotonic()
                 print(f"[{entry['name']}] {stage}", flush=True)
                 with paths["log"].open("a", encoding="utf-8") as log:
                     log.write(f"\n$ {shlex.join(command)}\n"); log.flush()
                     code = (execute(command, paths) if execute else subprocess.run(
                         command, cwd=settings.repository_root, stdout=log, stderr=subprocess.STDOUT).returncode)
+                status["stage_metrics"][stage] = {"elapsed_s": round(time.monotonic()-started, 3), "reused": False, "exit_code": code}
                 if code:
                     status["stages"][stage] = "failed"
                     raise RuntimeError(f"{stage} exited {code}; see pipeline.log")

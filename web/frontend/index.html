@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>CourtVision · 比赛片段与球员库</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=match-workflow-1" />
+    <link rel="stylesheet" href="/assets/styles.css?v=match-gallery-2" />
   </head>
   <body>
     <div class="ambient ambient-one"></div>
@@ -60,11 +60,13 @@
         <section class="panel person-library-section hidden" id="personLibrarySection" aria-label="比赛级人物库与事件检索">
           <div class="panel-title library-header"><div><span class="eyebrow">MATCH PLAYER LIBRARY</span><h2>比赛球员库</h2><p>稳定球员 ID · KPR 外观图库增量更新 · Qwen 号码辅助匹配</p></div><div class="library-entry-actions"><button class="ghost-button" id="refreshPersonLibrary">刷新球员库</button><button class="secondary-button" id="closePersonLibrary">返回片段检查 →</button></div></div>
           <div id="personLibrarySummary" class="batch-progress"></div>
+          <div class="library-display-layout"><div class="library-display-main">
           <p class="scope-warning" id="personLibraryWarning">本场比赛内保持身份。球员候选、待定观察与人工确认分别保存。</p>
           <div class="queue-controls"><label class="search-field">球员搜索<input id="librarySearch" type="search" maxlength="120" placeholder="球员 ID / 号码 / 球队或姓名标签 / 片段名" /></label><label>身份状态<select id="libraryStatus"><option value="all">全部球员身份</option><option value="candidate">候选身份</option><option value="needs_review">待定 / 证据不足</option><option value="manual_grouping">人工确认</option><option value="merged">跨片段身份</option><option value="singleton">单份轨迹档案</option><option value="non_player">非球员</option></select></label></div>
           <div id="personLibraryGrid" class="person-library-grid"></div><div class="pagination" id="personLibraryPagination"></div>
           <section id="libraryPersonDetail" class="library-person-detail hidden"></section>
           <section class="library-event-section"><div class="panel-title"><div><span class="eyebrow">PERSON × EVENT → SOURCE CLIP</span><h3>人物事件检索</h3></div><button class="ghost-button" id="libraryAllPeople">查看全部人物事件</button></div><div class="queue-controls"><span id="librarySelectedPerson" class="scope-badge">全部人物</span><label>事件类型<select id="libraryEventType"><option value="">全部事件</option></select></label><label>最低原始分数<input id="libraryMinScore" type="number" min="0" max="1" step="0.05" value="0.2" /></label><label class="search-field">片段搜索<input id="libraryEventSearch" type="search" maxlength="120" placeholder="来源片段文件名" /></label></div><div id="libraryEvents"></div><div class="pagination" id="libraryEventsPagination"></div></section>
+          </div><aside id="matchEvaluationSidebar" class="match-evaluation-sidebar" aria-label="流程统计与回合评估">等待流程统计…</aside></div>
         </section>
         <section class="upload-section panel" id="uploadSection">
           <div class="section-copy">
@@ -229,8 +231,8 @@
     </div>
 
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
-    <script src="/assets/workflow.js?v=match-workflow-1" defer></script>
-    <script src="/assets/person-library.js?v=match-workflow-1" defer></script>
-    <script src="/assets/app.js?v=match-workflow-1" defer></script>
+    <script src="/assets/workflow.js?v=match-gallery-2" defer></script>
+    <script src="/assets/person-library.js?v=match-gallery-2" defer></script>
+    <script src="/assets/app.js?v=match-gallery-2" defer></script>
   </body>
 </html>

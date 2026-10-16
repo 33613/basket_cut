@@ -300,6 +300,35 @@ def get_materials(project_id: str, offset: int = Query(default=0, ge=0),
         raise not_found(exc) from exc
 
 
+@app.get("/api/projects/{project_id}/bootstrap-media/{filename}")
+def bootstrap_media(project_id: str, filename: str):
+    try:
+        from web.backend.person_library import library_context
+        context = library_context(settings, store, project_id)
+        if context is None or Path(filename).name != filename or not filename.endswith(".png"):
+            raise FileNotFoundError("Unknown bootstrap photo")
+        base = within_root(context["run"] / "bootstrap/media", context["run"])
+        return FileResponse(safe_child(base, filename))
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/match-report")
+def get_match_report(project_id: str):
+    from workflows.match_report import match_report
+    try:
+        project = store.get_project(project_id)
+        root = (within_root(Path(project["imported_from"]), settings.import_root) if project.get("imported_from")
+                else within_root(store.output_root / safe_slug(project_id) / "videos", store.output_root))
+        return match_report(root)
+    except FileNotFoundError as exc:
+        raise not_found(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/projects/{project_id}/person-library")
 def get_person_library(project_id: str, offset: int = Query(default=0, ge=0),
                        limit: int = Query(default=12, ge=1, le=50),

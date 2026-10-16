@@ -14,6 +14,20 @@ PROMPT = ('Read only the jersey number worn by the central person. Do not infer 
           '{"number": "0-99 or 00, or null", "readable": true_or_false}.')
 
 
+def set_video_budget(processor, tokens):
+    vp = processor.video_processor
+    original = dict(vp.size)
+    if tokens is None:
+        return original
+    if type(tokens) is not int or not 256 <= tokens <= 8192:
+        raise ValueError("Video token cap must be an integer between 256 and 8192")
+    budget = {**original, "longest_edge": tokens * (vp.patch_size * vp.merge_size)**2 * vp.temporal_patch_size}
+    if budget["longest_edge"] < budget["shortest_edge"]:
+        raise ValueError("Requested video budget is below processor minimum")
+    vp.size = budget
+    return original
+
+
 def model_provenance(model_dir):
     root = Path(model_dir).resolve()
     if not (root / "config.json").is_file():

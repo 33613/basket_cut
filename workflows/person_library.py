@@ -23,7 +23,7 @@ def export_library(registry, root, output, *, signatures=None, options=None, cli
     snapshot = registry.snapshot()
     people, events = snapshot["people"], snapshot["events"]
     names = sorted(set(previous.get("batch_clip_names", [])) | set(clips or []) |
-                   {m["clip_name"] for p in people for m in p["members"]} |
+                   {m["clip_name"] for p in people for m in p["members"] if m.get("evidence_kind") != "bootstrap_photo"} |
                    {e["clip_name"] for e in events})
     event_types = {}
     for event in events:
@@ -31,7 +31,8 @@ def export_library(registry, root, output, *, signatures=None, options=None, cli
     manifest = {"schema_version": 3, "scope": "match_incremental", "match_id": snapshot["match_id"],
         "expected_clips": len(names), "batch_clip_names": names, "batch_target": "full",
         "global_person_count": len(people), "local_archive_count": len(snapshot["mappings"]),
-        "merged_group_count": sum(p["local_archive_count"] > 1 for p in people),
+        "bootstrap_photo_count": sum(m.get("evidence_kind") == "bootstrap_photo" for p in people for m in p["members"]),
+        "merged_group_count": sum(p["clip_count"] > 1 for p in people),
         "held_archive_count": sum(bool(m["hold_reasons"]) or m["manually_detached"] for p in people for m in p["members"]),
         "event_count": len(events), "unmapped_event_count": sum(e["global_person_id"] is None for e in events),
         "event_types": event_types, "review_revision": snapshot["revision"],

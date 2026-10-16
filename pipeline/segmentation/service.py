@@ -36,8 +36,14 @@ class SegmentOptions:
     min_clip_s: float = .5
     min_free_gb: float = 2
     context: str = "5v5 basketball; team identities unknown"
+    coarse_method: str = "boundaries"
+    video_tokens: int = 2048
 
     def validate(self):
+        if self.coarse_method not in {"boundaries", "states"}:
+            raise ValueError("Unknown coarse method")
+        if type(self.video_tokens) is not int or not 256 <= self.video_tokens <= 8192:
+            raise ValueError("Video token budget must be 256–8192")
         for name in ("window_s", "review_radius_s", "min_clip_s"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -192,6 +198,10 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
                 "options": asdict(options), "model": backend.provenance,
                 "rules_sha256": digest(RULES), "service_sha256": sha256_file(Path(__file__)),
                 "prompts_sha256": sha256_file(Path(__file__).with_name("prompts.py"))}
+    if options.coarse_method == "states":
+        from pipeline.segmentation import possession
+        protocol["possession_sha256"] = sha256_file(Path(possession.__file__))
+        protocol["boundary_convention"] = possession.BOUNDARY_CONVENTION
     signature = digest(protocol)
     protocol_path = output / "protocol.json"
     if protocol_path.is_file() and json.loads(protocol_path.read_text()) != protocol:
@@ -253,18 +263,44 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
         finally:
             window.unlink(missing_ok=True)
 
+    processor = getattr(backend, "processor", None)
+    original_budget = None
+    if processor is not None:
+        from pipeline.identity.qwen_backend import set_video_budget
+        original_budget = set_video_budget(processor, options.video_tokens)
+    elif options.video_tokens != 2048:
+        raise ValueError("Changing video budget requires a processor")
     try:
-        proposals = []
+        proposals, observations = [], []
         windows = plan_windows(meta["duration_s"], options)
         state["coarse_total"] = len(windows)
         for index, window in enumerate(windows):
             start, end = window["start_s"], window["end_s"]
             key = f"coarse-{index:06d}"
-            rows = query(key, start, end, coarse_prompt(end - start, options.context), options.coarse_frames, parse_coarse)
+            if options.coarse_method == "states":
+                observation = query(key, start, end, possession.state_prompt(end-start, options.context),
+                    options.coarse_frames, possession.parse_states)
+                rows = observation["candidates"]
+                observations.extend({**r, "source_observation_s": start + r["observation_s"],
+                    "window_id": key} for r in observation["states"])
+            else:
+                rows = query(key, start, end, coarse_prompt(end - start, options.context), options.coarse_frames, parse_coarse)
             proposals.extend({**row, "window_id": key,
                 "time_range_s": [start + t for t in row["time_range_s"]]} for row in rows)
             state["coarse_completed"] += 1
             atomic_json(state_path, state)
+        if observations:
+            previous = None
+            for row in sorted(observations, key=lambda r: r["source_observation_s"]):
+                if row["attacking_team"] == "unknown":
+                    continue
+                if (previous and row["attacking_team"] != previous["attacking_team"]
+                        and previous["window_id"] != row["window_id"]
+                        and row["source_observation_s"] > previous["source_observation_s"]):
+                    proposals.append({"time_range_s": [previous["source_observation_s"], row["source_observation_s"]],
+                        "kind": "possession_change", "needs_review": True, "window_id": row["window_id"],
+                        "evidence": "cross-window state change; requires independent review"})
+                previous = row
         groups = merge_candidates(proposals, options.merge_tolerance_s)
         reviews = []
         state["review_total"] = len(groups)
@@ -272,13 +308,24 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
             low, high = candidate["time_range_s"]
             # Keep each GPU request bounded even when coarse uncertainty is broad.
             center = (low + high) / 2
-            start, end = max(0, center - options.review_radius_s), min(meta["duration_s"], center + options.review_radius_s)
+            if options.coarse_method == "states":
+                # Full candidate plus context; never truncate a broad interval to its midpoint.
+                start, end = max(0, low - 2), min(meta["duration_s"], high + 2)
+            else:
+                start, end = max(0, center - options.review_radius_s), min(meta["duration_s"], center + options.review_radius_s)
             local = {"time_range_s": [max(0, low - start), min(end - start, high - start)],
                      "kind": candidate["kind"], "evidence": [s["evidence"] for s in candidate["support"]]}
             key = f"review-{index:06d}"
-            row = query(key, start, end, boundary_prompt(end - start, local, options.context), options.review_frames, parse_boundary)
+            review_prompt = possession.boundary_prompt if options.coarse_method == "states" else boundary_prompt
+            # Do not prime the reviewer with the coarse model's guessed explanation.
+            review_input = {"time_range_s": local["time_range_s"]} if options.coarse_method == "states" else local
+            if end - start > 40:
+                row = {"confirmed": True, "boundary_s": None, "kind": "uncertain",
+                    "needs_review": True, "evidence": "candidate exceeds bounded 40s review; manual review required"}
+            else:
+                row = query(key, start, end, review_prompt(end - start, review_input, options.context), options.review_frames, parse_boundary)
             point = start + row["boundary_s"] if row["boundary_s"] is not None else None
-            if high - low > 2 * options.review_radius_s:
+            if options.coarse_method != "states" and high - low > 2 * options.review_radius_s:
                 row["needs_review"] = True
             # A local review must verify the proposed region, not another nearby event.
             if point is not None and not low - options.merge_tolerance_s <= point <= high + options.merge_tolerance_s:
@@ -292,6 +339,8 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
                   "source": protocol["source"], "windows": windows, "boundaries": reviews, "segments": segments,
                   "unresolved": unresolved, "needs_review": bool(unresolved),
                   "time_scope": meta["time_scope"], "boundary_accuracy_evaluated": False}
+        result["coarse_candidates"] = groups
+        result["boundary_convention"] = protocol.get("boundary_convention", "opponent_control_legacy")
         atomic_json(output / "segmentation.json", result)
         state["status"] = "completed_not_accuracy_evaluated"
         atomic_json(state_path, state)
@@ -299,6 +348,9 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
     except Exception as exc:
         atomic_json(state_path, {**state, "status": "failed", "error": str(exc)})
         raise
+    finally:
+        if processor is not None:
+            processor.video_processor.size = original_budget
 
 
 def export_segments(output, *, review_file=None, ffmpeg="ffmpeg", ffprobe="ffprobe", min_free_gb=2):

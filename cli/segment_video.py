@@ -10,6 +10,8 @@ from pipeline.segmentation.service import SegmentOptions, analyze_video, export_
 
 
 def add_options(parser):
+    parser.add_argument("--coarse-method", choices=("boundaries", "states"), default="boundaries")
+    parser.add_argument("--video-tokens", type=int, default=2048)
     parser.add_argument("--window-s", type=float, default=20)
     parser.add_argument("--overlap-s", type=float, default=6)
     parser.add_argument("--review-radius-s", type=float, default=4)

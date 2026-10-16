@@ -320,7 +320,7 @@ async function selectProject(projectId, preserveVideo = false) {
       : '';
     const videos = state.project.videos || [];
     $("#workspace").classList.toggle("hidden", videos.length === 0);
-    if (videos.length) {
+    if (videos.length && (!readOnly || preserveVideo)) {
       const selected = videos.some((item) => item.video_id === previousVideo)
         ? previousVideo
         : state.queue?.items?.[0]?.video_id || videos[0].video_id;
@@ -329,6 +329,7 @@ async function selectProject(projectId, preserveVideo = false) {
       state.videoId = null;
       state.detail = null;
     }
+    if (readOnly && !preserveVideo) await openPersonLibrary();
   } catch (error) {
     toast("加载比赛失败", error.message, "error");
   }

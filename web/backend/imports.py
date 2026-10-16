@@ -163,9 +163,14 @@ def import_results(
             }
         )
     if not videos:
-        raise ValueError(
-            "No tracking/video_meta.json found. Select a run directory or one clip directory."
-        )
+        library = load_json(within_root(root / "library/library_manifest.json", root))
+        photos = load_json(within_root(root / "bootstrap/photos.json", root))
+        if (not library or library.get("scope") != "match_incremental" or not photos
+                or photos.get("status") != "completed" or not (root / "bootstrap/registration.json").is_file()):
+            raise ValueError("No tracking results or registered bootstrap photo gallery found")
+        source_media_path(photos["protocol"]["source"]["path"], settings)
+        expected_count = 0 if batch is None else expected_count
+        import_warnings.append("Photo gallery initialized; no tracking clips are browseable yet")
     manifest = {
         "schema_version": 1,
         "project_id": project_id,

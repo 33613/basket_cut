@@ -663,6 +663,191 @@ class MatchChecks(unittest.TestCase):
                 segment_main()
             model.assert_not_called(); gpu.assert_not_called()
 
+    def test_photo_bootstrap_preserves_ids_and_never_merges_same_frame_people(self):
+        from workflows import bootstrap
+        run = self.root / "match/results"
+        class Detector:
+            resets = 0
+            def create_tracker(s, **kwargs):
+                s.resets += 1
+                return object()
+            def infer_frame(s, tracker, frame):
+                return [{"bbox_xyxy": box, "det_score": .95} for box in ([0, 0, 44, 64], [48, 0, 92, 64])]
+        detector = Detector()
+        photos = bootstrap.prepare(self.source, run, detector, count=2)
+        self.assertEqual(detector.resets, 2)
+        self.assertEqual(len(photos["samples"]), 4)
+        def extract(samples, **kwargs):
+            self.assertTrue(all(row["image"].shape == (64,44,3) for row in samples))
+            return np.array([[[1, 0], [1, 0]], [[0, 1], [0, 1]]]*2, dtype=np.float32), np.ones((4, 2))
+        kpr = SimpleNamespace(extract=extract, cfg=SimpleNamespace(model=SimpleNamespace(kpr=SimpleNamespace(test_embeddings=["synthetic"])) ))
+        checkpoint = self.root / "checkpoint"; checkpoint.write_bytes(b"synthetic-only")
+        bootstrap.extract_features(run, kpr, checkpoint)
+        qwen = SimpleNamespace(provenance={"model": "synthetic"}, read=lambda image: '{"number":"23","readable":true}')
+        bootstrap.read_numbers(run, qwen)
+        first = bootstrap.register(run, "photo-match")
+        self.assertEqual(first["global_person_count"], 2)
+        self.assertEqual(first["expected_clips"], 0)
+        self.assertEqual(first["bootstrap_photo_count"], 4)
+        again = bootstrap.register(run, "photo-match")
+        self.assertEqual(first["review_revision"], again["review_revision"])
+        with PlayerRegistry(run / "library/players.sqlite3", "photo-match") as registry:
+            snap = registry.snapshot()
+            self.assertTrue(all(p["clip_count"] == 0 and p["jersey"]["number"] is None for p in snap["people"]))
+            old = next(p for p in snap["people"] if p["members"][0]["node_id"].endswith("D000"))["player_id"]
+            node = {"node_id": "actual-track", "clip_name": "CL-actual", "video_id": "CL-actual",
+                "local_person_id": "P0000", "raw_track_ids": [0], "intervals": [[0, 2]],
+                "hold_reasons": [], "feature_indices": [0], "cover": {}, "sample_count": 4}
+            updated = registry.ingest([node], np.array([[[1, 0], [1, 0]]]), np.ones((1,2)), [], json.loads(snap["feature_contract"]))
+            person = next(p for p in updated["people"] if p["player_id"] == old)
+            self.assertEqual(person["clip_count"], 1)
+            self.assertEqual(next(n for n in person["members"] if n["node_id"] == "actual-track")["decision"], "matched")
+        image = run / "bootstrap" / photos["samples"][0]["crop_path"]
+        image.write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "evidence changed"):
+            bootstrap.prepare(self.source, run, detector, count=2)
+
+    def test_possession_evaluation_requires_complete_ground_truth_and_one_to_one_matches(self):
+        from analysis.possession_evaluation import annotation_template, evaluate, match_boundaries
+        from pipeline.segmentation.possession import BOUNDARY_CONVENTION
+        source = {"sha256": "synthetic-source", "duration_s": 900}
+        annotations = annotation_template(source)
+        plan = {"source": source, "protocol_sha256": "synthetic-protocol", "boundary_convention": BOUNDARY_CONVENTION,
+            "coarse_candidates": [{"kind": "possession_change", "time_range_s": [8,12]},
+                                  {"kind": "possession_change", "time_range_s": [9,11]},
+                                  {"kind": "possession_change", "time_range_s": [40,60]}],
+            "segments": [{"start_s": 0}, {"start_s": 11, "start_boundary_kind": "possession_change"}]}
+        self.assertFalse(evaluate(plan, annotations)["accuracy_evaluated"])
+        annotations["human_verified"] = True
+        self.assertFalse(evaluate(plan, annotations)["accuracy_evaluated"])
+        annotations["ranges"][0].update(complete=True, boundaries_s=[10, 50])
+        result = evaluate(plan, annotations)
+        self.assertEqual([(r["TP"],r["FP"],r["FN"]) for r in result["ranges"]], [(1,2,1),(1,0,1)])
+        self.assertEqual(result["ranges"][1]["matched_midpoint_mae_s"], 1)
+        self.assertEqual({r["name"] for r in result["ranges"]}, {"development"})
+        matches = match_boundaries([[9,10], [10,10]], [10, 12], 2)
+        self.assertEqual(matches["TP"], 2)
+        annotations["source_sha256"] = "changed-source"
+        with self.assertRaises(ValueError): evaluate(plan, annotations)
+
+    def test_production_states_ignore_dead_ball_holders_and_cover_full_review_range(self):
+        from pipeline.segmentation.possession import parse_states
+        states = [{"id":i, "phase":"live_play", "attacking_team":"dark", "evidence":"synthetic control"} for i in range(4)]
+        states[1].update(phase="dead_ball", attacking_team="light")
+        checked = parse_states(json.dumps({"states": states}), 20)
+        self.assertEqual(checked["states"][1]["attacking_team"], "unknown")
+        self.assertEqual(checked["candidates"], [])
+        states[3].update(phase="inbound_preparation", attacking_team="light")
+        self.assertEqual(parse_states(json.dumps({"states":states}),20)["candidates"][0]["time_range_s"], [10,20])
+        processor = SimpleNamespace(video_processor=SimpleNamespace(size={"shortest_edge":262144,"longest_edge":4194304}, patch_size=16, merge_size=2, temporal_patch_size=2))
+        count = 0
+        def read(path, prompt, **kwargs):
+            nonlocal count
+            self.assertEqual(processor.video_processor.size["longest_edge"],16777216)
+            if "记录四个" in prompt:
+                first = count == 0; count += 1
+                return json.dumps({"states":[{"id":i, "phase":"live_play", "attacking_team":"dark" if first and i<2 else "light", "evidence":"synthetic control"} for i in range(4)]})
+            self.assertIn("发球",prompt)
+            self.assertGreaterEqual(probe_video(path)["duration_s"], 4)
+            return '{"confirmed":true,"boundary_s":2,"kind":"possession_change","evidence":"synthetic inbound preparation","needs_review":false}'
+        backend = SimpleNamespace(provenance={"model":"synthetic"}, processor=processor, read_video=read)
+        options = replace(self.options, coarse_method="states", video_tokens=8192)
+        plan = analyze_video(self.source,self.output,backend,options=options)
+        self.assertEqual(len(plan["segments"]),2)
+        self.assertEqual(plan["segments"][1]["start_s"],2)
+        self.assertFalse(plan["boundary_accuracy_evaluated"])
+        self.assertEqual(processor.video_processor.size["longest_edge"],4194304)
+        from analysis.segmentation_diagnostic import diagnostic_plan, diagnose
+        protocol, windows = diagnostic_plan(self.output,0,1)
+        diagnostic = diagnose(self.output,self.root/"production-state-diagnostic",windows,protocol,backend,
+            capture_inputs=False,query_types=("boundary",))
+        self.assertNotIn("parse_error",diagnostic["results"][0]["queries"]["boundary"])
+        self.assertEqual(diagnostic["effective_video_budget"]["longest_edge"],16777216)
+        backend.read_video = lambda *a,**k: self.fail("Resume must reuse unchanged responses")
+        self.assertEqual(analyze_video(self.source,self.output,backend,options=options),plan)
+
+    def test_web_photo_gallery_and_metrics_do_not_require_fake_tracking_clips(self):
+        from workflows import bootstrap
+        from web.backend import app as api_module
+        from web.backend.imports import import_results
+        from web.backend.settings import WebSettings
+        from web.backend.store import ProjectStore
+        from fastapi.testclient import TestClient
+        run = make_library_fixture(self.root / "import-photos", angles=(0,))
+        detector = SimpleNamespace(create_tracker=lambda **k: object(), infer_frame=lambda *a:[{"bbox_xyxy":[0,0,44,64],"det_score":.9}])
+        bootstrap.prepare(self.source,run,detector,count=1)
+        kpr = SimpleNamespace(extract=lambda *a,**k:(np.ones((1,2,2)),np.ones((1,2))),
+            cfg=SimpleNamespace(model=SimpleNamespace(kpr=SimpleNamespace(test_embeddings=["synthetic"]))))
+        checkpoint = self.root / "photo-weights"; checkpoint.write_bytes(b"not-a-model")
+        bootstrap.extract_features(run,kpr,checkpoint)
+        bootstrap.read_numbers(run,SimpleNamespace(provenance={},read=lambda image:'{"number":null,"readable":false}'))
+        bootstrap.register(run,"synthetic-match")
+        settings=WebSettings(source_root=self.root,import_root=self.root,data_root=self.root/"web-data",output_root=self.root/"web-output")
+        project_store=ProjectStore(settings.data_root,settings.output_root)
+        project=import_results(settings,project_store,run)
+        with patch.object(api_module,"settings",settings),patch.object(api_module,"store",project_store),TestClient(api_module.app) as client:
+            prefix=f"/api/projects/{project['project_id']}"
+            catalog=client.get(prefix+"/person-library")
+            self.assertEqual(catalog.status_code,200,catalog.text)
+            self.assertEqual(catalog.json()["items"][0]["clip_count"],0)
+            image=client.get(catalog.json()["items"][0]["cover"]["crop_url"])
+            self.assertEqual(image.status_code,200)
+            self.assertEqual(image.headers["content-type"],"image/png")
+            report=client.get(prefix+"/match-report")
+            self.assertEqual(report.status_code,200,report.text)
+            self.assertFalse(report.json()["possession_evaluation"]["accuracy_evaluated"])
+            self.assertEqual(report.json()["bootstrap"]["crop_count"],1)
+            shutil.rmtree(run / "clip1")
+            (run / "batch_manifest.json").unlink()
+            photo_only = import_results(settings,project_store,run)
+            self.assertEqual(photo_only["videos"], [])
+            response=client.get(prefix+"/person-library")
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(response.json()["total"],1)
+
+    def test_match_controller_orders_bootstrap_before_segmentation_and_processing(self):
+        import io
+        import sys
+        from cli import process_match
+        from pipeline.media import atomic_json
+        from pipeline.segmentation.possession import BOUNDARY_CONVENTION
+        output = self.root / "controller"
+        source = {**probe_video(self.source), "sha256": sha256_file(self.source)}
+        operations = []
+        def execute(command, **kwargs):
+            module = command[3]
+            operations.append(module)
+            if module == "cli.segment_video":
+                atomic_json(output / "segmentation/segmentation.json", {"source":source,
+                    "segments":[{"start_s":0}], "unresolved":[], "boundaries":[], "coarse_candidates":[],
+                    "boundary_convention":BOUNDARY_CONVENTION, "protocol_sha256":"synthetic"})
+                atomic_json(output / "segmentation/clips_manifest.json", {"source":source,"videos":[{"needs_review":False}]})
+        def batch(*args, **kwargs):
+            operations.append("run_batch")
+            self.assertEqual(kwargs["options"]["match_id"],"controller-test")
+            return {"failed_clips":[]}
+        argv = ["process_match", "--input",str(self.source),"--output-dir",str(output),"--match-id","controller-test"]
+        with patch.object(sys,"argv",argv),patch.object(process_match.subprocess,"run",side_effect=execute),patch.object(process_match,"run_batch",side_effect=batch),patch("sys.stdout",new=io.StringIO()):
+            process_match.main()
+        self.assertEqual(operations,["cli.bootstrap_players","cli.segment_video","run_batch"])
+        self.assertTrue((output / "match_report.json").is_file())
+        argv[-1]="foreign-match"
+        with patch.object(sys,"argv",argv),self.assertRaisesRegex(ValueError,"another match"):
+            process_match.main()
+
+    def test_unresolved_segmentation_cannot_silently_start_downstream_models(self):
+        import sys
+        from cli import process_match
+        from pipeline.media import atomic_json
+        root=self.root/"unresolved-controller"
+        source={**probe_video(self.source),"sha256":sha256_file(self.source)}
+        atomic_json(root/"segmentation/clips_manifest.json",{"source":source,"videos":[{"needs_review":True}]})
+        atomic_json(root/"segmentation/segmentation.json",{"unresolved":[{"candidate_id":"unresolved"}]})
+        argv=["process_match","--input",str(self.source),"--output-dir",str(root),"--match-id","test","--stage","process"]
+        with patch.object(sys,"argv",argv),patch.object(process_match,"run_batch") as batch,self.assertRaisesRegex(RuntimeError,"Segmentation needs review"):
+            process_match.main()
+        batch.assert_not_called()
+
     def test_invalid_omp_values_are_repaired_and_valid_lists_preserved(self):
         from contracts.execution import normalize_omp_threads
         for value in ("", "0", "-1", "None", "auto", "4,", "2.5", "99999999999999999999999"):

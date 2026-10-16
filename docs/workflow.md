@@ -13,6 +13,7 @@
     clips/CL-*.mp4              # 原分辨率 H.264 CFR 片段
     clips/CL-*.json              # 编码、量化误差与来源记录
   results/
+    bootstrap/                  # 独立照片、人物裁剪、KPR 特征、单帧号码和入库凭据
     batch_manifest.json         # clip_id、来源及处理签名
     batch_summary.json
     library/
@@ -34,9 +35,11 @@
 
 ## Qwen 两阶段切分
 
-默认每窗口 20 秒、相邻重叠 6 秒、抽 16 帧，合并重复候选后在候选中心前后各 4 秒抽 32 帧复核。模型先输出时间范围，再确认局部切点；程序把局部秒数转换回原视频。参数是功能初值，尚未通过真实比赛验证时间准确率或显存上限。
+`cli.process_match` 默认每窗口 20 秒、重叠 6 秒、16 帧、8192 视频视觉预算。先记录四个时刻的有效进攻状态，死球持球方不会直接更新进攻方；同一窗口和跨窗口的状态变化产生待复核候选。复核查看完整候选前后各 2 秒，使用 16 帧，超过 40 秒的宽候选保留待人工检查。8192 是总视频预算，增加帧数会降低每帧可用空间分辨率。局部时间转换回原视频；这些设置尚未得到完整比赛准确率验证。
 
-规则：对手明确获得控制才认定球权转换；进攻篮板继续同一回合。触球、出手或哨声本身不能证明换球权。镜头切换可作为独立追踪片段边界，但标为 `camera_cut`，不伪装成回合结束。模糊候选保持未决，不强行切分；原视频仍由连续、不重叠的片段完整覆盖。处理片段不保证与进攻回合一一对应。
+回合起点约定为**新进攻方开始获准发球的准备，或取得活球控制，以先出现者为准**。死球捡球、交球给裁判、同队连续罚球或进攻篮板不产生新回合。状态提示词和独立复核位于 `pipeline/segmentation/possession.py`。不会强行把候选中点用作切点；未缩小或无法判断的候选保留未决。`cli.segment_video` 默认仍保留旧的 `boundaries` 模式用于对照；使用 `--coarse-method states --video-tokens 8192 --review-frames 16` 选择新流程。两种模式和参数都记入签名，不混用缓存。
+
+触球、出手或哨声本身不能证明换球权。旧 `boundaries` 模式还可提出 `camera_cut`；新状态模式当前聚焦回合，不单独检测镜头切换或回放，正式转播应用仍需检查这些情况。模糊候选保持未决；原视频仍由连续、不重叠的片段完整覆盖。处理片段不保证与进攻回合一一对应。
 
 提示词在 `pipeline/segmentation/prompts.py`。`--context` 可提供五人制/三人制、球队球衣和拍摄视角；模型仍需依据可见证据判断。输出 JSON 的格式、范围与布尔字段由程序校验，失败响应不计为完成。粗看遗漏的边界不会自动被局部复核找回，仍需要实拍验证。
 
@@ -70,9 +73,9 @@
 
 若提高空间预算后能识别罚球，应继续检查换球权候选，而不是据此判定切分通过。在 `cli.diagnose_segmentation` 的小范围命令中添加 `--video-tokens 8192 --queries boundary`，保持原来的窗口、16 帧采样及保存的原始边界提示词，仅请求边界结果；120–180 秒通常对应 5 次推理。诊断记录基础模型来源和实际运行像素预算，成功或失败后恢复处理器预算，原有正式切分目录不变。若仍返回空列表，再单独改进候选任务与边界定义。
 
-若高分辨率的直接边界请求仍全为空，可在另一个输出目录改为 `--video-tokens 8192 --queries state`，保持采样、窗口及空间预算不变，改测结构化状态观察。每个窗口的 0%、25%、50%、75% 时刻分别返回比赛状态（活球、罚球、死球、不确定）、进攻方明暗球衣和可见证据，无法判断时允许 `unknown`；空列表、缺失或重复时间点会被标为格式错误。无需识别号码、比分或球队名称。状态提示词及验证在 `analysis/possession_states.py`，尚未接入生产切分。
+若高分辨率的直接边界请求仍全为空，可在另一个输出目录改为 `--video-tokens 8192 --queries state`，保持采样、窗口及空间预算不变，改测结构化状态观察。每个窗口的 0%、25%、50%、75% 时刻分别返回比赛状态（活球、罚球、死球、不确定）、进攻方明暗球衣和可见证据，无法判断时允许 `unknown`；空列表、缺失或重复时间点会被标为格式错误。无需识别号码、比分或球队名称。`analysis/possession_states.py` 保留此前的实验对照定义；生产状态方案另在 `pipeline/segmentation/possession.py`，增加发球准备、死球约束及约定切点。
 
-程序从已知进攻方变化，或进攻方不明的罚球→活球变化提出宽时间范围；相邻状态为 `unknown` 不会被补写成某支球队。所有候选均是 `uncertain`、`needs_review=true`，保存局部/原视频范围及对应观察点，终端打印 `[state candidates]`。这些候选不自动导出片段，不写球员库，也不等于人工确认的回合转换。宽范围后续需要足够长的复核窗口；先人工核对这小段观察结果，再决定是否更改正式粗看流程。
+这个实验入口从已知进攻方变化，或进攻方不明的罚球→活球变化提出宽时间范围；相邻状态为 `unknown` 不会被补写成某支球队。所有候选均是 `uncertain`、`needs_review=true`，保存局部/原视频范围及对应观察点，终端打印 `[state candidates]`。这些实验候选不自动导出片段，不写球员库，也不等于人工确认的回合转换，用于和生产方案对照。诊断新生产运行的 `boundary` 查询会使用其保存的状态提示词、对应解析器和原运行预算，不会把状态 JSON 错当成边界 JSON。
 
 复核上述状态候选可运行（默认每个候选前后各加 2 秒，16 帧、8192 视觉 token 上限）：
 
@@ -97,7 +100,7 @@
   --input runtime/data/game-001.mp4 \
   --output-dir runtime/outputs/game-001/segmentation \
   --stage analyze --window-s 20 --overlap-s 6 \
-  --coarse-frames 16 --review-frames 32
+  --coarse-frames 16 --review-frames 16 --coarse-method states --video-tokens 8192
 ```
 
 查看状态不加载模型，可使用控制解释器：
@@ -126,13 +129,48 @@
 
 ## 追踪、身份与动作
 
+全流程 `--stage full` 首先随机抽取默认 24 张照片（`--bootstrap-photos`、`--bootstrap-seed` 可调）。每个时间层随机取一张，单独重置 MOTIP，仅使用检测能力，质量筛选后 KPR 提取人物裁剪特征。初始化照片没有虚构的连续轨迹，使用独立 `SEED-*` / 检测样本 ID；同一照片里的不同人物禁止合并。单帧号码始终是弱证据，不算多帧共识。候选图库支持后续轨迹匹配与追加；它可能包含裁判、观众、重复或缺失球员，可在前端排除/修正，不能假定已建立完整名单。
+
+单独初始化：
+
+```bash
+.venv/bin/python -u -m cli.process_match --env-file .env \
+  --input runtime/data/game-001.mp4 --match-id game-001 \
+  --output-dir runtime/outputs/game-001 --stage initialize
+```
+
+各模型通过独立子进程顺序执行，释放显存后进入下一个模型。初始化和片段共享 `results/library/players.sqlite3` 与同一 KPR 特征合同。已登记的照片、特征与号码不能改写；参数或模型变化请新建运行目录。`--skip-bootstrap` 可用于不需要照片初始图库的对照。
+
 ```bash
 .venv/bin/python -u -m cli.process_match --env-file .env \
   --input runtime/data/game-001.mp4 --match-id game-001 \
   --output-dir runtime/outputs/game-001 --stage process --limit 1
 ```
 
-单片段通过后去掉 `--limit 1`。`cli.process_match` 默认 `--stage full` 自动先分析、导出，再运行全部片段；无默认 30 片段截断。分阶段运行便于先复核切分，再投入全部模型时间。
+单片段通过后去掉 `--limit 1`。`cli.process_match` 默认 `--stage full` 自动先初始化图库、分析、导出，再运行全部片段；无默认 30 片段截断。有未决边界、或长视频只导出整段时会先停止下游处理。仅做探索性链路测试可显式传入 `--allow-unreviewed`，不会把切分结果改标为准确；`--stage process` 使用已导出的片段，不会自动补跑初始化。
+
+## 当前视频回合评估
+
+先检查完整视频并标注全部回合转换，包含没有转换的负例时段，不能只查看模型候选。默认前 300 秒开发、之后验证；这是同一视频的内部留出，不是独立比赛测试集。`cli.process_match` 在切分后自动创建空的 `possession-reference.json` 并记录待标注状态，不覆盖已有参考；其他入口可用下面的命令单独初始化。模板不会把模型预测或此前少数目视参考当作真值：
+
+```bash
+.venv/bin/python -m cli.evaluate_possessions \
+  --segmentation-dir runtime/outputs/game-001/segmentation \
+  --annotations runtime/outputs/game-001/possession-reference.json --initialize
+```
+
+填写各范围 `boundaries_s`（原视频秒数），无法判定的连续区间写入 `ignore_ranges_s`。完整检查该范围后设 `complete=true`，人工核对后设顶层 `human_verified=true`。评估只使用明确完成的覆盖范围，空的未标注模板不会产生虚假的零召回或完美准确率。
+
+```bash
+.venv/bin/python -m cli.evaluate_possessions \
+  --segmentation-dir runtime/outputs/game-001/segmentation \
+  --annotations runtime/outputs/game-001/possession-reference.json \
+  --tolerance-s 2 --max-candidate-width-s 10
+```
+
+输出 `evaluation.json` 和 UTF-8 BOM `evaluation.csv`。粗看候选与模型实际切点分别计算一对一 TP/FP/FN、precision、recall、F1、FP/分钟、匹配中点 MAE、候选宽度。JSON/CSV 的 precision、recall、F1 是 0–1 比例，网页显示百分比；时间单位为秒。超宽候选不能靠覆盖整场获得 TP；重复预测只能匹配一次，其余记 FP。默认 2 秒容差、10 秒候选宽度是可调工程口径；HOTA/MOTA 等跟踪指标需要人物框真值，不能从回合边界计算。相机切点不计入回合预测。
+
+`cli.process_match --stage status` 打印当前完成/失败、初始化、入库与评估状态；不加载 GPU。导入 `results` 后默认进入球员照片展示，侧栏显示同样的统计与已完成标注的回合评估。人物与动作没有真值时明确显示未评估。逐片段 `batch_status.json` 保存阶段耗时、缓存复用与退出码。
 
 每个片段重建 MOTIP 状态，原始数字轨迹 ID 仅片段内有效。KPR 与号码证据通过同一片段/轨迹键提交给球员库，跨片段匹配获得持久化 `player_id`。动作模型沿原轨迹推理；事件入库后依据轨迹关联当前球员，未知或归属冲突的事件也保存，不错误归到部分已知轨迹。
 

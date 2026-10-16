@@ -294,7 +294,9 @@ class PlayerRegistry:
             people.append({"global_person_id": player["id"], "player_id": player["id"],
                 "match_id": self.meta("match_id"), "identity_label": player["label"],
                 "status": player["status"], "members": group, "cover_node_id": cover["node_id"],
-                "clip_count": len({n["clip_name"] for n in group}), "local_archive_count": len(group),
+                "clip_count": len({n["clip_name"] for n in group if n.get("evidence_kind") != "bootstrap_photo"}),
+                "bootstrap_photo_count": sum(n.get("evidence_kind") == "bootstrap_photo" for n in group),
+                "local_archive_count": len(group),
                 "manual_member_count": len(group) if player["status"] == "manual_grouping" else 0,
                 "event_count": len(own_events), "event_types": counts, "jersey": jersey})
             for node in group:

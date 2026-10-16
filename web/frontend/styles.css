@@ -558,3 +558,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .library-event-row { border-bottom: 1px solid var(--line); }
 .library-event-row .library-event { width: 100%; }
 .event-export-actions { display: flex; gap: 8px; padding: 0 12px 12px; flex-wrap: wrap; }
+/* Player photographs are the match entry; evidence and metrics stay visible. */
+.library-display-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 24px; align-items: start; }
+.library-display-main { min-width: 0; }
+.match-evaluation-sidebar { position: sticky; top: 24px; padding: 16px; border: 1px solid #d9e1dd; border-radius: 16px; background: #f5f8f6; }
+.match-evaluation-sidebar p { display: flex; gap: 12px; justify-content: space-between; font-size: 13px; }
+.match-evaluation-sidebar h3 { margin: 12px 0; }
+.match-evaluation-sidebar section { border-top: 1px solid #d9e1dd; margin-top: 12px; padding-top: 12px; overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .library-display-layout { grid-template-columns: 1fr; } .match-evaluation-sidebar { position: static; } }

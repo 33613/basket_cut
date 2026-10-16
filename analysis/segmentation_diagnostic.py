@@ -15,6 +15,7 @@ from analysis.possession_states import state_prompt, parse_states, state_candida
 from pipeline.media import atomic_json, cut_video, sha256_file
 from pipeline.segmentation.prompts import coarse_prompt
 from pipeline.segmentation.service import SegmentOptions, parse_coarse
+from pipeline.identity.qwen_backend import set_video_budget
 
 
 DESCRIPTION_PROMPT = """Describe only what is visibly happening in this basketball video,
@@ -25,21 +26,6 @@ unclear at this camera distance. Do not invent events or rely on the scoreboard.
 Use approximate seconds relative to this local video, not the game clock.
 Do not decide clip boundaries yet. Answer in concise Chinese prose.
 """
-
-
-def set_video_budget(processor, tokens):
-    vp = processor.video_processor
-    original = dict(vp.size)
-    if tokens is None:
-        return original
-    if isinstance(tokens, bool) or not isinstance(tokens, int) or not 256 <= tokens <= 8192:
-        raise ValueError("Video token cap must be an integer between 256 and 8192")
-    pixels_per_token = (vp.patch_size * vp.merge_size) ** 2 * vp.temporal_patch_size
-    budget = {**original, "longest_edge": tokens * pixels_per_token}
-    if budget["longest_edge"] < budget["shortest_edge"]:
-        raise ValueError("Requested video budget is below the processor's minimum")
-    vp.size = budget
-    return original
 
 
 def array(value):
@@ -162,7 +148,7 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
     processor = getattr(backend, "processor", None)
     if video_tokens is not None and processor is None:
         raise ValueError("Changing the video budget requires a real processor")
-    original_budget = set_video_budget(processor, video_tokens) if processor else None
+    original_budget = set_video_budget(processor, video_tokens if video_tokens is not None else options.video_tokens) if processor else None
     effective_budget = dict(processor.video_processor.size) if processor else None
     output.mkdir(parents=True, exist_ok=True)
     manifest = {"status": "running", "accuracy_evaluated": False, "source": source,
@@ -221,7 +207,13 @@ def diagnose(segmentation_dir, output, windows, protocol, backend, *, frames=Non
                 if name in {"boundary", "state"}:
                     try:
                         if name == "boundary":
-                            record["parsed_boundaries"] = parse_coarse(record["raw_response"], end - start)
+                            if options.coarse_method == "states":
+                                from pipeline.segmentation.possession import parse_states as parse_production_states
+                                observed = parse_production_states(record["raw_response"], end - start)
+                                record["parsed_states"] = observed["states"]
+                                record["parsed_boundaries"] = observed["candidates"]
+                            else:
+                                record["parsed_boundaries"] = parse_coarse(record["raw_response"], end - start)
                         else:
                             record["parsed_states"] = parse_states(record["raw_response"], end - start)
                             record["derived_candidates"] = [{**candidate,
