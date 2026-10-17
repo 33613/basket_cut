@@ -657,6 +657,76 @@ class TrackletChecks(unittest.TestCase):
                     404,
                 )
 
+    def test_zero_accepted_audit_preserves_native_crops_and_original_evidence(self):
+        import tarfile
+        from collections import defaultdict
+        from analysis.tracklet_audit import audit, raw_object
+        from pipeline.media import atomic_json, sha256_file
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory(dir=self.base) as tmp:
+            root = Path(tmp)
+            run = root / "failed-results"
+            shutil.copytree(self.fixture_run, run)
+            seed = run / "bootstrap_tracklets"
+            data = json.loads((seed / "assessments.json").read_text())
+            grouped = defaultdict(list)
+            for sample in self.manifest["samples"]:
+                sid = sample["sample_id"]
+                row = data["readings"][sid]
+                raw = raw_object(row["raw_response"])
+                raw.update(clear=False, number=None, readable=False)
+                if len(grouped) == 0:
+                    raw["extra"] = "<script>alert('untrusted')</script>"
+                row.update(
+                    parse_assessment(json.dumps(raw)), raw_response=json.dumps(raw)
+                )
+                grouped[sample["track_key"]].append(row)
+            data["tracks"] = {k: summarize(v) for k, v in grouped.items()}
+            data["team_map"] = {}
+            atomic_json(seed / "assessments.json", data)
+            before = {p: sha256_file(p) for p in run.rglob("*") if p.is_file()}
+            output = root / "visual-audit"
+            with patch(
+                "pipeline.identity.qwen_backend.QwenBackend",
+                side_effect=AssertionError("GPU model called"),
+            ):
+                report, files = audit(run, output, context_samples=6)
+            self.assertEqual(report["accepted_for_kpr"], 0)
+            self.assertEqual(
+                report["rejection_reasons"],
+                {"assessment_clear_failed": len(self.manifest["samples"])},
+            )
+            self.assertEqual(
+                report["raw_fields"]["jersey_color"].keys(), {'"white"', '"black"'}
+            )
+            self.assertFalse(report["accuracy_evaluated"])
+            self.assertFalse(report["production_modified"])
+            self.assertEqual(
+                before, {p: sha256_file(p) for p in run.rglob("*") if p.is_file()}
+            )
+            html = (output / "index.html").read_text()
+            self.assertIn("&lt;script&gt;", html)
+            self.assertNotIn("<script>alert", html)
+            self.assertEqual(len(report["contexts"]), 6)
+            for context in report["contexts"].values():
+                with Image.open(output / context["image"]) as image:
+                    self.assertEqual(image.size, (480, 320))
+            self.assertTrue(
+                (output / "samples.csv").read_bytes().startswith(b"\xef\xbb\xbf")
+            )
+            samples = list((output / "media").glob("*.png"))
+            self.assertEqual(len(samples), len(self.manifest["samples"]) + 6)
+            source_hashes = {s["crop_sha256"] for s in self.manifest["samples"]}
+            self.assertTrue(source_hashes.issubset({sha256_file(p) for p in samples}))
+            with tarfile.open(files["archive"], "r:gz") as archive:
+                self.assertIn("visual-audit/index.html", archive.getnames())
+                self.assertFalse(any(".mkv" in p for p in archive.getnames()))
+            with self.assertRaises(FileExistsError):
+                audit(run, output)
+            with self.assertRaises(ValueError):
+                audit(run, run / "audit")
+
 
 def main():
     result = unittest.TextTestRunner(verbosity=2).run(

@@ -181,6 +181,19 @@
 
 预览会导出可下载本地查看的 HTML。网页导入 `results/` 后可查看原尺寸模板、角色与队伍/号码证据，下载无损 MKV 短窗口。统计区分初始化轨迹与业务片段。CPU 自检 `cli.check_tracklet_bootstrap` 使用真实 FFmpeg 视频和明确标记的合成模型，验证逐像素无损、身份门槛、视角上限、恢复、维护与前端；不代表真实模型准确率。
 
+## 六窗口零入选复核
+
+六窗口初始化若 `accepted_clear_samples=0`，先导出全部候选图的只读报告。它不依赖非空 KPR 特征或球员库，不加载 GPU，也不改变清晰度门槛：
+
+```bash
+.venv/bin/python -m cli.audit_tracklet_bootstrap \
+  --run-dir runtime/outputs/game-001/results \
+  --output-dir runtime/outputs/game-001/diagnostics/tracklet-quality-audit \
+  --context-samples 6
+```
+
+输出 `index.html`、原尺寸 PNG、最多六个原分辨率场景帧、逐图和逐轨迹 CSV、`report.json`、原始回答及同名 `.tar.gz`。HTML 点击图片可查看原尺寸；场景红框仅由网页叠加，不改原图像素。报告分别统计原始角色、遮挡、清晰、颜色、号码可读性和实际拒绝阶段，保留被质量门槛屏蔽的原始字段。`clear=false` 全部拒绝时，需要将原图与模型回答对照，不能直接放宽门槛，也不能据此判断 KPR 失败。下面的 `cli.audit_bootstrap` 仅适用于历史照片库。
+
 ## 历史照片库只读复核
 
 当照片观察很多、实际图库仅有少数样本时，先保留原库并诊断，暂不放宽匹配阈值。旧版初始化复用了增量登记规则：待定身份不参与后续匹配；“可比较距离”还包含被同帧冲突排除的身份，可能阻止新身份建立。v2 已改用候选分组和有限模板机制；旧库通过后文维护命令预览/迁移，不能由旧版登记阻塞直接判断 KPR 模型效果差。
