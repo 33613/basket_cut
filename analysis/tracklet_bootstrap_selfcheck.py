@@ -28,6 +28,18 @@ from pipeline.media import cut_video
 from workflows import tracklet_bootstrap as flow
 
 
+OBSERVATIONS = {
+    "schema": "player_observations_v3",
+    "body_coverage": "full",
+    "body_occlusion": "none",
+    "torso_visible": True,
+    "torso_unoccluded": True,
+    "graphic_overlay": "none",
+    "blur": "mild",
+    "clothing_detail": "distinct",
+}
+
+
 def reading(number="23", color="white", frame=0, **changes):
     raw = {
         "role": "player",
@@ -127,6 +139,7 @@ class TrackletChecks(unittest.TestCase):
             queue.append(
                 json.dumps(
                     {
+                        **OBSERVATIONS,
                         "role": "player",
                         "single_target": True,
                         "unoccluded": True,
@@ -297,6 +310,7 @@ class TrackletChecks(unittest.TestCase):
                 self.calls += 1
                 return json.dumps(
                     {
+                        **OBSERVATIONS,
                         "role": "player",
                         "single_target": True,
                         "unoccluded": True,
@@ -315,7 +329,7 @@ class TrackletChecks(unittest.TestCase):
             report = probe(self.fixture_run, output, backend=backend)
             self.assertEqual(backend.calls, 12)
             self.assertEqual(report["usable_images"], 12)
-            self.assertEqual(report["provenance"]["task"], "clear_player_v2")
+            self.assertEqual(report["provenance"]["task"], "player_observations_v3")
             self.assertFalse(report["production_modified"])
             self.assertFalse(report["accuracy_evaluated"])
             self.assertTrue((output / "index.html").is_file())
@@ -334,6 +348,283 @@ class TrackletChecks(unittest.TestCase):
                 probe(self.fixture_run, output, backend=backend)
             with self.assertRaises(ValueError):
                 probe(self.fixture_run, self.fixture_run / "probe", backend=backend)
+
+    def test_v3_number_survives_incomplete_body_but_not_torso_overlay(self):
+        raw = {
+            **OBSERVATIONS,
+            "role": "player",
+            "single_target": True,
+            "number": "35",
+            "readable": True,
+            "jersey_color": "white",
+            "view": "back",
+        }
+        for change in (
+            {"body_coverage": "upper"},
+            {"graphic_overlay": "non_torso"},
+            {"clothing_detail": "limited"},
+        ):
+            result = parse_assessment(
+                json.dumps({**raw, **change}), require_observations=True
+            )
+            self.assertFalse(result["usable"])
+            self.assertTrue(result["evidence_eligible"])
+            self.assertEqual(result["number"], "35")
+        for change in (
+            {"graphic_overlay": "torso"},
+            {"torso_unoccluded": False},
+            {"role": "referee"},
+            {"single_target": False},
+        ):
+            result = parse_assessment(
+                json.dumps({**raw, **change}), require_observations=True
+            )
+            self.assertFalse(result["usable"])
+            self.assertFalse(result["evidence_eligible"])
+            self.assertIsNone(result["number"])
+        self.assertFalse(
+            parse_assessment('{"clear":true}', require_observations=True)["usable"]
+        )
+        legacy = json.dumps(
+            {"role": "player", "single_target": True, "unoccluded": True, "clear": True}
+        )
+        self.assertFalse(parse_assessment(legacy, require_observations=True)["usable"])
+        missing = {k: v for k, v in raw.items() if k != "body_coverage"}
+        self.assertFalse(
+            parse_assessment(json.dumps(missing), require_observations=True)["usable"]
+        )
+
+    def test_explicit_team_aliases_and_joint_evidence(self):
+        rows = [reading(color="black", frame=0), reading(color="purple", frame=1)]
+        aliases = {"black": "dark", "purple": "dark", "white": "light"}
+        self.assertEqual(
+            strong_identity(summarize(rows, team_map=aliases)), ("dark", "23")
+        )
+        self.assertIsNone(
+            strong_identity(summarize(rows, team_map={"black": "a", "purple": "b"}))
+        )
+        self.assertIsNone(strong_identity(summarize(rows, team_map={"black": "a"})))
+        disjoint = [reading(number=None, frame=i) for i in (0, 1)] + [
+            reading(color="unknown", frame=i) for i in (2, 3)
+        ]
+        self.assertIsNone(
+            strong_identity(summarize(disjoint, team_map={"white": "home"}))
+        )
+
+    def test_one_template_can_use_two_independent_number_observations(self):
+        raw = {
+            **OBSERVATIONS,
+            "role": "player",
+            "single_target": True,
+            "jersey_color": "white",
+            "number": "35",
+            "readable": True,
+            "view": "back",
+        }
+        reads = [
+            {
+                **parse_assessment(
+                    json.dumps({**raw, "body_coverage": coverage}),
+                    require_observations=True,
+                ),
+                "frame_idx": i,
+                "timestamp_s": i,
+            }
+            for i, coverage in enumerate(("full", "upper"))
+        ]
+        track = summarize(reads, team_map={"white": "home"})
+        manifest = {
+            "samples": [{"sample_id": str(i), "track_key": "T"} for i in range(2)]
+        }
+        assessments = {"readings": dict(zip(("0", "1"), reads)), "tracks": {"T": track}}
+        self.assertEqual(
+            [s["sample_id"] for s in flow.accepted_samples(manifest, assessments)],
+            ["0"],
+        )
+        reads[1]["timestamp_s"] = 0.1
+        assessments["tracks"]["T"] = summarize(reads, team_map={"white": "home"})
+        self.assertEqual(flow.accepted_samples(manifest, assessments), [])
+
+    def test_reuse_copies_tracking_but_not_model_or_library(self):
+        with tempfile.TemporaryDirectory(dir=self.base) as tmp:
+            target = Path(tmp) / "results"
+            result = flow.reuse_tracking(self.fixture_run, target)
+            self.assertEqual(result, self.manifest)
+            self.assertEqual(flow.load_manifest(target), self.manifest)
+            self.assertFalse((target / "library").exists())
+            self.assertFalse((flow.folder(target) / "assessments.json").exists())
+            self.assertFalse((flow.folder(target) / "features.npz").exists())
+            self.assertEqual(flow.reuse_tracking(self.fixture_run, target), result)
+            crop = flow.folder(target) / result["samples"][0]["crop_path"]
+            crop.write_bytes(b"changed")
+            with self.assertRaises(ValueError):
+                flow.reuse_tracking(self.fixture_run, target)
+            self.assertEqual(flow.load_manifest(self.fixture_run), self.manifest)
+
+    def test_probe_baseline_is_fixed_and_number_disagreement_is_not_accepted(self):
+        from analysis.player_quality_probe import probe
+        from pipeline.media import sha256_file
+
+        class Backend:
+            provenance = {"model_sha256": "synthetic"}
+
+            def assess_player(self, image):
+                return json.dumps(
+                    {
+                        **OBSERVATIONS,
+                        "role": "player",
+                        "single_target": True,
+                        "jersey_color": "white",
+                        "number": "35",
+                        "readable": True,
+                        "view": "back",
+                    }
+                )
+
+            def read(self, image):
+                return '{"number":"53","readable":true}'
+
+        with tempfile.TemporaryDirectory(dir=self.base) as tmp:
+            root = Path(tmp)
+            baseline = root / "baseline.json"
+            selections = list(reversed(self.manifest["samples"][:3]))
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "status": "completed_not_accuracy_evaluated",
+                        "manifest_sha256": sha256_file(
+                            flow.folder(self.fixture_run) / "manifest.json"
+                        ),
+                        "provenance": {"model_sha256": "synthetic"},
+                        "samples": [
+                            {
+                                "sample_id": r["sample_id"],
+                                "reading": {"usable": False},
+                                "raw_response": "old response",
+                            }
+                            for r in selections
+                        ],
+                    }
+                )
+            )
+            report = probe(
+                self.fixture_run,
+                root / "output",
+                backend=Backend(),
+                baseline=baseline,
+                compare_number=True,
+            )
+            self.assertEqual(
+                [r["sample_id"] for r in report["samples"]],
+                [r["sample_id"] for r in selections],
+            )
+            self.assertEqual(report["number_disagreements"], 3)
+            self.assertEqual(report["number_evidence_images"], 3)
+            self.assertTrue(report["same_model_weights"])
+            self.assertTrue(
+                all(r["reading"]["number"] == "35" for r in report["samples"])
+            )
+            self.assertTrue((root / "output.tar.gz").is_file())
+            data = json.loads(baseline.read_text())
+            data["manifest_sha256"] = "other"
+            baseline.write_text(json.dumps(data))
+            with self.assertRaises(ValueError):
+                probe(
+                    self.fixture_run,
+                    root / "wrong",
+                    backend=Backend(),
+                    baseline=baseline,
+                )
+
+    def test_empty_baseline_is_rejected_before_model_calls(self):
+        from analysis.player_quality_probe import probe
+
+        with tempfile.TemporaryDirectory(dir=self.base) as tmp:
+            root = Path(tmp)
+            baseline = root / "baseline.json"
+            baseline.write_text("{}")
+            with self.assertRaises(ValueError):
+                probe(
+                    self.fixture_run,
+                    root / "probe",
+                    backend=object(),
+                    baseline=baseline,
+                )
+
+    def test_actual_qwen_image_patch_reconstruction(self):
+        from analysis.player_quality_probe import save_image_inputs
+        from PIL import Image
+
+        # Known RGB pixels packed in the Qwen temporal/spatial merge order.
+        rgb = np.arange(8 * 8 * 3, dtype=np.float32).reshape(8, 8, 3)
+        frames = np.stack([rgb.transpose(2, 0, 1)] * 2)[None]
+        packed = (
+            frames.reshape(1, 2, 3, 2, 2, 2, 2, 2, 2)
+            .transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
+            .reshape(16, 24)
+        )
+        ip = SimpleNamespace(
+            patch_size=2,
+            temporal_patch_size=2,
+            merge_size=2,
+            do_normalize=False,
+            do_rescale=False,
+            size={"shortest_edge": 64, "longest_edge": 64},
+        )
+        processor = SimpleNamespace(
+            image_processor=ip, batch_decode=lambda *a, **k: ["prompt"]
+        )
+        inputs = {
+            "image_grid_thw": np.array([[1, 4, 4]]),
+            "pixel_values": packed,
+            "input_ids": np.zeros((1, 20)),
+        }
+        with tempfile.TemporaryDirectory(dir=self.base) as tmp:
+            result = save_image_inputs(processor, inputs, tmp)
+            self.assertEqual(result["processed_width"], 8)
+            np.testing.assert_array_equal(
+                np.asarray(Image.open(Path(tmp) / "processed.png")),
+                rgb.astype(np.uint8),
+            )
+
+    def test_feature_probe_measures_rejected_images_without_registering_them(self):
+        from analysis.initialization_feature_probe import probe_features
+        from pipeline.media import sha256_file
+
+        samples = self.manifest["samples"]
+        before = {p: sha256_file(p) for p in self.fixture_run.rglob("*") if p.is_file()}
+        with tempfile.TemporaryDirectory(dir=self.base) as tmp:
+            root = Path(tmp)
+            report = root / "quality.json"
+            selected = [
+                samples[0],
+                next(s for s in samples if s["track_key"] != samples[0]["track_key"]),
+            ]
+            report.write_text(
+                json.dumps(
+                    {
+                        "status": "completed_not_accuracy_evaluated",
+                        "manifest_sha256": sha256_file(
+                            flow.folder(self.fixture_run) / "manifest.json"
+                        ),
+                        "samples": [
+                            {"sample_id": r["sample_id"], "reading": {"usable": False}}
+                            for r in selected
+                        ],
+                    }
+                )
+            )
+            result = probe_features(
+                self.fixture_run, report, root / "features", KPR(), self.checkpoint
+            )
+            self.assertLessEqual(result["sample_count"], 4)
+            self.assertGreater(result["pair_relations"]["same_track_candidate"], 0)
+            self.assertFalse(result["accuracy_evaluated"])
+            self.assertTrue((root / "features/pairs.csv").is_file())
+            self.assertEqual(
+                before,
+                {p: sha256_file(p) for p in self.fixture_run.rglob("*") if p.is_file()},
+            )
 
     def test_team_palette_requires_two_independently_supported_kits(self):
         white = [reading(frame=i) for i in (0, 1)]
@@ -506,6 +797,7 @@ class TrackletChecks(unittest.TestCase):
                     self.calls += 1
                     return json.dumps(
                         {
+                            **OBSERVATIONS,
                             "role": "player",
                             "single_target": True,
                             "unoccluded": True,
@@ -748,7 +1040,7 @@ class TrackletChecks(unittest.TestCase):
                 sid = sample["sample_id"]
                 row = data["readings"][sid]
                 raw = raw_object(row["raw_response"])
-                raw.update(clear=False, number=None, readable=False)
+                raw.update(clear=False, blur="severe", number=None, readable=False)
                 if len(grouped) == 0:
                     raw["extra"] = "<script>alert('untrusted')</script>"
                 row.update(
@@ -768,7 +1060,7 @@ class TrackletChecks(unittest.TestCase):
             self.assertEqual(report["accepted_for_kpr"], 0)
             self.assertEqual(
                 report["rejection_reasons"],
-                {"assessment_clear_failed": len(self.manifest["samples"])},
+                {"insufficient_clothing_detail": len(self.manifest["samples"])},
             )
             self.assertEqual(
                 report["raw_fields"]["jersey_color"].keys(), {'"white"', '"black"'}

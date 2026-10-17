@@ -129,7 +129,7 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
             with Image.open(path) as image:
                 raw = backend.assess_player(image.convert("RGB")) if assess_player else backend.read(image.convert("RGB"))
             inference_count += 1
-            result = {**(parse_assessment(raw) if assess_player else parse_reading(raw)), "raw_response": raw}
+            result = {**(parse_assessment(raw, require_observations=True) if assess_player else parse_reading(raw)), "raw_response": raw}
             write_json(cache, result)
         by_track[sample["raw_track_id"]].append({**sample, **result, "text": result["number"]})
     evidence = {tid: {"raw_track_id": tid, **qwen_consensus(by_track[tid], min_support=min_support, min_gap_s=min_gap_s)} for tid in sorted(ids)}
@@ -153,7 +153,7 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
     summary = {"backend": "qwen_vl", "provenance": provenance,
         "thresholds": {"min_support": min_support, "min_gap_s": min_gap_s,
                        "max_samples": max_samples, "sampling_strategy": SAMPLING_STRATEGY,
-                       **({"assessment":"clear_player_v2","team_map":palette} if assess_player else {})},
+                       **({"assessment":"player_observations_v3","team_map":palette} if assess_player else {})},
         "track_count": len(ids), "sample_count": len(samples),
         "model_invoked": inference_count > 0, "inference_count": inference_count,
         "cache_hit_count": cache_hit_count,

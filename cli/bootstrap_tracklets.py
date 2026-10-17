@@ -21,6 +21,11 @@ def main():
         choices=("all", "track", "assess", "features", "register"),
         default="all",
     )
+    p.add_argument(
+        "--reuse-tracking-from",
+        type=Path,
+        help="Copy only verified tracking into a new run; do not reuse old Qwen/KPR/library",
+    )
     p.add_argument("--windows", type=int, default=6)
     p.add_argument("--window-s", type=float, default=4.0)
     p.add_argument(
@@ -62,6 +67,8 @@ def main():
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise RuntimeError("Initialization already running") from exc
+            if args.reuse_tracking_from:
+                flow.reuse_tracking(args.reuse_tracking_from, args.run_dir)
             # Validate completed evidence without loading three GPU models.
             if (root / "registration.json").exists():
                 from pipeline.identity.qwen_backend import model_provenance
@@ -133,6 +140,35 @@ def main():
             / "MOTIP/configs/r50_deformable_detr_motip_sportsmot.yaml"
         )
         runtime = MotipRuntimeConfig()
+        detector = {
+            "checkpoint_sha256": flow.sha256_file(settings.motip_checkpoint),
+            "config_sha256": flow.sha256_file(config),
+            "runtime": runtime.to_dict(),
+            "preprocessing": "upstream-pil",
+        }
+        if args.reuse_tracking_from:
+            flow.reuse_tracking(args.reuse_tracking_from, args.run_dir)
+        if (root / "manifest.json").exists():
+            manifest = flow.load_manifest(args.run_dir)
+            protocol = manifest["protocol"]
+            groups = (
+                flow.manual_starts(
+                    args.windows_file, protocol["source"]["duration_s"], policy
+                )
+                if args.windows_file
+                else flow.candidate_starts(protocol["source"]["duration_s"], policy)
+            )
+            if (
+                Path(protocol["source"]["path"]).resolve() != args.input.resolve()
+                or protocol["policy"] != flow.asdict(policy)
+                or protocol["detector"] != detector
+                or protocol["candidate_starts"] != groups
+            ):
+                raise ValueError(
+                    "Requested tracking settings differ from the saved manifest"
+                )
+            print("Verified existing tracking; skipped MOTIP loading and inference")
+            return
         backend = MotipBackend(
             motip_root=settings.repository_root / "MOTIP",
             config_path=config,

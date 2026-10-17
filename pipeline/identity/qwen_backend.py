@@ -47,7 +47,7 @@ def model_provenance(model_dir):
                 checksum.update(chunk)
     contract = json.dumps({"architecture": MODEL_TYPE, "image_budget": IMAGE_BUDGET,
                            "video_budget": VIDEO_BUDGET, "attention": "sdpa",
-                           "dtype": "bf16_if_supported_else_fp16", "max_image_output": 128}, sort_keys=True)
+                           "dtype": "bf16_if_supported_else_fp16", "max_image_output": 128, "max_player_observation_output": 512}, sort_keys=True)
     return {"backend": "qwen_vl", "architecture": MODEL_TYPE, "model_sha256": checksum.hexdigest(),
             "prompt_sha256": hashlib.sha256(PROMPT.encode()).hexdigest(),
             "inference_contract_sha256": hashlib.sha256(contract.encode()).hexdigest()}
@@ -131,13 +131,16 @@ class QwenBackend:
         inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
         return self._generate(inputs)
 
-    def assess_player(self, image):
+    def assess_player(self, image, *, diagnostic_dir=None):
         from pipeline.identity.player_evidence import player_prompt
         messages = [{"role": "user", "content": [
             {"type": "image", "image": image}, {"type": "text", "text": player_prompt(image.size)}]}]
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
-        return self._generate(inputs, max_new_tokens=256)
+        if diagnostic_dir is not None:
+            from analysis.player_quality_probe import save_image_inputs
+            save_image_inputs(self.processor, inputs, diagnostic_dir)
+        return self._generate(inputs, max_new_tokens=512)
 
     def read_video(self, path, prompt, *, num_frames=8, max_new_tokens=128):
         """Infer one local window. Times in the response refer to this local clip.

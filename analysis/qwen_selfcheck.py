@@ -3,7 +3,6 @@ import json
 import contextlib
 import hashlib
 import os
-import subprocess
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -31,10 +30,11 @@ class QwenChecks(unittest.TestCase):
         content=backend.processor.apply_chat_template.call_args.args[0][0]["content"]
         self.assertIs(content[0]["image"],image)
         self.assertIn("96x184",content[1]["text"])
-        self.assertIn("BODY APPEARANCE",content[1]["text"])
+        self.assertIn("body_coverage",content[1]["text"])
+        self.assertIn("graphic_overlay",content[1]["text"])
         self.assertIn("quality_reason",content[1]["text"])
         self.assertIs(backend.processor.call_args.kwargs["images"][0],image)
-        backend._generate.assert_called_once_with({"synthetic_inputs":True},max_new_tokens=256)
+        backend._generate.assert_called_once_with({"synthetic_inputs":True},max_new_tokens=512)
 
     def test_zero_double_zero_and_strict_json(self):
         for number in ('0', '00', '15', '99'):

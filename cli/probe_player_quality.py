@@ -13,6 +13,21 @@ def main():
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--env-file", type=Path)
     p.add_argument("--per-window", type=int, choices=(1, 2, 3), default=2)
+    p.add_argument(
+        "--baseline",
+        type=Path,
+        help="Completed old probe.json; reuse its exact image selection",
+    )
+    p.add_argument(
+        "--compare-number",
+        action="store_true",
+        help="Independent number prompt; diagnostic only",
+    )
+    p.add_argument(
+        "--capture-inputs",
+        action="store_true",
+        help="Save the actual processed image tensors as PNG",
+    )
     args = p.parse_args()
     if args.env_file:
         from cli.serve_web import load_environment
@@ -41,6 +56,9 @@ def main():
         args.output_dir,
         backend=QwenBackend(ExecutionSettings().qwen_model_dir),
         per_window=args.per_window,
+        baseline=args.baseline,
+        compare_number=args.compare_number,
+        capture_inputs=args.capture_inputs,
     )
     print(
         json.dumps(
@@ -50,6 +68,7 @@ def main():
         )
     )
     print("Read-only probe:", args.output_dir / "index.html")
+    print("Audit archive:", args.output_dir.with_name(args.output_dir.name + ".tar.gz"))
 
 
 if __name__ == "__main__":

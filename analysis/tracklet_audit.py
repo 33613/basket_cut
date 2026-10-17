@@ -32,7 +32,8 @@ def rejection_stage(sample, readings, tracks):
     reading, track = readings[sample["sample_id"]], tracks[sample["track_key"]]
     if reading.get("usable") is not True:
         return "player_assessment_rejected"
-    if track["clear_support"] < 2:
+    from pipeline.identity.player_evidence import strong_identity
+    if track["clear_support"] < 2 and strong_identity(track) is None:
         return "insufficient_separated_clear_frames"
     if track["jersey"]["status"] == "conflict":
         return "track_number_conflict"

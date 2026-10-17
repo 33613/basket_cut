@@ -21,6 +21,7 @@ from pipeline.identity.player_evidence import (
     infer_team_map,
     parse_assessment,
     summarize,
+    strong_identity,
 )
 
 
@@ -189,6 +190,59 @@ def load_manifest(run, *, verify=True):
                     "Initialization window/crop evidence changed: " + relative
                 )
     return data
+
+
+def reuse_tracking(source_run, target_run):
+    """Copy verified tracking artifacts only; never copy model evidence/library."""
+    import shutil
+
+    source, target = folder(source_run), folder(target_run)
+    if (
+        source == target
+        or source.is_relative_to(target)
+        or target.is_relative_to(source)
+    ):
+        raise ValueError("Reuse requires separate initialization directories")
+    manifest = load_manifest(source_run)
+    target.mkdir(parents=True, exist_ok=True)
+    if (target / "manifest.json").exists():
+        if load_manifest(target_run) != manifest:
+            raise ValueError("Target tracking differs from requested source")
+        return manifest
+    if any(
+        p.name not in {".lock", ".reuse-in-progress.json"} for p in target.iterdir()
+    ):
+        raise ValueError("Reuse target must be new and empty")
+    # Finish in a sibling staging directory so interrupted copies cannot leave
+    # a manifest claiming complete evidence. Source artifacts remain untouched.
+    import tempfile
+
+    with tempfile.TemporaryDirectory(
+        prefix=".tracking-reuse-", dir=target.parent
+    ) as temp:
+        stage = Path(temp)
+        for relative in manifest["artifacts"]:
+            original = (source / relative).resolve()
+            dest = (stage / relative).resolve()
+            if not original.is_relative_to(source) or not dest.is_relative_to(stage):
+                raise ValueError("Unsafe tracking artifact path")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original, dest)
+            if sha256_file(dest) != manifest["artifacts"][relative]:
+                raise ValueError("Copied tracking artifact changed")
+        for item in stage.iterdir():
+            shutil.move(str(item), str(target / item.name))
+        atomic_json(target / "manifest.json", manifest)
+    atomic_json(
+        target / "tracking_reuse.json",
+        {
+            "source_run": str(Path(source_run).resolve()),
+            "manifest_sha256": sha256_file(source / "manifest.json"),
+            "copied_model_assessments": False,
+            "copied_player_library": False,
+        },
+    )
+    return manifest
 
 
 def prepare(
@@ -509,7 +563,7 @@ def assess(run, backend, *, team_map=None):
             with Image.open(root / row["crop_path"]) as image:
                 raw = backend.assess_player(image.convert("RGB"))
             readings[key] = {
-                **parse_assessment(raw),
+                **parse_assessment(raw, require_observations=True),
                 "raw_response": raw,
                 "frame_idx": row["frame_idx"],
                 "timestamp_s": row["timestamp_s"],
@@ -558,7 +612,10 @@ def accepted_samples(manifest, assessments):
         row
         for row in manifest["samples"]
         if assessments["readings"][row["sample_id"]]["usable"]
-        and assessments["tracks"][row["track_key"]]["clear_support"] >= 2
+        and (
+            assessments["tracks"][row["track_key"]]["clear_support"] >= 2
+            or strong_identity(assessments["tracks"][row["track_key"]]) is not None
+        )
         and assessments["tracks"][row["track_key"]]["jersey"]["status"] != "conflict"
     ]
 
@@ -830,6 +887,19 @@ def register(run, match_id):
         "accepted_clear_samples": len(rows),
         "tracklet_count": len(nodes),
         "discarded_samples": len(manifest["samples"]) - len(rows),
+        "retained_evidence_samples": sum(
+            r.get("evidence_eligible", r.get("usable")) is True
+            for r in assessments["readings"].values()
+        ),
+        "number_supported_tracks": sum(
+            t["jersey"]["status"] == "candidate_consensus"
+            for t in assessments["tracks"].values()
+        ),
+        "anchor_tracks_without_templates": sum(
+            strong_identity(t) is not None and key not in grouped
+            for key, t in assessments["tracks"].items()
+        ),
+        "raw_samples_preserved": True,
         "team_map": assessments["team_map"],
         "revision": result["review_revision"],
         "candidate_players": result["candidate_person_count"],
