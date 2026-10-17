@@ -112,7 +112,7 @@ class MotipBackend:
         path = Path(value).expanduser()
         return path.resolve() if path.is_absolute() else (self.motip_root / path).resolve()
 
-    def create_tracker(self, *, height: int, width: int):
+    def create_tracker(self, *, height: int, width: int, only_detr=None):
         return self._runtime_tracker_class(
             model=self.model,
             sequence_hw=(height, width),
@@ -123,7 +123,7 @@ class MotipBackend:
             newborn_thresh=self.runtime_config.newborn_thresh,
             id_thresh=self.runtime_config.id_thresh,
             area_thresh=self.runtime_config.area_thresh,
-            only_detr=self.runtime_config.only_detr,
+            only_detr=self.runtime_config.only_detr if only_detr is None else only_detr,
             dtype=self.dtype,
         )
 

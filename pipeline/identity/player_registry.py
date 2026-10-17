@@ -86,6 +86,8 @@ class PlayerRegistry(MemoryStore):
 
     @staticmethod
     def _conflict(left, right):
+        if left.get("team_id") and right.get("team_id") and left["team_id"]!=right["team_id"]:
+            return "different_teams"
         a, b = left.get("jersey") or {}, right.get("jersey") or {}
         if (a.get("status") == b.get("status") == "candidate_consensus"
                 and a.get("number") != b.get("number")):
@@ -124,6 +126,13 @@ class PlayerRegistry(MemoryStore):
                     raise ValueError("Incompatible KPR feature space; re-extract using the registered model")
                 self.db.execute("INSERT OR REPLACE INTO metadata VALUES('feature_contract',?)", (serialized,))
             for node in nodes:
+                identity_contract=(node.get("jersey") or {}).get("identity_evidence_contract")
+                if identity_contract:
+                    serialized_identity=json.dumps(identity_contract,sort_keys=True)
+                    previous_identity=self.meta("identity_evidence_contract")
+                    if previous_identity and previous_identity!=serialized_identity:
+                        raise ValueError("Incompatible clear-player Qwen model or team palette in this match")
+                    self.db.execute("INSERT OR REPLACE INTO metadata VALUES('identity_evidence_contract',?)",(serialized_identity,))
                 number_contract = (node.get("jersey") or {}).get("provenance")
                 if number_contract and not number_contract.get("provenance", {}).get("empty_input"):
                     serialized_numbers = json.dumps(number_contract, sort_keys=True)
@@ -356,8 +365,10 @@ class PlayerRegistry(MemoryStore):
             people.append({"global_person_id": player["id"], "player_id": player["id"],
                 "match_id": self.meta("match_id"), "identity_label": player["label"],
                 "status": player["status"], "members": group, "cover_node_id": cover["node_id"],
-                "clip_count": len({n["clip_name"] for n in group if n.get("evidence_kind") != "bootstrap_photo"}),
+                "clip_count": len({n["clip_name"] for n in group if n.get("evidence_kind") not in {"bootstrap_photo","bootstrap_tracklet"}}),
                 "bootstrap_photo_count": sum(n.get("evidence_kind") == "bootstrap_photo" for n in group),
+                "bootstrap_tracklet_count": sum(n.get("evidence_kind") == "bootstrap_tracklet" for n in group),
+                "team_ids": sorted({n["team_id"] for n in group if n.get("team_id")}),
                 "local_archive_count": len(group),
                 "manual_member_count": len(group) if player["status"] == "manual_grouping" else 0,
                 "event_count": len(own_events), "event_types": counts, "jersey": jersey})

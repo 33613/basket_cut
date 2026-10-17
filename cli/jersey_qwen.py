@@ -15,6 +15,8 @@ def main():
     parser.add_argument("--min-support", type=int, default=2)
     parser.add_argument("--min-gap-s", type=float, default=.25)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument("--assess-player",action="store_true")
+    parser.add_argument("--team-map",type=Path)
     from pipeline.identity.jersey_qwen import recognize_jerseys_qwen
     print(json.dumps(recognize_jerseys_qwen(**vars(parser.parse_args())), ensure_ascii=False, indent=2))
 

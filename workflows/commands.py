@@ -92,10 +92,14 @@ class CommandBuilder:
     ) -> list[str]:
         if stage == "jersey":
             self._require(self.settings.qwen_python, "Qwen Python")
-            return [str(self.settings.qwen_python), "-m", "cli.jersey_qwen",
+            command = [str(self.settings.qwen_python), "-m", "cli.jersey_qwen",
                     "--video", str(paths["source"]), "--tracks", str(paths["stable_tracks"]),
                     "--identity-map", str(paths["identity_map"]), "--output-dir", str(paths["identity"]),
                     "--model-dir", str(self.settings.qwen_model_dir)]
+            palette = paths["match_root"] / "bootstrap_tracklets/team_map.json"
+            if palette.is_file():
+                command.extend(["--assess-player","--team-map",str(palette),"--min-gap-s","0.5"])
+            return command
         if stage == "players":
             command = [self.control_python, "-m", "cli.build_person_library",
                        "--run-dir", str(paths["match_root"]), "--clip-name", paths["output"].name,

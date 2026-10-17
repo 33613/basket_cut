@@ -2,6 +2,7 @@
 import hashlib
 import html
 from pathlib import Path
+import shutil
 
 from PIL import Image
 from workflows.library_inputs import safe_relative
@@ -11,11 +12,27 @@ def write_report(root, snapshot, output):
     output = Path(output)
     images = output / "review_images"
     images.mkdir(exist_ok=True)
+    originals=output/"original_images"
+    originals.mkdir(exist_ok=True)
     sections = []
     for person in sorted(snapshot["people"], key=lambda p: (p["status"] != "candidate", -len(p["members"]),p["player_id"])):
         cards = []
         for node in person["members"]:
-            source = Path(root) / ("bootstrap" if node.get("evidence_kind") == "bootstrap_photo" else node["clip_name"]+"/identity")
+            source = Path(root) / ("bootstrap" if node.get("evidence_kind") == "bootstrap_photo" else "bootstrap_tracklets" if node.get("evidence_kind") == "bootstrap_tracklet" else node["clip_name"]+"/identity")
+            if node.get("evidence_kind")=="bootstrap_tracklet":
+                state=node.get("memory",{})
+                samples=state.get("templates") or [node.get("cover") or {}]
+                for sample in samples:
+                    relative=sample.get("crop_path")
+                    if not relative:continue
+                    original=safe_relative(source,relative)
+                    name=hashlib.sha256((node["node_id"]+relative).encode()).hexdigest()[:24]
+                    shutil.copyfile(original,originals/(name+".png"))
+                    with Image.open(original) as image:
+                        size=image.size;thumb=image.convert("RGB");thumb.thumbnail((160,220));thumb.save(images/(name+".jpg"),quality=90)
+                    caption=f'{node["node_id"]} | {state.get("status")} | {node.get("team_id")} #{(node.get("jersey") or {}).get("number")} | {sample.get("view","unknown")} | {size[0]}×{size[1]} px | '+(", ".join(state.get("reasons",[])) or "点击查看原尺寸图")
+                    cards.append(f'<figure><a href="original_images/{name}.png"><img loading="lazy" src="review_images/{name}.jpg"></a><figcaption>{html.escape(caption)}</figcaption></figure>')
+                continue
             relative = (node.get("cover") or {}).get("crop_path")
             image_html = ""
             if relative:

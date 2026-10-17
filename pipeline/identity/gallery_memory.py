@@ -10,6 +10,7 @@ import math
 import numpy as np
 
 from pipeline.identity.cross_clip import part_distances
+from pipeline.identity.player_evidence import strong_identity
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,12 @@ def incompatible(a, b):
     if (a.get("source_video_id") and a.get("source_video_id") == b.get("source_video_id")
             and a.get("evidence_kind") != "bootstrap_photo" and b.get("evidence_kind") != "bootstrap_photo"):
         sa, sb = a.get("source_clip_start_s"), b.get("source_clip_start_s")
+        # A bootstrap window and a possession clip can contain the exact same
+        # source frames. Their independently repeated team/number evidence may
+        # link them; two bodies within the same tracking pass still conflict.
+        if ((a.get("evidence_kind") == "bootstrap_tracklet") != (b.get("evidence_kind") == "bootstrap_tracklet")
+                and strong_identity(a) and strong_identity(a) == strong_identity(b)):
+            return None
         if sa is not None and sb is not None and any(
                 sa+x[0] < sb+y[1] and sb+y[0] < sa+x[1]
                 for x in a.get("intervals", []) for y in b.get("intervals", [])):
@@ -97,7 +104,9 @@ def select_templates(items, distance, limit):
         remaining.remove(best)
         remaining = [i for i in remaining if not (
             items[i].get("source_frame") == items[best].get("source_frame")
-            or (distance[i, best] < .025 and items[i].get("view") == items[best].get("view")))]
+            or (distance[i, best] < .025 and items[i].get("view") == items[best].get("view")))
+            and not (items[i].get("view") not in (None,"unknown")
+                and sum(items[j].get("view")==items[i].get("view") for j in chosen)>=2)]
     return chosen
 
 
@@ -187,6 +196,15 @@ def plan_memory(records, evidence, policy, *, incremental=False):
                 for k in (i, j):
                     states[k]["reasons"] = sorted(set(states[k]["reasons"] + ["overlapping_person_targets"]))
     eligible = [i for i, state in enumerate(states) if not state["reasons"] and not records[i].get("locked")]
+    # The same claimed team/number appearing on distinct simultaneous bodies
+    # signals OCR, duplicate tracking or team ambiguity. Do not choose a winner.
+    for i in list(eligible):
+        identity = strong_identity(nodes[i])
+        if identity and any(j != i and strong_identity(nodes[j]) == identity
+                and incompatible(nodes[i],nodes[j]) in {"simultaneous_observations","overlapping_source_tracks"}
+                for j in eligible):
+            states[i]["reasons"] = ["simultaneous_strong_identity_conflict"]
+    eligible = [i for i in eligible if not states[i]["reasons"]]
     anchors = {}
     for i in eligible:
         if incremental and records[i].get("established"):
@@ -211,6 +229,12 @@ def plan_memory(records, evidence, policy, *, incremental=False):
         nums = {number_hint(nodes[i]) for i in combined} - {None}
         teams = {nodes[i].get("team_id") for i in combined} - {None}
         if len(nums) > 1 or len(teams) > 1: return math.inf
+        strong_a = {strong_identity(nodes[i]) for i in a} - {None}
+        strong_b = {strong_identity(nodes[i]) for i in b} - {None}
+        if len(strong_a) == len(strong_b) == 1 and strong_a == strong_b:
+            # Independent clear multi-frame team+number evidence can link
+            # different appearances. KPR distance remains diagnostic.
+            return -1.
         if incremental and any(i in anchored for i in a+b):
             ai = [k for i in a for k in states[i]["feature_indices"]]
             bi = [k for i in b for k in states[i]["feature_indices"]]
@@ -253,7 +277,7 @@ def plan_memory(records, evidence, policy, *, incremental=False):
             a, b = groups[x], groups[y]
             shared = {number_hint(nodes[i]) for i in a+b} - {None}
             number_supported = len(shared) == 1 and all(number_hint(nodes[i]) for i in a+b) and (len(a) >= 2 or len(b) >= 2)
-            if rivals and min(rivals)-value < policy.min_margin and not number_supported:
+            if rivals and min(rivals)-value < policy.min_margin and not number_supported and value >= 0:
                 continue
             accepted = x, y; break
         if accepted is None: break
@@ -279,12 +303,19 @@ def plan_memory(records, evidence, policy, *, incremental=False):
         numbered = [i for i in group if number_hint(nodes[i])]
         number_backed = len({nodes[i]["clip_name"] for i in numbered}) >= 2 and len({number_hint(nodes[i]) for i in numbered}) == 1
         promoted = (independent or track_support or any(i in locks for i in group)) and (
-            established or any(i in locks for i in group) or number_backed or nearest > policy.strong_distance)
+            established or any(i in locks for i in group) or number_backed or nearest > policy.strong_distance
+            or any(strong_identity(nodes[i]) for i in group))
+        if all(nodes[i].get("evidence_kind") == "bootstrap_tracklet" for i in group):
+            promoted = promoted and (any(strong_identity(nodes[i]) for i in group) or any(i in locks for i in group))
         planned.append({"members": group, "promoted": promoted, "nearest_other_distance": nearest if math.isfinite(nearest) else None,
                         "novel_by_distance": math.isfinite(nearest) and nearest >= policy.novelty_distance})
         for i in group:
+            states[i]["identity_basis"] = ("clear_multiframe_team_number" if any(strong_identity(nodes[j]) for j in group)
+                else "manual" if any(j in locks for j in group) else "appearance_support")
             if not promoted:
-                states[i]["reasons"] = ["ambiguous_nearby_identity" if nearest <= policy.supported_distance else "insufficient_independent_support"]
+                states[i]["reasons"] = (["initial_identity_needs_team_and_number"]
+                    if nodes[i].get("evidence_kind") == "bootstrap_tracklet" and not any(strong_identity(nodes[j]) for j in group)
+                    else ["ambiguous_nearby_identity" if nearest <= policy.supported_distance else "insufficient_independent_support"])
             states[i]["status"] = "accepted" if promoted else "pending"
         if promoted:
             items, indices = {}, []

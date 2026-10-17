@@ -90,7 +90,7 @@ def preflight_video(source, *, ffmpeg="ffmpeg", ffprobe="ffprobe"):
 
 
 def cut_video(source, output, start_s, end_s, *, ffmpeg="ffmpeg", ffprobe="ffprobe",
-              metadata=None, preview=False):
+              metadata=None, preview=False, lossless=False):
     """Accurate transcoding seek, CFR output for frame_idx/fps based backends.
 
     Source seconds are relative to the first video PTS, including for VFR input.
@@ -105,18 +105,24 @@ def cut_video(source, output, start_s, end_s, *, ffmpeg="ffmpeg", ffprobe="ffpro
     if output == source:
         raise ValueError("Cannot overwrite source video")
     output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.with_name("." + output.stem + ".partial.mp4")
+    if lossless and (preview or output.suffix.lower() != ".mkv"):
+        raise ValueError("Lossless initialization windows require MKV and cannot be previews")
+    temporary = output.with_name("." + output.stem + (".partial.mkv" if lossless else ".partial.mp4"))
     # -ss is relative to the container start unless -seek_timestamp is enabled.
     seek = start + meta["video_start_pts_s"] - meta["format_start_pts_s"]
     command = [ffmpeg, "-nostdin", "-v", "error", "-y", "-ss", f"{seek:.9f}",
                "-i", str(source), "-t", f"{end - start:.9f}", "-map", "0:v:0"]
-    if preview:
+    if lossless:
+        command += ["-an", "-r", meta["frame_rate"]] + frame_sync_args(ffmpeg) + [
+            "-c:v", "ffv1", "-level", "3", "-threads", "2", str(temporary)]
+    elif preview:
         command += ["-an", "-vf", "scale=w='min(1280,iw)':h=-2", "-r", str(min(meta["fps"], 30)),
                     "-crf", "23"]
     else:
         command += ["-map", "0:a:0?", "-c:a", "aac", "-r", meta["frame_rate"], "-crf", "18"]
-    command += frame_sync_args(ffmpeg) + ["-c:v", "libx264", "-preset", "fast", "-threads", "2",
-                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary)]
+    if not lossless:
+        command += frame_sync_args(ffmpeg) + ["-c:v", "libx264", "-preset", "fast", "-threads", "2",
+                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(temporary)]
     try:
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode:
@@ -124,8 +130,10 @@ def cut_video(source, output, start_s, end_s, *, ffmpeg="ffmpeg", ffprobe="ffpro
         actual = probe_video(temporary, ffprobe=ffprobe)
         if abs(actual["duration_s"] - (end - start)) > max(.15, 2 / actual["fps"]):
             raise ValueError("Encoded clip duration differs from requested source interval")
+        if lossless and (actual["width"], actual["height"]) != (meta["width"], meta["height"]):
+            raise ValueError("Lossless window dimensions changed")
         temporary.replace(output)
         return {**actual, "path": str(output), "source_start_s": start, "source_end_s": end,
-                "timestamp_quantization_s": 1 / actual["fps"], "encoding": "h264_cfr"}
+                "timestamp_quantization_s": 1 / actual["fps"], "encoding": "ffv1_cfr" if lossless else "h264_cfr"}
     finally:
         temporary.unlink(missing_ok=True)

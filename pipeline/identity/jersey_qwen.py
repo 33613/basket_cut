@@ -40,7 +40,7 @@ def qwen_consensus(readings, *, min_support=2, min_gap_s=.25):
 
 
 def sample_torsos(video, tracks, output_dir, *, max_samples=6, min_gap_s=.25,
-                  track_ids=None):
+                  track_ids=None, full_person=False):
     import cv2
     from contracts.schema import TrackRecord
     from pipeline.identity.sampling import select_quality_samples
@@ -49,8 +49,9 @@ def sample_torsos(video, tracks, output_dir, *, max_samples=6, min_gap_s=.25,
         raise ValueError("Require at least two number samples")
     records = [TrackRecord.from_dict({"category_id": 0, **row}) for row in read_jsonl(tracks)]
     selected, quality = select_quality_samples(
-        video, records, purpose="jersey", sample_count=max_samples,
+        video, records, purpose="person" if full_person else "jersey", sample_count=max_samples,
         min_gap_s=min_gap_s, track_ids=track_ids,
+        **({"min_width":40,"min_height":128,"min_score":.65} if full_person else {}),
     )
     if not selected:
         return []
@@ -70,6 +71,10 @@ def sample_torsos(video, tracks, output_dir, *, max_samples=6, min_gap_s=.25,
                 raise ValueError("Video ended before selected number frames")
             for record in by_frame.get(frame_idx, []):
                 info = quality[(record.track_id, frame_idx)]
+                if full_person and (info["sampling_components"]["overlap_fraction"] > .15
+                        or info["sampling_components"]["completeness"] < .97
+                        or info["sampling_sharpness_laplacian_var"] < 30):
+                    continue
                 left, top, right, bottom = info["sampling_roi_xyxy"]
                 relative = f"jersey_media/T{record.track_id:04d}/f{frame_idx:08d}.png"
                 path = output / relative
@@ -88,7 +93,8 @@ def sample_torsos(video, tracks, output_dir, *, max_samples=6, min_gap_s=.25,
 
 
 def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *,
-                           max_samples=6, min_support=2, min_gap_s=.25, device="cuda", backend=None):
+                           max_samples=6, min_support=2, min_gap_s=.25, device="cuda", backend=None,
+                           assess_player=False, team_map=None):
     from PIL import Image
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -98,13 +104,16 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
     ids = {int(r["raw_track_id"]) for r in mappings}
     qwen_consensus([], min_support=min_support, min_gap_s=min_gap_s)
     samples = sample_torsos(video, tracks, output, max_samples=max_samples,
-                            min_gap_s=min_gap_s, track_ids=ids) if ids else []
+                            min_gap_s=min_gap_s, track_ids=ids, full_person=assess_player) if ids else []
     if samples and backend is None:
         backend = QwenBackend(model_dir, device=device)
     # A track with no readable crops still belongs to the same model contract
     # as other clips. Resolve provenance without loading a GPU model.
     provenance = (backend.provenance if backend else model_provenance(model_dir)
                   if ids else {"backend": "qwen_vl", "empty_input": True})
+    if assess_player:
+        from pipeline.identity.player_evidence import assessment_provenance,parse_assessment,summarize
+        provenance = assessment_provenance(provenance)
     by_track = defaultdict(list)
     inference_count, cache_hit_count = 0, 0
     for sample in samples:
@@ -118,12 +127,17 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
             cache_hit_count += 1
         else:
             with Image.open(path) as image:
-                raw = backend.read(image.convert("RGB"))
+                raw = backend.assess_player(image.convert("RGB")) if assess_player else backend.read(image.convert("RGB"))
             inference_count += 1
-            result = {**parse_reading(raw), "raw_response": raw}
+            result = {**(parse_assessment(raw) if assess_player else parse_reading(raw)), "raw_response": raw}
             write_json(cache, result)
         by_track[sample["raw_track_id"]].append({**sample, **result, "text": result["number"]})
     evidence = {tid: {"raw_track_id": tid, **qwen_consensus(by_track[tid], min_support=min_support, min_gap_s=min_gap_s)} for tid in sorted(ids)}
+    if assess_player:
+        palette = json.loads(Path(team_map).read_text()) if team_map else {}
+        for tid in sorted(ids):
+            rich = summarize(by_track[tid],min_support=min_support,gap=min_gap_s,team_map=palette)
+            evidence[tid] = {"raw_track_id":tid,**rich["jersey"],"team_id":rich["team_id"],"team_evidence":rich["team_evidence"]}
     from pipeline.identity.jersey import group_numbers
     groups = defaultdict(list)
     for row in mappings:
@@ -138,7 +152,8 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
                 write_jsonl_line(handle, row)
     summary = {"backend": "qwen_vl", "provenance": provenance,
         "thresholds": {"min_support": min_support, "min_gap_s": min_gap_s,
-                       "max_samples": max_samples, "sampling_strategy": SAMPLING_STRATEGY},
+                       "max_samples": max_samples, "sampling_strategy": SAMPLING_STRATEGY,
+                       **({"assessment":"clear_player_v1","team_map":palette} if assess_player else {})},
         "track_count": len(ids), "sample_count": len(samples),
         "model_invoked": inference_count > 0, "inference_count": inference_count,
         "cache_hit_count": cache_hit_count,

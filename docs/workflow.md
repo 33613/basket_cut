@@ -13,7 +13,18 @@
     clips/CL-*.mp4              # 原分辨率 H.264 CFR 片段
     clips/CL-*.json              # 编码、量化误差与来源记录
   results/
-    bootstrap/                  # 独立照片、人物裁剪、KPR 特征、单帧号码和入库凭据
+    bootstrap_tracklets/        # 六窗口初始化，与回合片段分开计数
+      protocol.json             # 通用时间分层、画质阈值、原视频/检测模型签名
+      selection.json            # 候选探查和最终 6 个起点
+      windows/WIN-*.mkv         # 原分辨率 FFV1 无损 CFR 窗口
+      WIN-*-tracks.jsonl        # 每窗口独立的连续追踪
+      media/*.png               # 原尺寸人物裁剪，无缩放
+      manifest.json             # 窗口/裁剪哈希、源时间与轨迹关联
+      assessments.json          # Qwen 角色、清晰无遮挡、队服、号码、朝向
+      team_map.json             # 显式队伍映射或谨慎推断的匿名 KIT 队伍
+      features.npz              # 仅合格清晰人物图的 KPR 特征
+      feature_contract.json
+      registration.json         # 入库数、淘汰数和修订号
     batch_manifest.json         # clip_id、来源及处理签名
     batch_summary.json
     library/
@@ -129,7 +140,13 @@
 
 ## 追踪、身份与动作
 
-全流程 `--stage full` 首先随机抽取默认 24 张照片（`--bootstrap-photos`、`--bootstrap-seed` 可调）。每个时间层随机取一张，单独重置 MOTIP，仅使用检测能力，质量筛选后 KPR 提取人物裁剪特征。初始化照片没有虚构的连续轨迹，使用独立 `SEED-*` / 检测样本 ID；同一照片里的不同人物禁止合并。单帧号码始终是弱证据，不算多帧共识。候选图库支持后续轨迹匹配与追加；它可能包含裁判、观众、重复或缺失球员，可在前端排除/修正，不能假定已建立完整名单。
+全流程 `--stage full` 首先运行 `cli.bootstrap_tracklets`，默认 6 个 4 秒窗口（`--bootstrap-windows 6`、`--bootstrap-window-s 4`）。适用于任意足够长的比赛视频，不固定 15 分钟或某支球队。把源时间划为 6 层，每层 4 个稀疏中心帧只用于检测画质探查；选择清晰人物最多且质量更好的短窗口，再逐帧连续追踪。每个窗口只重置一次完整 MOTIP 跟踪器；远隔窗口不共享轨迹 ID。某层没有合格人物时从其他清晰时段补足；仍找不到 6 个互不重叠的清晰窗口时明确停止，不用模糊人物填满。每个完成窗口有断点记录，恢复不会重新追踪已完成窗口。
+
+初始化人物图默认要求高度至少 128px、宽度至少 40px、检测分数至少 0.65、不贴画面边缘、框重叠不超过 0.15、Laplacian 方差至少 30。全部是可诊断的工程阈值。每条足够长的轨迹最多选 4 张相隔至少 0.5 秒的清晰全身图，直接入口 `--samples-per-track` 可调；Qwen 进一步拒绝裁判、非球员、多人混杂、显著遮挡和模糊。KPR 只提取通过筛选的图。两帧以上一致的队伍与号码构成强身份候选，号码冲突暂不进入初始库，单次读数不能作为锚点。未知号码但清晰的轨迹可辅助匹配已有锚点，尚不能关联的保持待定。单独清晰球衣颜色不等同明确队伍：只有恰好两个颜色各获至少两条轨迹支持时才自动建立匿名队伍；其他情况需显式配置或保持待定。自动证据仍非人工真值。
+
+每人最多 6 个模板，每个已知朝向最多 2 个；只有单一朝向时不强求多角度。强同队同号可跨 KPR 外观距离关联，不同队伍/号码和同时间不同身体的矛盾会阻止合并。后续片段读取同一 `team_map.json`，使用完整人物图判断队伍、号码和角色，再更新原身份库。初始化短窗口不冒充回合，不产生动作事件。
+
+自动探查选点不理想时，写一个 JSON 文件如 `[20, 150, 280, 410, 540, 670]`（仅为格式示例，需按输入时长和实际画质选择），传 `--bootstrap-windows-file starts.json`。也可用 `--bootstrap-team-map teams.json` 明确映射，如 `{"black":"home","white":"away"}`。基础尺寸与清晰度阈值可在直接调用 `cli.bootstrap_tracklets --help` 时调整。首次测试请使用新输出目录，保留旧照片库。`registration.json` 的 `ready_for_incremental` 表示是否已建立身份锚点；没有锚点时 `--stage full` 会先停止，让初始化结果可供排查。
 
 单独初始化：
 
@@ -139,7 +156,7 @@
   --output-dir runtime/outputs/game-001 --stage initialize
 ```
 
-各模型通过独立子进程顺序执行，释放显存后进入下一个模型。初始化和片段共享 `results/library/players.sqlite3` 与同一 KPR 特征合同。已登记的照片、特征与号码不能改写；模型、抽帧或证据变化请新建运行目录。图库匹配/模板策略可按后文维护命令显式修订，不重新提取特征。`--skip-bootstrap` 可用于不需要照片初始图库的对照。
+各模型通过独立子进程顺序执行，释放显存后进入下一个模型。初始化和片段共享 `results/library/players.sqlite3` 与同一 KPR 特征合同。已登记的窗口、人物图、特征与号码不能改写；模型、选窗或证据变化请新建运行目录。图库匹配/模板策略可按后文维护命令显式修订，不重新提取特征。`--skip-bootstrap` 可用于不需要初始化图库的对照。
 
 ```bash
 .venv/bin/python -u -m cli.process_match --env-file .env \
@@ -149,7 +166,22 @@
 
 单片段通过后去掉 `--limit 1`。`cli.process_match` 默认 `--stage full` 自动先初始化图库、分析、导出，再运行全部片段；无默认 30 片段截断。有未决边界、或长视频只导出整段时会先停止下游处理。仅做探索性链路测试可显式传入 `--allow-unreviewed`，不会把切分结果改标为准确；`--stage process` 使用已导出的片段，不会自动补跑初始化。
 
-## 初始化图库只读复核
+## 初始化画质与只读复核
+
+原下载命令的 `-c copy` 不重新编码，也不主动缩放。已知测试文件是 1280×720、25FPS；本地元数据不能证明上游是否另有更高清码流。Qwen 回合预览采用缩放和 CRF23，回合导出用原分辨率 H.264 CRF18，均与现在的 FFV1 初始化窗口区分。PNG 人物裁剪保留原尺寸，网页放大无法恢复源视频没有的细节。
+
+```bash
+.venv/bin/python -m cli.inspect_video_quality --input runtime/data/game-001.mp4
+.venv/bin/python -m cli.inspect_video_quality --input runtime/data/game-001.mp4 \
+  --derived runtime/outputs/game-001/results/bootstrap_tracklets/windows/WIN-01.mkv
+.venv/bin/python -m cli.maintain_players --operation preview \
+  --run-dir runtime/outputs/game-001/results \
+  --output-dir runtime/outputs/game-001/diagnostics/six-window-preview
+```
+
+预览会导出可下载本地查看的 HTML。网页导入 `results/` 后可查看原尺寸模板、角色与队伍/号码证据，下载无损 MKV 短窗口。统计区分初始化轨迹与业务片段。CPU 自检 `cli.check_tracklet_bootstrap` 使用真实 FFmpeg 视频和明确标记的合成模型，验证逐像素无损、身份门槛、视角上限、恢复、维护与前端；不代表真实模型准确率。
+
+## 历史照片库只读复核
 
 当照片观察很多、实际图库仅有少数样本时，先保留原库并诊断，暂不放宽匹配阈值。旧版初始化复用了增量登记规则：待定身份不参与后续匹配；“可比较距离”还包含被同帧冲突排除的身份，可能阻止新身份建立。v2 已改用候选分组和有限模板机制；旧库通过后文维护命令预览/迁移，不能由旧版登记阻塞直接判断 KPR 模型效果差。
 

@@ -1,4 +1,4 @@
-"""Random photo gallery initialization; frames never share a tracking state."""
+"""Legacy photo-run reproduction and audits; new initialization uses tracklets."""
 
 import fcntl
 import json

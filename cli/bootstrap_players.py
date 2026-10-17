@@ -1,4 +1,4 @@
-"""Initialize a match gallery from independent random photographs."""
+"""Legacy photo-run reproduction. New matches use cli.bootstrap_tracklets."""
 
 import argparse
 import json

@@ -42,9 +42,17 @@ def curate_records(root, records, *, per_observation=8):
     photos = json.loads(photos_path.read_text()) if photos_path.is_file() else {}
     photo_rows = {s["sample_id"]: s for s in photos.get("samples", [])}
     evidence, clip_samples = {}, {}
+    tracklet_banks = None
     for record in records:
         node = record["node"]
         key = node["node_id"]
+        if node.get("evidence_kind") == "bootstrap_tracklet":
+            if tracklet_banks is None:
+                from workflows.tracklet_bootstrap import template_evidence
+                tracklet_banks = template_evidence(root)
+            if key not in tracklet_banks:raise ValueError("Missing clear tracklet templates")
+            evidence[key] = tracklet_banks[key]
+            continue
         if node.get("evidence_kind") == "bootstrap_photo":
             if key not in photo_rows:
                 raise ValueError("Missing bootstrap photo evidence")
@@ -90,6 +98,12 @@ def curate_records(root, records, *, per_observation=8):
             clip_samples[name] = grouped, source_hashes, source_stamps
         grouped, source_hashes, source_stamps = clip_samples[name]
         bank = [item for tid in node["raw_track_ids"] for item in grouped.get(int(tid), [])]
+        clear_assessment = (node.get("jersey") or {}).get("method") == "clear_player_multiframe_v1"
+        if clear_assessment:
+            approved={(int(t["raw_track_id"]),int(r["frame_idx"]))
+                for t in node["jersey"].get("tracks",[]) for r in t.get("readings",[]) if r.get("usable") is True}
+            bank=[item for tid in node["raw_track_ids"] for item in grouped.get(int(tid),[])
+                if (int(tid),int(item["frame_idx"])) in approved]
         if bank:
             # Remove unusable images before diversity selection; no source file
             # is unlinked. A larger existing sample archive need not fill DB.
@@ -101,5 +115,6 @@ def curate_records(root, records, *, per_observation=8):
         else:
             # Old/synthetic exports may only contain prototypes. Never pretend
             # these are actual multi-view image features.
-            evidence[key] = {"feature_kind": "track_prototype", "hold_reasons": []}
+            evidence[key] = ({"templates":[],"hold_reasons":["no_clear_assessed_kpr_images"]} if clear_assessment
+                             else {"feature_kind": "track_prototype", "hold_reasons": []})
     return evidence

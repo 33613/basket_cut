@@ -181,9 +181,20 @@ def load_library_inputs(options: PersonLibraryOptions):
                 jersey["tracks"] = [jersey_tracks[tid] for tid in tids]
                 if jersey["status"] == "conflict":
                     reasons.add("jersey_number_conflict")
+            team_fields = {}
+            if options.use_jersey_evidence and tids and all(jersey_tracks[t].get("method") == "clear_player_multiframe_v1" for t in tids):
+                from pipeline.identity.player_evidence import summarize
+                rich = summarize([r for t in tids for r in jersey_tracks[t].get("readings",[])],
+                    gap=jersey_summary["thresholds"]["min_gap_s"],
+                    min_support=jersey_summary["thresholds"]["min_support"],team_map=jersey_summary["thresholds"].get("team_map",{}))
+                team_fields = {k:rich[k] for k in ("team_id","team_evidence")}
+                jersey.update(rich["jersey"])
+                jersey["identity_evidence_contract"]={"model":jersey_summary["provenance"],
+                    "team_map":jersey_summary["thresholds"].get("team_map",{})}
+                if jersey["status"]=="conflict":reasons.add("jersey_number_conflict")
             node_id = "N-" + hashlib.sha256(f"{name}\0{pid}".encode()).hexdigest()[:16]
             nodes.append({"node_id": node_id, "clip_name": name, "video_id": meta["video_id"],
-                          **lineage,
+                          **lineage, **team_fields,
                           **({"track_uids": [track_uid(context["clip_id"], tid) for tid in tids]} if lineage else {}),
                           "filename": Path(meta["input_path"]).name, "local_person_id": pid,
                           "raw_track_ids": tids,

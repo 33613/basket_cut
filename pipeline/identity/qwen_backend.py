@@ -131,6 +131,14 @@ class QwenBackend:
         inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
         return self._generate(inputs)
 
+    def assess_player(self, image):
+        from pipeline.identity.player_evidence import PLAYER_PROMPT
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": image}, {"type": "text", "text": PLAYER_PROMPT}]}]
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
+        return self._generate(inputs, max_new_tokens=256)
+
     def read_video(self, path, prompt, *, num_frames=8, max_new_tokens=128):
         """Infer one local window. Times in the response refer to this local clip.
 

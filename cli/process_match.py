@@ -20,8 +20,10 @@ def main():
     parser.add_argument("--match-id")
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--stage", choices=("initialize", "segment", "process", "full", "status"), default="full")
-    parser.add_argument("--bootstrap-photos", type=int, default=24)
-    parser.add_argument("--bootstrap-seed", type=int, default=42)
+    parser.add_argument("--bootstrap-windows", type=int, choices=(6,), default=6)
+    parser.add_argument("--bootstrap-window-s", type=float, default=4.)
+    parser.add_argument("--bootstrap-windows-file", type=Path)
+    parser.add_argument("--bootstrap-team-map", type=Path)
     parser.add_argument("--skip-bootstrap", action="store_true")
     parser.add_argument("--allow-unreviewed", action="store_true", help="Explicitly run exploratory downstream processing with unresolved segmentation")
     parser.add_argument("--review-file", type=Path)
@@ -64,8 +66,8 @@ def main():
     if args.dry_run:
         print(json.dumps({"dry_run": True, "stage": args.stage,
             "segmentation_command": shlex.join(command), "results_dir": str(results),
-            "bootstrap": {"enabled": not args.skip_bootstrap, "photos": args.bootstrap_photos, "seed": args.bootstrap_seed},
-            "next": "Independent photo detections seed candidate identities; clips reset MOTIP. KPR + Qwen update one library; actions join by clip/track."}, indent=2))
+            "bootstrap": {"enabled": not args.skip_bootstrap, "mode": "six_clear_tracking_windows", "windows": args.bootstrap_windows, "window_s": args.bootstrap_window_s},
+            "next": "Six native-resolution windows seed clear player tracklets; team/number consensus anchors identities; KPR supplements association. Possession clips update this library."}, indent=2))
         return
     normalize_omp_threads()
     root.mkdir(parents=True, exist_ok=True)
@@ -81,15 +83,17 @@ def main():
             raise ValueError("Output directory belongs to another match/source")
         atomic_json(match_file, identity)
         if args.stage in ("initialize", "full") and not args.skip_bootstrap:
-            bootstrap_command = [sys.executable, "-u", "-m", "cli.bootstrap_players",
+            bootstrap_command = [sys.executable, "-u", "-m", "cli.bootstrap_tracklets",
                 "--input", str(args.input.resolve()), "--run-dir", str(results), "--match-id", args.match_id,
-                "--photos", str(args.bootstrap_photos), "--seed", str(args.bootstrap_seed),
-                "--player-match-distance", str(args.player_match_distance),
-                "--player-novelty-distance", str(args.player_novelty_distance),
-                "--player-min-margin", str(args.player_min_margin)]
+                "--windows", str(args.bootstrap_windows), "--window-s", str(args.bootstrap_window_s)]
+            for key,value in (("--windows-file",args.bootstrap_windows_file),("--team-map",args.bootstrap_team_map)):
+                if value: bootstrap_command.extend([key,str(value.resolve())])
             if args.env_file:
                 bootstrap_command.extend(["--env-file", str(args.env_file.resolve())])
             subprocess.run(bootstrap_command, cwd=settings.repository_root, check=True)
+            registration = results / "bootstrap_tracklets/registration.json"
+            if args.stage == "full" and registration.is_file() and not json.loads(registration.read_text()).get("ready_for_incremental"):
+                raise RuntimeError("Initialization produced no clear team/number identity anchors; inspect bootstrap_tracklets before full processing")
         if args.stage in ("segment", "full"):
             root.mkdir(parents=True, exist_ok=True)
             # Subprocess exit releases the Qwen model before MOTIP starts.

@@ -164,13 +164,15 @@ def import_results(
         )
     if not videos:
         library = load_json(within_root(root / "library/library_manifest.json", root))
+        tracklets = load_json(within_root(root / "bootstrap_tracklets/manifest.json", root))
         photos = load_json(within_root(root / "bootstrap/photos.json", root))
-        if (not library or library.get("scope") != "match_incremental" or not photos
-                or photos.get("status") != "completed" or not (root / "bootstrap/registration.json").is_file()):
-            raise ValueError("No tracking results or registered bootstrap photo gallery found")
-        source_media_path(photos["protocol"]["source"]["path"], settings)
+        ready_tracklets = tracklets and tracklets.get("status")=="tracked" and (root/"bootstrap_tracklets/registration.json").is_file()
+        ready_photos = photos and photos.get("status")=="completed" and (root/"bootstrap/registration.json").is_file()
+        if not library or library.get("scope")!="match_incremental" or not (ready_tracklets or ready_photos):
+            raise ValueError("No tracking results or registered initialization gallery found")
+        source_media_path((tracklets if ready_tracklets else photos)["protocol"]["source"]["path"], settings)
         expected_count = 0 if batch is None else expected_count
-        import_warnings.append("Photo gallery initialized; no tracking clips are browseable yet")
+        import_warnings.append("Player gallery initialized; no possession clips are browseable yet")
     manifest = {
         "schema_version": 1,
         "project_id": project_id,

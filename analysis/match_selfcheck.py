@@ -829,7 +829,7 @@ class MatchChecks(unittest.TestCase):
         argv = ["process_match", "--input",str(self.source),"--output-dir",str(output),"--match-id","controller-test"]
         with patch.object(sys,"argv",argv),patch.object(process_match.subprocess,"run",side_effect=execute),patch.object(process_match,"run_batch",side_effect=batch),patch("sys.stdout",new=io.StringIO()):
             process_match.main()
-        self.assertEqual(operations,["cli.bootstrap_players","cli.segment_video","run_batch"])
+        self.assertEqual(operations,["cli.bootstrap_tracklets","cli.segment_video","run_batch"])
         self.assertTrue((output / "match_report.json").is_file())
         argv[-1]="foreign-match"
         with patch.object(sys,"argv",argv),self.assertRaisesRegex(ValueError,"another match"):

@@ -46,8 +46,20 @@ def library_context(settings, store, project_id):
     if any(m.get("evidence_kind") == "bootstrap_photo" for p in people for m in p["members"]):
         photos = json.loads(within_root(run / "bootstrap/photos.json", run).read_text())
         samples = {r["sample_id"]: r for r in photos["samples"]}
+    tracklets = None
+    tracklet_samples = {}
+    tracklet_manifest = within_root(run/"bootstrap_tracklets/manifest.json",run)
+    if tracklet_manifest.is_file():
+        tracklets = json.loads(tracklet_manifest.read_text())
+        for row in tracklets["samples"]:tracklet_samples.setdefault(row["track_key"],[]).append(row)
     for person in people:
         for member in person["members"]:
+            if member.get("evidence_kind") == "bootstrap_tracklet":
+                known=tracklet_samples.get(member["node_id"],[])
+                if (not known or member.get("source_sha256")!=tracklets["protocol"]["source"]["sha256"]
+                        or member["cover"]["crop_path"] not in {r["crop_path"] for r in known}):
+                    raise ValueError("Invalid initialization tracklet provenance")
+                continue
             if member.get("evidence_kind") == "bootstrap_photo":
                 if (member["node_id"] not in samples or member.get("source_sha256") != photos["protocol"]["source"]["sha256"]
                         or member["cover"]["crop_path"] != samples[member["node_id"]]["crop_path"]):
@@ -58,7 +70,7 @@ def library_context(settings, store, project_id):
                 raise ValueError("Person library references a clip outside this imported project")
     return {"run": run, "base": base, "directory": current, "manifest": manifest,
             "baseline": baseline, "people": people, "events": events, "videos": videos, "review": review,
-            "review_path": review_path, "revised": revised, "stale_review": stale}
+            "review_path": review_path, "revised": revised, "stale_review": stale, "tracklets":tracklets}
 
 
 def decorate_member(project_id, context, member):
@@ -73,6 +85,9 @@ def decorate_member(project_id, context, member):
                 if item.get("media_kind") == "bootstrap":
                     path = within_root(context["run"] / "bootstrap" / relative, context["run"] / "bootstrap/media")
                     item["crop_url"] = f'/api/projects/{project_id}/bootstrap-media/{quote(path.name)}'
+                elif item.get("media_kind") == "bootstrap_tracklet":
+                    path = within_root(context["run"] / "bootstrap_tracklets" / relative, context["run"] / "bootstrap_tracklets/media")
+                    item["crop_url"] = f'/api/projects/{project_id}/bootstrap-tracklet-media/{quote(path.name)}'
                 else:
                     kind = item.get("media_kind", "identity")
                     if kind not in {"identity", "identity_raw"}: raise ValueError("Invalid memory media kind")
@@ -82,6 +97,15 @@ def decorate_member(project_id, context, member):
                     item["crop_url"] = f'/api/projects/{project_id}/videos/{video["video_id"]}/artifacts/{kind}/' + quote(relative, safe="/")
             decorated.append(item)
         member["memory"] = {**state, "templates": decorated}
+    if member.get("evidence_kind") == "bootstrap_tracklet":
+        def crop_url(relative):
+            image=within_root(context["run"]/"bootstrap_tracklets"/relative,context["run"]/"bootstrap_tracklets/media")
+            return f'/api/projects/{project_id}/bootstrap-tracklet-media/{quote(image.name)}'
+        cover=dict(member["cover"]);cover["crop_url"]=crop_url(cover["crop_path"])
+        jersey=dict(member.get("jersey") or {})
+        jersey["readings"]=[{**r,"crop_url":crop_url(r["crop_path"])} for r in jersey.get("readings",[])]
+        return {**member,"cover":cover,"jersey":jersey,"web_video_id":None,"exemplars":[],
+            "window_url":f'/api/projects/{project_id}/bootstrap-window/{quote(member["clip_name"])}'}
     if member.get("evidence_kind") == "bootstrap_photo":
         cover = dict(member["cover"])
         photo = within_root(context["run"] / "bootstrap" / cover["crop_path"], context["run"] / "bootstrap/media")
@@ -126,6 +150,7 @@ def library_catalog(settings, store, project_id, *, offset=0, limit=12, q="", st
     selected = []
     for person in people:
         text = " ".join([person["global_person_id"], person.get("identity_label") or "",
+                         *person.get("team_ids",[]),
                          *((person.get("jersey") or {}).get("candidate_numbers", [])),
                          *(member["filename"] for member in person["members"])])
         matches = {"all": person["status"] != "non_player", "candidate": person["status"] == "candidate", "non_player": person["status"] == "non_player", "merged": person["clip_count"] > 1,

@@ -315,6 +315,33 @@ def bootstrap_media(project_id: str, filename: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/projects/{project_id}/bootstrap-tracklet-media/{filename}")
+def bootstrap_tracklet_media(project_id: str, filename: str):
+    try:
+        from web.backend.person_library import library_context
+        context=library_context(settings,store,project_id)
+        known={Path(r["crop_path"]).name for r in ((context or {}).get("tracklets") or {}).get("samples",[])}
+        if filename not in known or Path(filename).name!=filename:raise FileNotFoundError("Unknown initialization crop")
+        base=within_root(context["run"]/"bootstrap_tracklets/media",context["run"])
+        return FileResponse(safe_child(base,filename))
+    except FileNotFoundError as exc:raise not_found(exc) from exc
+    except ValueError as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}/bootstrap-window/{window_id}")
+def bootstrap_window(project_id: str, window_id: str):
+    try:
+        from web.backend.person_library import library_context
+        context=library_context(settings,store,project_id)
+        windows=[w for w in ((context or {}).get("tracklets") or {}).get("windows",[]) if w["window_id"]==window_id]
+        if len(windows)!=1:raise FileNotFoundError("Unknown initialization window")
+        root=within_root(context["run"]/"bootstrap_tracklets",context["run"])
+        path=within_root(root/windows[0]["path"],root/"windows")
+        return FileResponse(path,filename=window_id+".mkv")
+    except FileNotFoundError as exc:raise not_found(exc) from exc
+    except ValueError as exc:raise HTTPException(status_code=400,detail=str(exc)) from exc
+
+
 @app.get("/api/projects/{project_id}/match-report")
 def get_match_report(project_id: str):
     from workflows.match_report import match_report
