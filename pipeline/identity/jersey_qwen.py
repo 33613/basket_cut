@@ -153,7 +153,7 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
     summary = {"backend": "qwen_vl", "provenance": provenance,
         "thresholds": {"min_support": min_support, "min_gap_s": min_gap_s,
                        "max_samples": max_samples, "sampling_strategy": SAMPLING_STRATEGY,
-                       **({"assessment":"clear_player_v1","team_map":palette} if assess_player else {})},
+                       **({"assessment":"clear_player_v2","team_map":palette} if assess_player else {})},
         "track_count": len(ids), "sample_count": len(samples),
         "model_invoked": inference_count > 0, "inference_count": inference_count,
         "cache_hit_count": cache_hit_count,

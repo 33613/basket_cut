@@ -17,27 +17,49 @@ COLORS = {
     "gray",
 }
 VIEWS = {"front", "back", "left", "right", "unknown"}
-PLAYER_PROMPT = """Inspect only the central basketball player in this original-resolution crop.
+PLAYER_PROMPT = """Assess the central person in this crop from real basketball footage.
+First decide whether the visible person is a player, referee, other or uncertain.
+Do not assume every person near the court is a player.
 Do not infer a hidden digit or read another person's jersey or the scoreboard.
 Return exactly one JSON object with these fields:
 {"role":"player|referee|other|uncertain", "single_target":true_or_false,
  "unoccluded":true_or_false, "clear":true_or_false,
+ "quality_reason":"brief visible evidence for the clarity judgment",
  "jersey_color":"black|white|red|blue|green|yellow|orange|purple|gray|unknown",
  "number":"0-99 or 00, or null", "readable":true_or_false,
  "view":"front|back|left|right|unknown"}.
 single_target is false when another person makes the intended target ambiguous.
 unoccluded is false when another person or object covers a significant part of the target.
-clear means this crop is suitable as an identity gallery image. A readable number
-is not required for clear. jersey_color is the main shirt fabric, excluding text,
-skin, court, shorts and trim. If not clear, return unknown. Return unknown view
-when unsure. Preserve 0 versus 00. Use JSON null for unreadable numbers."""
+Judge clear for BODY APPEARANCE re-identification, using clothing, body outline,
+shirt/shorts boundaries and visible appearance detail, not facial recognition.
+clear=true requires enough real detail to compare body/clothing appearances.
+An unreadable face or jersey number alone is NOT a reason for clear=false.
+clear=false when severe blur, compression/pixelation or missing body detail makes
+body appearance comparison unreliable. Do not label an image clear merely
+because the shirt color or one digit is recognizable. Explain the visible defect
+or useful appearance detail in quality_reason; do not invent detail by zooming.
+Decide number readability separately. An appearance crop can be clear while its
+number is unreadable; readable digits alone do not certify appearance quality.
+jersey_color is the main shirt fabric, excluding text, skin, court, shorts and trim.
+Return unknown for ambiguous color or view. Preserve 0 versus 00. Return a digit
+STRING for a readable number and JSON null for an unreadable number."""
+
+NATIVE_CONTEXT = "\nNative crop dimensions before processor resizing: {width}x{height} pixels. Judge visible detail; do not decide clarity from pixel dimensions alone."
+
+
+def player_prompt(size):
+    width, height = size
+    return PLAYER_PROMPT + NATIVE_CONTEXT.format(width=width, height=height)
 
 
 def assessment_provenance(base):
     return {
         **base,
-        "task": "clear_player_v1",
-        "assessment_prompt_sha256": hashlib.sha256(PLAYER_PROMPT.encode()).hexdigest(),
+        "task": "clear_player_v2",
+        "number_parser": "digit_string_or_json_integer_0_99_v2",
+        "assessment_prompt_sha256": hashlib.sha256(
+            (PLAYER_PROMPT + NATIVE_CONTEXT).encode()
+        ).hexdigest(),
     }
 
 
@@ -66,8 +88,14 @@ def parse_assessment(raw):
     for field in ("single_target", "unoccluded", "clear"):
         if value.get(field) is not True:
             reasons.append("assessment_" + field + "_failed")
+    number = value.get("number")
+    # Qwen can produce a valid JSON integer despite the requested string.
+    # Preserve explicit "00"; never guess that an integer 0 meant "00".
+    normalized_integer = type(number) is int and 0 <= number <= 99
+    if normalized_integer:
+        number = str(number)
     reading = parse_reading(
-        json.dumps({"number": value.get("number"), "readable": value.get("readable")})
+        json.dumps({"number": number, "readable": value.get("readable")})
     )
     color = value.get("jersey_color")
     view = value.get("view")
@@ -77,6 +105,12 @@ def parse_assessment(raw):
         "single_target": value.get("single_target") is True,
         "unoccluded": value.get("unoccluded") is True,
         "clear": value.get("clear") is True,
+        "quality_reason": value.get("quality_reason")
+        if isinstance(value.get("quality_reason"), str)
+        else "",
+        "number_normalization": "integer_to_digit_string"
+        if normalized_integer
+        else None,
         "number_rejection_reasons": reading["rejection_reasons"],
         "role": value.get("role", "uncertain"),
         "jersey_color": color if color in COLORS and not reasons else "unknown",

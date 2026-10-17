@@ -181,6 +181,32 @@
 
 预览会导出可下载本地查看的 HTML。网页导入 `results/` 后可查看原尺寸模板、角色与队伍/号码证据，下载无损 MKV 短窗口。统计区分初始化轨迹与业务片段。CPU 自检 `cli.check_tracklet_bootstrap` 使用真实 FFmpeg 视频和明确标记的合成模型，验证逐像素无损、身份门槛、视角上限、恢复、维护与前端；不代表真实模型准确率。
 
+清晰度任务 `clear_player_v2` 明确用于身体/服装 ReID，不以脸或号码可读作为必要条件，要求 Qwen 解释可见细节或模糊缺陷；仍拒绝严重模糊、像素化、显著遮挡和混人。号码允许 JSON 整数 0–99，并规范为数字字符串；`"00"` 单独保留，不从整数 0 推测。原始回答不修改。提示词与解析合同已变化，新的登记使用新运行目录，旧结果仍可只读复核。
+
+先对已有六窗口的原尺寸图片做少量 Qwen 检查：
+
+```bash
+<qwen-python> -u -m cli.probe_player_quality --env-file .env \
+  --run-dir runtime/outputs/game-001/results \
+  --output-dir runtime/outputs/game-001/diagnostics/player-quality-v2
+```
+
+默认每个窗口选最多两条不同轨迹的大尺寸人物图，总计最多 12 张。输出原图、`probe.json` 和 HTML；有旧回答时并列保留，并记录权重是否相同。该选样偏向较大人物，只用于确认输入和提示词工作方式，不能估计全视频通过率或身份准确率，也不更新正式库。
+
+新视频先做六窗口追踪，再执行上面的图片检查，最后完整初始化：
+
+```bash
+<motip-python> -u -m cli.bootstrap_tracklets --env-file .env \
+  --input runtime/data/hd-game.mp4 --run-dir runtime/outputs/hd-game/results \
+  --match-id hd-game --stage track
+# 将上面的 probe 命令 run-dir/output-dir 换为 hd-game。
+<control-python> -u -m cli.process_match --env-file .env \
+  --input runtime/data/hd-game.mp4 --output-dir runtime/outputs/hd-game \
+  --match-id hd-game --stage initialize
+```
+
+真实长视频候选：[BasketballVideo 发布页](https://github.com/conniemy/BasketballVideo) 的 `100NBAVideo` 标称 1080p、25FPS、每段约 20 分钟，发布方提供[网盘下载](https://pan.baidu.com/s/1vFNwysEelqOxNQop68CFjQ)（提取码 `p7ky`）并声明 CC BY-NC 4.0。优先只下载一段同场比赛，实际尺寸、码率和人物细节以原片复核为准，不能只凭发布页规格保证质量。另一个 [PL-NBA 数据集](https://github.com/holhouse/PL-NBA-Dataset) 标称 1080p，但提供的是平均约 12 秒的回合片段，适合片段链路验证，不能代替连续长视频切分测试。不要拼接不同回合制造长视频测试输入。
+
 ## 六窗口零入选复核
 
 六窗口初始化若 `accepted_clear_samples=0`，先导出全部候选图的只读报告。它不依赖非空 KPR 特征或球员库，不加载 GPU，也不改变清晰度门槛：

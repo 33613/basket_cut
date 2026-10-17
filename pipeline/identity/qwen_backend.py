@@ -132,9 +132,9 @@ class QwenBackend:
         return self._generate(inputs)
 
     def assess_player(self, image):
-        from pipeline.identity.player_evidence import PLAYER_PROMPT
+        from pipeline.identity.player_evidence import player_prompt
         messages = [{"role": "user", "content": [
-            {"type": "image", "image": image}, {"type": "text", "text": PLAYER_PROMPT}]}]
+            {"type": "image", "image": image}, {"type": "text", "text": player_prompt(image.size)}]}]
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
         return self._generate(inputs, max_new_tokens=256)

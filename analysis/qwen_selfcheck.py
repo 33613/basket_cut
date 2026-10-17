@@ -17,6 +17,25 @@ from pipeline.identity.jersey_qwen import qwen_consensus, recognize_jerseys_qwen
 
 
 class QwenChecks(unittest.TestCase):
+    def test_player_assessment_preserves_native_image_and_supplies_its_size(self):
+        from unittest.mock import MagicMock
+        from PIL import Image
+        from pipeline.identity.qwen_backend import QwenBackend
+        backend=object.__new__(QwenBackend)
+        backend.processor=MagicMock()
+        backend.processor.apply_chat_template.return_value="prepared text"
+        backend.processor.return_value={"synthetic_inputs":True}
+        backend._generate=MagicMock(return_value='{"clear":false}')
+        image=Image.new("RGB",(96,184))
+        self.assertEqual(backend.assess_player(image),'{"clear":false}')
+        content=backend.processor.apply_chat_template.call_args.args[0][0]["content"]
+        self.assertIs(content[0]["image"],image)
+        self.assertIn("96x184",content[1]["text"])
+        self.assertIn("BODY APPEARANCE",content[1]["text"])
+        self.assertIn("quality_reason",content[1]["text"])
+        self.assertIs(backend.processor.call_args.kwargs["images"][0],image)
+        backend._generate.assert_called_once_with({"synthetic_inputs":True},max_new_tokens=256)
+
     def test_zero_double_zero_and_strict_json(self):
         for number in ('0', '00', '15', '99'):
             self.assertEqual(parse_reading(json.dumps({'number': number, 'readable': True}))['number'], number)

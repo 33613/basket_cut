@@ -262,6 +262,79 @@ class TrackletChecks(unittest.TestCase):
         self.assertIsNone(strong_identity(summarize([reading(), reading(frame=1)])))
         self.assertEqual(identity("00")["jersey"]["number"], "00")
 
+    def test_integer_readings_preserve_zero_distinctions_and_strict_quality(self):
+        for value, expected in (
+            (0, "0"),
+            (8, "8"),
+            (23, "23"),
+            (99, "99"),
+            ("00", "00"),
+        ):
+            row = reading(number=value)
+            self.assertEqual(row["number"], expected)
+            self.assertTrue(row["usable"])
+        for value in (True, False, 8.0, 100, -1, "01", "023"):
+            self.assertIsNone(reading(number=value)["number"])
+        self.assertIsNone(reading(number=8, readable=False)["number"])
+        self.assertFalse(reading(number=23, clear=False)["usable"])
+        self.assertFalse(reading(number=23, unoccluded=False)["usable"])
+        self.assertTrue(reading(number=None, readable=False)["usable"])
+
+    def test_small_quality_probe_is_bounded_native_and_read_only(self):
+        from analysis.player_quality_probe import probe, select_samples
+        from pipeline.media import sha256_file
+
+        before = {p: sha256_file(p) for p in self.fixture_run.rglob("*") if p.is_file()}
+        selected = select_samples(self.manifest)
+        self.assertEqual(len(selected), 12)
+        self.assertEqual(len({s["track_key"] for s in selected}), 12)
+
+        class Backend:
+            provenance = {"model_sha256": "cpu-synthetic-model"}
+            calls = 0
+
+            def assess_player(self, image):
+                self.calls += 1
+                return json.dumps(
+                    {
+                        "role": "player",
+                        "single_target": True,
+                        "unoccluded": True,
+                        "clear": True,
+                        "quality_reason": "synthetic test fixture, not model accuracy",
+                        "jersey_color": "white",
+                        "number": 23,
+                        "readable": True,
+                        "view": "front",
+                    }
+                )
+
+        backend = Backend()
+        with tempfile.TemporaryDirectory(dir=self.base) as tmp:
+            output = Path(tmp) / "probe"
+            report = probe(self.fixture_run, output, backend=backend)
+            self.assertEqual(backend.calls, 12)
+            self.assertEqual(report["usable_images"], 12)
+            self.assertEqual(report["provenance"]["task"], "clear_player_v2")
+            self.assertFalse(report["production_modified"])
+            self.assertFalse(report["accuracy_evaluated"])
+            self.assertTrue((output / "index.html").is_file())
+            self.assertTrue(
+                all(r["reading"]["number"] == "23" for r in report["samples"])
+            )
+            self.assertTrue(
+                all(r["native_size"] == [80, 240] for r in report["samples"])
+            )
+            self.assertTrue(all(r["previous"] is not None for r in report["samples"]))
+            self.assertEqual(
+                before,
+                {p: sha256_file(p) for p in self.fixture_run.rglob("*") if p.is_file()},
+            )
+            with self.assertRaises(FileExistsError):
+                probe(self.fixture_run, output, backend=backend)
+            with self.assertRaises(ValueError):
+                probe(self.fixture_run, self.fixture_run / "probe", backend=backend)
+
     def test_team_palette_requires_two_independently_supported_kits(self):
         white = [reading(frame=i) for i in (0, 1)]
         black = [reading(color="black", frame=i) for i in (0, 1)]
