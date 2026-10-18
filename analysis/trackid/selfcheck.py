@@ -62,6 +62,34 @@ class TrackIDChecks(unittest.TestCase):
         self.assertEqual(prepare(self.raw,self.output),manifest)
         self.assertEqual(len(list((self.output/SPLIT/'alignment').rglob('gt-*.jpg'))),6)
 
+    def test_missing_macos_metadata_is_not_an_evaluation_input(self):
+        checksum = self.raw/'checksums.sha256'
+        with checksum.open('a') as stream:
+            for name in ('logs/.DS_Store','videos/Indoor/._basket_S1T1_pre.mp4',
+                         '__MACOSX/metadata.txt'):
+                stream.write('0'*64+'  '+name+'\n')
+        result=prepare(self.raw,self.output)
+        self.assertEqual(len(result['sequences']),2)
+        self.assertEqual(sum(s['gt_boxes'] for s in result['sequences']),10)
+        self.assertFalse((self.raw/'logs/.DS_Store').exists())
+
+    def test_missing_real_gt_or_non_macos_sidecar_still_fails(self):
+        self.files[1].unlink()
+        with self.assertRaisesRegex(ValueError,'Missing dataset checksum file'):
+            sources(self.raw)
+        self.files[1].write_text('restored but invalid')
+        self.write_manifest()
+        with (self.raw/'checksums.sha256').open('a') as stream:
+            stream.write('0'*64+'  metadata/missing-real-report.json\n')
+        with self.assertRaisesRegex(ValueError,'Missing dataset checksum file'):
+            sources(self.raw)
+
+    def test_macos_named_checksum_cannot_escape_dataset_root(self):
+        with (self.raw/'checksums.sha256').open('a') as stream:
+            stream.write('0'*64+'  ../.DS_Store\n')
+        with self.assertRaisesRegex(ValueError,'unsafe'):
+            sources(self.raw)
+
     def test_selection_uses_shortest_complete_sequence_per_view(self):
         self.add_sequence('Indoor','short',2,20); self.write_manifest()
         result=sources(self.raw,limit_per_view=1)

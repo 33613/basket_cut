@@ -13,9 +13,9 @@ SPLIT = 'fixed_camera'
 SUBSETS = ('Indoor', 'Outdoor')
 
 
-def contained(root, name):
+def contained(root, name, *, require_file=True):
     path = (root / name).resolve()
-    if not path.is_relative_to(root) or not path.is_file():
+    if not path.is_relative_to(root) or (require_file and not path.is_file()):
         raise ValueError(f'Missing/unsafe dataset file: {name}')
     return path
 
@@ -28,7 +28,15 @@ def checksums(root):
         match = re.fullmatch(r'([0-9a-fA-F]{64}) [ *](.+)', line)
         if not match:
             raise ValueError('Invalid checksums.sha256 entry')
-        path = contained(root, match[2])
+        path = contained(root, match[2], require_file=False)
+        # Finder/AppleDouble metadata can disappear during cross-platform
+        # copying. It is never an input to decoding, conversion or scoring.
+        relative = path.relative_to(root)
+        if path.name == '.DS_Store' or path.name.startswith('._') or '__MACOSX' in relative.parts:
+            print(f'[prepare] Ignoring macOS metadata checksum entry: {relative}', flush=True)
+            continue
+        if not path.is_file():
+            raise ValueError(f'Missing dataset checksum file: {match[2]}')
         if path in result:
             raise ValueError(f'Duplicate checksum: {path}')
         result[path] = match[1].lower()
