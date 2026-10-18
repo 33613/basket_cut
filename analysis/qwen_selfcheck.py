@@ -259,6 +259,26 @@ class QwenChecks(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Cannot interpret'):
                 ensure_gpu_idle()
 
+    def test_only_observed_shared_sample_count_is_excluded_from_policy(self):
+        from pipeline.identity.jersey import number_policy
+        original = {'provenance': {'model_sha256': 'a'}, 'thresholds': {
+            'sampling_strategy': 'shared_kpr_observations_v1', 'max_samples': 8,
+            'min_support': 2, 'min_gap_s': .5}}
+        import copy
+        changed = copy.deepcopy(original)
+        changed['thresholds']['max_samples'] = 3
+        self.assertEqual(number_policy(original), number_policy(changed))
+        self.assertEqual(original['thresholds']['max_samples'], 8)
+        for field, value in (('min_support', 3), ('min_gap_s', 1.), ('team_map', {'black': 'home'})):
+            mismatch = copy.deepcopy(changed)
+            mismatch['thresholds'][field] = value
+            self.assertNotEqual(number_policy(original), number_policy(mismatch))
+        standalone = copy.deepcopy(original)
+        standalone['thresholds']['sampling_strategy'] = 'independent_sampling'
+        different_cap = copy.deepcopy(standalone)
+        different_cap['thresholds']['max_samples'] = 3
+        self.assertNotEqual(number_policy(standalone), number_policy(different_cap))
+
     def test_shared_gpu_requires_explicit_opt_in_and_sufficient_free_memory(self):
         from pipeline.identity.qwen_backend import ensure_gpu_idle
         for memory, allowed in (("22528\n", True), ("15360\n", False), ("bad", False), ("nan", False)):

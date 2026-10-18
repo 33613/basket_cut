@@ -119,6 +119,33 @@ class BatchChecks(unittest.TestCase):
         run_batch(self.settings, self.data, run, target='identity', execute=self.fake)
         self.assertEqual(self.calls.count('cli.tracking'), 1)
 
+    def test_library_failure_recovery_reuses_model_results_and_preserves_audit(self):
+        from workflows.recovery import repair_player_stages
+        settings = replace(self.settings, action_python=Path(sys.executable),
+            action_checkpoint=self.settings.motip_checkpoint, action_config=self.settings.motip_checkpoint,
+            action_label_map=self.settings.motip_checkpoint)
+        run = self.root / 'outputs'
+        def fail_players(command, paths):
+            return 7 if command[2] == 'cli.build_person_library' else self.fake(command, paths)
+        result = run_batch(settings, self.data, run, target='full', execute=fail_players)
+        self.assertEqual(len(result['failed_clips']), 1)
+        clip = next(p for p in run.iterdir() if (p / 'batch_status.json').is_file())
+        original = (clip / 'tracking/tracks.jsonl').stat().st_mtime_ns
+        self.calls.clear()
+        repaired = repair_player_stages(settings, run, execute=self.fake)
+        self.assertEqual(repaired['completed_clips'], 1)
+        self.assertEqual(repaired['failed_clips'], [])
+        self.assertFalse(repaired['models_rerun'])
+        self.assertEqual(self.calls, ['cli.build_person_library', 'cli.link_events',
+                                     'cli.render_results', 'cli.prepare_track_review'])
+        self.assertEqual((clip / 'tracking/tracks.jsonl').stat().st_mtime_ns, original)
+        state = json.loads((clip / 'batch_status.json').read_text())
+        history = json.loads((run / state['recovery_attempts'][0]).read_text())
+        self.assertEqual(history['original_status']['stages']['players'], 'failed')
+        self.calls.clear()
+        repair_player_stages(settings, run, execute=self.fake)
+        self.assertEqual(self.calls, [])
+
     def test_new_clips_append_without_removing_old_manifest_members(self):
         run = self.root / 'outputs'
         run_batch(self.settings, self.data, run, target='identity', execute=self.fake)

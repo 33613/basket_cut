@@ -137,7 +137,8 @@ class PlayerRegistry(MemoryStore):
                 if number_contract and not number_contract.get("provenance", {}).get("empty_input"):
                     serialized_numbers = json.dumps(number_contract, sort_keys=True)
                     previous_numbers = self.meta("number_contract")
-                    if previous_numbers and previous_numbers != serialized_numbers:
+                    from pipeline.identity.jersey import number_policy
+                    if previous_numbers and number_policy(json.loads(previous_numbers)) != number_policy(number_contract):
                         raise ValueError("Incompatible Qwen model or number acceptance policy in this match")
                     self.db.execute("INSERT OR REPLACE INTO metadata VALUES('number_contract',?)", (serialized_numbers,))
                 payload = {key: value for key, value in node.items() if key != "feature_indices"}

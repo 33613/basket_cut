@@ -12,7 +12,7 @@ import numpy as np
 
 from contracts.schema import EventRecord, read_jsonl
 from contracts.lineage import clip_context, event_lineage, track_uid
-from pipeline.identity.jersey import group_numbers
+from pipeline.identity.jersey import group_numbers, number_policy
 
 
 @dataclass(frozen=True)
@@ -112,7 +112,7 @@ def load_library_inputs(options: PersonLibraryOptions):
             # Refuse mixtures of models or different acceptance rules across this match.
             if raw:
                 signature = {"provenance": jersey_summary["provenance"], "thresholds": jersey_summary["thresholds"]}
-                if jersey_contract is not None and signature != jersey_contract:
+                if jersey_contract is not None and number_policy(signature) != number_policy(jersey_contract):
                     raise ValueError("Incompatible Qwen models or thresholds across clips")
                 jersey_contract = signature
         prototype_path = record(f"{name}/identity_raw/kpr_track_prototypes.npz")

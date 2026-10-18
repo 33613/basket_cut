@@ -220,6 +220,31 @@ class PersonLibraryChecks(unittest.TestCase):
             self.assertEqual(second['status'], 'candidate')
             self.assertEqual(len(second['members']), 1)
 
+    def test_shared_kpr_sample_counts_are_observations_not_number_policy(self):
+        for name, count in (('clip1', 8), ('clip2', 3), ('clip3', 6)):
+            rows(self.run / name / 'identity/jersey_tracks.jsonl', [{'raw_track_id': 0,
+                'number': '15', 'status': 'candidate_consensus', 'verified': False, 'readings': []}])
+            write_json(self.run / name / 'identity/jersey_summary.json', {'backend': 'qwen_vl',
+                'provenance': {'model_sha256': 'same-model'},
+                'thresholds': {'sampling_strategy': 'shared_kpr_observations_v1',
+                               'max_samples': count, 'min_support': 2, 'min_gap_s': .5}})
+        opts = replace(self.options, use_jersey_evidence=True)
+        build_person_library(replace(opts, clip_names=('clip1',)))
+        with PlayerRegistry(self.run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            first = dict(registry.db.execute('SELECT id,fingerprint FROM observations').fetchone())
+        build_person_library(replace(opts, clip_names=('clip2',)))
+        build_person_library(opts)
+        with PlayerRegistry(self.run / 'library/players.sqlite3', 'synthetic-match') as registry:
+            self.assertEqual(registry.db.execute('SELECT fingerprint FROM observations WHERE id=?',
+                                                (first['id'],)).fetchone()[0], first['fingerprint'])
+            self.assertEqual(registry.db.execute('SELECT COUNT(*) FROM observations').fetchone()[0], 3)
+        summary = self.run / 'clip3/identity/jersey_summary.json'
+        changed = json.loads(summary.read_text())
+        changed['thresholds']['min_support'] = 3
+        write_json(summary, changed)
+        with self.assertRaisesRegex(ValueError, 'Incompatible Qwen'):
+            build_person_library(opts)
+
     def test_incremental_qwen_model_changes_refused(self):
         for name in ('clip1', 'clip2'):
             rows(self.run / name / 'identity/jersey_tracks.jsonl', [{'raw_track_id': 0,

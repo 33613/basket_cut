@@ -179,6 +179,17 @@ bash tools/run_long_match_exploratory.sh \
 
 该入口不限制片段数量，使用状态粗看、4096 视觉 token 上限、16 帧粗看/复核及 6 GiB 磁盘保留空间；保存后台 PID、追加日志及 `tool/manifests/latest-long-match-run.txt`。同一输入、代码和参数可重新执行恢复已完成片段及 Qwen 窗口；代码或证据变化应新建目录。首轮不保证每个模型给出有效语义结果；应检查完整链路产物、未映射动作和待核验身份，而非把进程结束当成准确率。后台 PID 仅表示已启动，结束状态必须用 `cli.process_match --stage status` 核查。
 
+跨片段号码合同比较中，`shared_kpr_observations_v1` 的 `thresholds.max_samples` 是旧格式记录的实际最大抽样数，并非 Qwen 采样上限；该数值可以随片段变化。只在兼容性比较时排除这个观察统计，原始 JSON、已入库节点及其指纹不改写；模型、支持帧数、时间间隔、采样方式、队伍映射及独立采样的上限仍要求一致。
+
+若旧运行仅在 `players` 或后续阶段失败，可以复用已完成的追踪、动作、KPR 和 Qwen 结果，仅修复入库、链接、渲染和复核输出：
+
+```bash
+<control-python> -u -m cli.repair_match --env-file <env-file> \
+  --output-dir <match-root> --wait
+```
+
+`--wait` 等待该比赛控制器释放 `.match.lock`，可在后台提前排队；不会停止 Outdoor 或长视频。恢复入口保留原状态备份和修复代码哈希，检查上游产物完整性、时效性及导出视频校验值，更新逐片状态、批次汇总和比赛报告，不重新运行模型。上游模型阶段失败的片段只记录跳过，不能伪装完成。修改代码后不要用 `--force` 重新生成已登记证据，也不要删除球员库来绕过合同。
+
 ```bash
 .venv/bin/python -u -m cli.process_match --env-file .env \
   --input runtime/data/game-001.mp4 --match-id game-001 \
