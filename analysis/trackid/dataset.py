@@ -50,13 +50,17 @@ def integer(value, label, minimum=0):
     return int(value)
 
 
-def parse_gt(path, frames):
+def parse_gt(path, frames, *, include_metadata=False):
     grouped = defaultdict(list)
-    seen, count = set(), 0
+    seen, count, columns = set(), 0, None
+    scores = []
     with Path(path).open(encoding='utf-8-sig', newline='') as stream:
         for line, row in enumerate(csv.reader(stream), 1):
-            if len(row) != 10:
-                raise ValueError(f'{path}:{line}: expected ten MOT columns')
+            if len(row) not in (9, 10):
+                raise ValueError(f'{path}:{line}: expected native MOT9 or MOT10, got {len(row)} columns')
+            if columns is not None and columns != len(row):
+                raise ValueError(f'{path}:{line}: mixed native MOT layouts within one file')
+            columns = len(row)
             values = list(map(float, row))
             if not all(map(math.isfinite, values)):
                 raise ValueError(f'{path}:{line}: nonfinite GT')
@@ -64,15 +68,29 @@ def parse_gt(path, frames):
             x,y,w,h = values[2:6]
             if frame > frames or w <= 0 or h <= 0 or (frame,identity) in seen:
                 raise ValueError(f'{path}:{line}: frame/duplicate ID/geometry mismatch')
-            # Source TrackID MOT10 has four world/unused placeholders. Never
-            # apply MOT17 confidence/class filters to -1 and erase the players.
-            if values[6:] != [-1.,-1.,-1.,-1.]:
-                raise ValueError(f'{path}:{line}: unexpected tail semantics; inspect before evaluating')
+            # Native Indoor MOT10 has four unused -1 fields. Native Outdoor
+            # MOT9 has a score in column 7 and two unused -1 fields. Neither
+            # layout provides a MOT17 class/visibility/ignore declaration.
+            if columns == 10:
+                if values[6:] != [-1.,-1.,-1.,-1.]:
+                    raise ValueError(f'{path}:{line}: unexpected MOT10 tail semantics')
+            else:
+                if not 0 <= values[6] <= 1 or values[7:] != [-1.,-1.]:
+                    raise ValueError(f'{path}:{line}: unexpected Outdoor MOT9 score/tail semantics')
+                scores.append(values[6])
+            # Score zero is recorded, not used to silently delete source GT.
+            # Keep every declared, geometrically valid player box and raw ID.
             grouped[frame].append((identity,x,y,w,h))
             seen.add((frame,identity)); count += 1
     if not count:
         raise ValueError(f'Empty GT: {path}')
-    return grouped
+    metadata = {'source_columns':columns,
+        'source_layout':'mot9_score_unused2' if columns == 9 else 'mot10_unused4',
+        'source_score_min':min(scores) if scores else None,
+        'source_score_max':max(scores) if scores else None,
+        'source_zero_score_rows_retained':sum(v == 0 for v in scores),
+        'gt_score_filter':'none; source score is not interpreted as MOT17 class/ignore'}
+    return (grouped, metadata) if include_metadata else grouped
 
 
 def inspect_manifest(root):
@@ -82,7 +100,7 @@ def inspect_manifest(root):
         rows=list(csv.DictReader(stream))
     fields=('subset','sequence','check_status','vfr_status','notes','decode_errors',
             'invalid_gt_rows','duplicate_frame_id_rows','out_of_image_gt_rows',
-            'actual_decoded_frames','gt_frame_min','gt_frame_max')
+            'actual_decoded_frames','gt_frame_min','gt_frame_max','gt_columns')
     return {'dataset_root':str(root),'rows':len(rows),
             'views':dict(Counter(r.get('subset','<missing>') for r in rows)),
             'status_counts':dict(Counter(r.get('check_status','<missing>') for r in rows)),
@@ -184,7 +202,10 @@ def prepare(root, output, *, subset='all', limit_per_view=0):
     sequences=[]
     for seq in selected:
         name,frames=seq['sequence'],seq['frames']
-        grouped=parse_gt(seq['annotation_path'],frames)
+        grouped, gt_format=parse_gt(seq['annotation_path'],frames,include_metadata=True)
+        declared_columns=seq['source_manifest_row'].get('gt_columns')
+        if declared_columns not in (None, '') and integer(declared_columns,'gt_columns') != gt_format['source_columns']:
+            raise ValueError(f'{name}: GT column count differs from uploaded inspection')
         boxes=sum(map(len,grouped.values()))
         row=seq['source_manifest_row']
         observed={'gt_rows':boxes,'gt_annotated_frames':len(grouped),'identity_count':len({b[0] for a in grouped.values() for b in a}),
@@ -230,12 +251,14 @@ def prepare(root, output, *, subset='all', limit_per_view=0):
         if rational and Fraction(rational)<=0:raise ValueError('Invalid source FPS fraction')
         sequences.append({**seq,'fps':fps,'fps_average_source':rational,'gt_boxes':boxes,
             'out_of_bounds_boxes_retained':outside,'gt_sha256':sha256(gt),
-            'decoder_rotation_degrees':rotation,'decoder_auto_rotation':auto_rotation,**observed})
+            'decoder_rotation_degrees':rotation,'decoder_auto_rotation':auto_rotation,
+            'gt_format':gt_format,**observed})
         print(f'[prepare] {name}: {frames} native frames, {boxes} GT boxes, {fps:.6f} FPS',flush=True)
     result={**identity,'sequences':sequences,'protocol':{
         'uploaded_check_status':'recorded verbatim, not a substitute for source checks; explicit failures/error counters rejected',
         'frame_base':1,'coordinate_format':'source pixel xywh, no coordinate offset or clipping',
-        'source_gt_tail':'-1,-1,-1,-1 placeholders; not MOT17 confidence/class/visibility',
+        'source_gt_layouts':'Indoor MOT10 unused4; Outdoor MOT9 score and unused2; recorded per sequence',
+        'source_gt_tail':'not MOT17 class/visibility/ignore; no source score filtering',
         'derived_gt_tail':'1,1,1 for evaluable player class only; raw GT unchanged',
         'video':'all original decoded frames, no FPS conversion; decoded size checked, auto-rotation recorded',
         'model_resize':'upstream PIL max_shorter=800,max_longer=1440; output boxes in source coordinates',

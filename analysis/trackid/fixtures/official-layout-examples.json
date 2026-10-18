@@ -1,0 +1,66 @@
+{
+  "source_repo": "https://github.com/open-starlab/TrackID3x3",
+  "source_revision": "9822a3dde59fc80fbb5eaacd443e79e8b059d94e",
+  "license": "CC BY 4.0; TrackID3x3 authors",
+  "purpose": "Unmodified first two official MOT lines; parser regression, no video or model predictions",
+  "examples": [
+    {
+      "path": "Outdoor/MOT/IMG_0110.txt",
+      "sha256": "c4a9994b28b181481a55e906b0501f1934d553eaa589879228b561a382a90cd3",
+      "first_rows": [
+        [
+          "1",
+          "1",
+          "1388.51",
+          "1046.62",
+          "123.01",
+          "289.83",
+          "0.83",
+          "-1",
+          "-1"
+        ],
+        [
+          "1",
+          "2",
+          "1280.0",
+          "1084.48",
+          "118.68",
+          "295.33",
+          "0.83",
+          "-1",
+          "-1"
+        ]
+      ]
+    },
+    {
+      "path": "Indoor/MOT/basket_S1T1_pre.txt",
+      "sha256": "7432a4697a9de24fcb58f9ead3623a452f68851741364b6968f82299c558b94f",
+      "first_rows": [
+        [
+          "1",
+          "1",
+          "504.9",
+          "412.65",
+          "51.3",
+          "153.9",
+          "-1",
+          "-1",
+          "-1",
+          "-1"
+        ],
+        [
+          "1",
+          "2",
+          "936.0",
+          "377.1",
+          "54.0",
+          "152.55",
+          "-1",
+          "-1",
+          "-1",
+          "-1"
+        ]
+      ]
+    }
+  ]
+}

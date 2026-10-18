@@ -139,6 +139,59 @@ class TrackIDChecks(unittest.TestCase):
         self.assertEqual(data['non_verified_rows'][0]['sequence'],'IMG_0104')
         self.assertFalse(self.output.exists())
 
+    def make_outdoor_native_mot9(self):
+        path=self.files[3]
+        rows=[]
+        for i,line in enumerate(path.read_text().splitlines()):
+            row=line.split(',')[:6]+(['0'] if i == 0 else ['0.83'])+['-1','-1']
+            rows.append(','.join(row))
+        path.write_text('\n'.join(rows)+'\n')
+        for row in self.rows:row['gt_columns']=10 if row['subset']=='Indoor' else 9
+        self.write_manifest()
+
+    def test_native_outdoor_mot9_score_is_not_a_class_or_filter(self):
+        self.make_outdoor_native_mot9()
+        before=self.files[3].read_bytes()
+        result=prepare(self.raw,self.output)
+        outdoor=next(s for s in result['sequences'] if s['view']=='Outdoor')
+        self.assertEqual(outdoor['gt_boxes'],6)
+        self.assertEqual(outdoor['gt_format']['source_columns'],9)
+        self.assertEqual(outdoor['gt_format']['source_zero_score_rows_retained'],1)
+        self.assertEqual(self.files[3].read_bytes(),before)
+        gt=self.output/SPLIT/'gt'/outdoor['sequence']/'gt/gt.txt'
+        self.assertTrue(all(line.endswith(',1,1,1') for line in gt.read_text().splitlines()))
+        modules,_=self.mock_model()
+        with patch.dict(sys.modules,modules):infer(self.output,self.checkpoint,device='cpu')
+        self.assertEqual(evaluate(self.output)[-1]['TP'],10)
+
+    def test_official_fixed_revision_annotation_examples(self):
+        fixture=Path(__file__).parent/'fixtures/official-layout-examples.json'
+        data=json.loads(fixture.read_text())
+        for example in data['examples']:
+            path=self.root/'official.txt'
+            path.write_text(''.join(','.join(row)+'\n' for row in example['first_rows']))
+            grouped,metadata=parse_gt(path,2,include_metadata=True)
+            self.assertEqual(len(grouped[1]),2)
+            self.assertEqual(grouped[1][0][1:],tuple(map(float,example['first_rows'][0][2:6])))
+            self.assertEqual(metadata['source_columns'],len(example['first_rows'][0]))
+
+    def test_invalid_unknown_and_mixed_layouts_are_not_silently_truncated(self):
+        path=self.root/'bad-layout.txt'
+        bad=('1,1,1,1,10,10,0.8,-1\n','1,1,1,1,10,10,0.8,-1,-1,extra,extra\n',
+             '1,1,1,1,10,10,nan,-1,-1\n','1,1,1,1,10,10,1.2,-1,-1\n',
+             '1,1,1,1,10,10,0.8,1,-1\n',
+             '1,1,1,1,10,10,-1,-1,-1,-1\n2,1,1,1,10,10,0.8,-1,-1\n')
+        for text in bad:
+            path.write_text(text)
+            with self.subTest(text=text),self.assertRaises(ValueError):parse_gt(path,2)
+
+    def test_manifest_column_count_must_match_actual_native_layout(self):
+        self.make_outdoor_native_mot9()
+        self.rows[1]['gt_columns']=10
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError,'GT column count'):
+            prepare(self.raw,self.output)
+
     def test_selection_uses_shortest_complete_sequence_per_view(self):
         self.add_sequence('Indoor','short',2,20); self.write_manifest()
         result=sources(self.raw,limit_per_view=1)
