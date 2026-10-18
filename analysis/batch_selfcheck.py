@@ -98,6 +98,16 @@ class BatchChecks(unittest.TestCase):
         self.assertLess(self.calls.index('cli.aggregate_events'), self.calls.index('cli.build_person_library'))
         self.assertNotIn('cli.action', self.calls)  # Empty trajectories must not invoke the model.
 
+    def test_shared_gpu_is_forwarded_to_jersey_without_changing_default(self):
+        default = run_batch(self.settings, self.data, self.root / 'default', target='identity', dry_run=True)
+        shared = run_batch(self.settings, self.data, self.root / 'shared', target='identity', dry_run=True,
+                           options={'allow_shared_gpu': True, 'qwen_min_free_gib': 21.})
+        normal = next(iter(default['commands'].values()))['jersey']
+        command = next(iter(shared['commands'].values()))['jersey']
+        self.assertNotIn('--allow-shared-gpu', normal)
+        self.assertIn('--allow-shared-gpu', command)
+        self.assertEqual(command[command.index('--qwen-min-free-gib') + 1], '21.0')
+
     def test_failed_clip_is_reported_and_retry_resumes_upstream(self):
         run = self.root / 'outputs'
         def failing(command, paths):

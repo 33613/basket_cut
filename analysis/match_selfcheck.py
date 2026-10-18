@@ -836,6 +836,41 @@ class MatchChecks(unittest.TestCase):
         with patch.object(sys,"argv",argv),self.assertRaisesRegex(ValueError,"another match"):
             process_match.main()
 
+    def test_exploratory_full_run_skips_initialization_and_forwards_shared_gpu(self):
+        import io
+        import sys
+        from cli import process_match
+        from pipeline.media import atomic_json
+        from workflows.match_report import match_report
+        root = self.root / 'exploratory'
+        source = {**probe_video(self.source), 'sha256': sha256_file(self.source)}
+        calls = []
+        def segment(command, **kwargs):
+            self.assertEqual(command[3], 'cli.segment_video')
+            self.assertIn('--allow-shared-gpu', command)
+            calls.append('segmentation')
+            atomic_json(root / 'segmentation/segmentation.json', {'source': source,
+                'segments': [{'start_s': 0}], 'unresolved': [{'needs_review': True}]})
+            atomic_json(root / 'segmentation/clips_manifest.json', {'source': source,
+                'videos': [{'needs_review': True}]})
+        def batch(*args, **kwargs):
+            calls.append('processing')
+            self.assertTrue(kwargs['options']['allow_shared_gpu'])
+            self.assertEqual(kwargs['options']['qwen_min_free_gib'], 20.)
+            return {'failed_clips': []}
+        argv = ['process_match', '--input', str(self.source), '--output-dir', str(root),
+                '--match-id', 'exploratory', '--skip-bootstrap', '--allow-unreviewed', '--allow-shared-gpu']
+        with patch.object(sys, 'argv', argv), patch.object(process_match.subprocess, 'run', side_effect=segment), \
+                patch.object(process_match, 'run_batch', side_effect=batch), patch('sys.stdout', new=io.StringIO()):
+            process_match.main()
+        self.assertEqual(calls, ['segmentation', 'processing'])
+        policy = match_report(root)['execution_policy']
+        self.assertFalse(policy['bootstrap_requested'])
+        self.assertTrue(policy['allow_unreviewed'])
+        self.assertTrue(policy['allow_shared_gpu'])
+        self.assertFalse(policy['accuracy_evaluated'])
+        self.assertFalse((root / 'results/bootstrap_tracklets').exists())
+
     def test_unresolved_segmentation_cannot_silently_start_downstream_models(self):
         import sys
         from cli import process_match

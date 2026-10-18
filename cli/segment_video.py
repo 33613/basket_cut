@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--stage", choices=("analyze", "export", "all", "status"), default="all")
     parser.add_argument("--review-file", type=Path, help="Optional manually corrected contiguous source intervals")
     parser.add_argument("--dry-run", action="store_true")
+    from pipeline.identity.qwen_backend import add_gpu_options
+    add_gpu_options(parser)
     add_options(parser)
     args = parser.parse_args()
     if args.env_file:
@@ -70,7 +72,7 @@ def main():
         check = preflight_video(args.input, ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe)
         print("[segmentation] CPU media preflight passed: " + json.dumps(check), flush=True)
         from pipeline.identity.qwen_backend import QwenBackend, ensure_gpu_idle
-        ensure_gpu_idle()
+        ensure_gpu_idle(allow_shared=args.allow_shared_gpu, min_free_gib=args.qwen_min_free_gib)
         backend = QwenBackend(args.model_dir or settings.qwen_model_dir)
         result = analyze_video(args.input, args.output_dir, backend, options=options,
                                ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe)

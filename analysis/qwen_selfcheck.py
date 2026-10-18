@@ -259,6 +259,23 @@ class QwenChecks(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Cannot interpret'):
                 ensure_gpu_idle()
 
+    def test_shared_gpu_requires_explicit_opt_in_and_sufficient_free_memory(self):
+        from pipeline.identity.qwen_backend import ensure_gpu_idle
+        for memory, allowed in (("22528\n", True), ("15360\n", False), ("bad", False), ("nan", False)):
+            responses = [SimpleNamespace(stdout='6835, motip-python\n'), SimpleNamespace(stdout=memory)]
+            with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "GPU-fixture"}), \
+                    patch('subprocess.run', side_effect=responses) as query:
+                if allowed:
+                    ensure_gpu_idle(allow_shared=True, min_free_gib=20)
+                    self.assertIn('--id=GPU-fixture', query.call_args.args[0])
+                else:
+                    with self.assertRaises(RuntimeError):
+                        ensure_gpu_idle(allow_shared=True, min_free_gib=20)
+        for minimum in (0, -1, float('nan'), float('inf')):
+            with patch('subprocess.run') as query, self.assertRaises(ValueError):
+                ensure_gpu_idle(allow_shared=True, min_free_gib=minimum)
+            query.assert_not_called()
+
     def test_modelscope_records_require_published_hashes_and_complete_assets(self):
         from cli.download_qwen import asset_records
         with tempfile.TemporaryDirectory() as temporary:

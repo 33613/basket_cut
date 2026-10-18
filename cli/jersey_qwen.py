@@ -18,8 +18,15 @@ def main():
     parser.add_argument("--assess-player",action="store_true")
     parser.add_argument("--team-map",type=Path)
     parser.add_argument("--observations", type=Path, help="Verified KPR sample manifest; reuse its exact crops")
+    from pipeline.identity.qwen_backend import add_gpu_options, ensure_gpu_idle
+    add_gpu_options(parser)
     from pipeline.identity.jersey_qwen import recognize_jerseys_qwen
-    print(json.dumps(recognize_jerseys_qwen(**vars(parser.parse_args())), ensure_ascii=False, indent=2))
+    options = vars(parser.parse_args())
+    shared = options.pop("allow_shared_gpu")
+    free = options.pop("qwen_min_free_gib")
+    if shared and options["device"] == "cuda":
+        ensure_gpu_idle(allow_shared=True, min_free_gib=free)
+    print(json.dumps(recognize_jerseys_qwen(**options), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

@@ -165,6 +165,20 @@
 
 各模型通过独立子进程顺序执行，释放显存后进入下一个模型。初始化和片段共享 `results/library/players.sqlite3` 与同一 KPR 特征合同。已登记的窗口、人物图、特征与号码不能改写；模型、选窗或证据变化请新建运行目录。图库匹配/模板策略可按后文维护命令显式修订，不重新提取特征。`--skip-bootstrap` 可用于不需要初始化图库的对照。
 
+若当前目标是先跑通长视频全链路，可显式使用 `--skip-bootstrap --allow-unreviewed`：跳过六窗口建库，先做 Qwen 状态粗看和边界复核，导出全部可处理片段，再逐片执行 MOTIP、质量检查、动作推理/事件聚合、KPR、局部身份解析、Qwen 队伍/号码、增量球员库、动作身份链接和可视化。球员库从片段证据开始累积；证据不足的身份仍是待核验，不能为了完成流程放宽图库门槛或编造号码。动作保留片段和轨迹来源，无法可靠关联的结果保留未映射状态。`execution_policy.json` 和状态报告记录跳过初始化、允许未复核切分及共享 GPU 的设置。
+
+默认 Qwen 切分仍要求 GPU 空闲。已明确允许与正在运行的追踪基准共用 GPU 时，在 `process_match` 添加 `--allow-shared-gpu --qwen-min-free-gib 20`（全流程须同时 `--skip-bootstrap`）。该设置传给切分和每个片段的号码入口，在加载 Qwen 前检查逻辑 cuda:0 对应显卡的空闲显存；默认要求 20 GiB。此检查不是峰值保证，后续模型输入和其他进程仍会改变显存，且并行会增加两项任务耗时。没有此开关的部署 smoke 和其他诊断继续拒绝 GPU 竞争。流程内的模型仍串行加载，脚本不会终止其他任务。
+
+AutoDL 后台探索运行（默认 NBA 长视频，可传另一个原视频路径及新输出目录）：
+
+```bash
+bash tools/run_long_match_exploratory.sh \
+  /root/autodl-fs/data/long_video_test/nba-hd/source.mp4 \
+  /root/autodl-tmp/output/matches/nba-e2e-001
+```
+
+该入口不限制片段数量，使用状态粗看、4096 视觉 token 上限、16 帧粗看/复核及 6 GiB 磁盘保留空间；保存后台 PID、追加日志及 `tool/manifests/latest-long-match-run.txt`。同一输入、代码和参数可重新执行恢复已完成片段及 Qwen 窗口；代码或证据变化应新建目录。首轮不保证每个模型给出有效语义结果；应检查完整链路产物、未映射动作和待核验身份，而非把进程结束当成准确率。后台 PID 仅表示已启动，结束状态必须用 `cli.process_match --stage status` 核查。
+
 ```bash
 .venv/bin/python -u -m cli.process_match --env-file .env \
   --input runtime/data/game-001.mp4 --match-id game-001 \

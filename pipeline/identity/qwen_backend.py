@@ -81,10 +81,20 @@ def load_processor(model_dir):
     return processor
 
 
-def ensure_gpu_idle():
-    """Deployment smoke checks must not compete with another GPU job."""
+def add_gpu_options(parser):
+    parser.add_argument("--allow-shared-gpu", action="store_true",
+                        help="Explicitly allow another GPU job; check free memory before Qwen loads")
+    parser.add_argument("--qwen-min-free-gib", type=float, default=20.,
+                        help="Minimum free GPU GiB before loading Qwen in shared mode (not a peak-memory guarantee)")
+
+
+def ensure_gpu_idle(*, allow_shared=False, min_free_gib=20.):
+    """Keep exclusive access by default; admit explicitly shared Qwen loads."""
+    import math
     import os
     import subprocess
+    if not math.isfinite(min_free_gib) or min_free_gib <= 0:
+        raise ValueError("Qwen free-memory requirement must be finite and positive")
     result = subprocess.run(
         ["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
         capture_output=True, text=True, check=True)
@@ -97,8 +107,26 @@ def ensure_gpu_idle():
             raise RuntimeError("Cannot interpret GPU process query; inspect nvidia-smi first")
         if int(pid) != os.getpid():
             busy.append(f"PID {pid.strip()} ({name.strip()})")
-    if busy:
+    if busy and not allow_shared:
         raise RuntimeError("GPU is busy; wait for current tests to finish before Qwen smoke: " + "; ".join(busy))
+    if allow_shared:
+        # Qwen's workflow entry points use logical cuda:0. Respect a pinned
+        # physical index/UUID without initializing a CUDA context to inspect it.
+        gpu = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip()
+        if not gpu or gpu == "-1":
+            raise ValueError("Shared Qwen requires a visible CUDA device")
+        memory = subprocess.run(
+            ["nvidia-smi", f"--id={gpu}", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True)
+        try:
+            free = float(memory.stdout.strip()) / 1024
+        except ValueError as exc:
+            raise RuntimeError("Cannot interpret free GPU memory") from exc
+        if not math.isfinite(free) or free < min_free_gib:
+            raise RuntimeError(f"Shared Qwen needs {min_free_gib:g} GiB free before loading; found {free:.2f} GiB")
+        print(f"[gpu] Shared Qwen enabled; {free:.2f} GiB free; other jobs: "
+              + ("; ".join(busy) or "none")
+              + ". Peak memory depends on video inputs; existing jobs are not stopped.", flush=True)
 
 
 class QwenBackend:

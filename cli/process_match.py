@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--player-match-distance", type=float, default=.2)
     parser.add_argument("--player-novelty-distance", type=float, default=.5)
     parser.add_argument("--player-min-margin", type=float, default=.05)
+    from pipeline.identity.qwen_backend import add_gpu_options
+    add_gpu_options(parser)
     add_options(parser)
     parser.set_defaults(coarse_method="states", video_tokens=8192, review_frames=16)
     args = parser.parse_args()
@@ -43,6 +45,11 @@ def main():
     options_from(args).validate()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
+    import math
+    if not math.isfinite(args.qwen_min_free_gib) or args.qwen_min_free_gib <= 0:
+        parser.error("--qwen-min-free-gib must be finite and positive")
+    if args.allow_shared_gpu and args.stage in ("initialize", "full") and not args.skip_bootstrap:
+        parser.error("Shared GPU full runs require --skip-bootstrap; initialize separately when the GPU is free")
     settings = ExecutionSettings()
     root = args.output_dir.resolve()
     segmentation, results = root / "segmentation", root / "results"
@@ -63,11 +70,17 @@ def main():
         command.extend(["--env-file", str(args.env_file.resolve())])
     if args.review_file:
         command.extend(["--review-file", str(args.review_file.resolve())])
+    if args.allow_shared_gpu:
+        command.extend(["--allow-shared-gpu", "--qwen-min-free-gib", str(args.qwen_min_free_gib)])
     if args.dry_run:
         print(json.dumps({"dry_run": True, "stage": args.stage,
             "segmentation_command": shlex.join(command), "results_dir": str(results),
             "bootstrap": {"enabled": not args.skip_bootstrap, "mode": "six_clear_tracking_windows", "windows": args.bootstrap_windows, "window_s": args.bootstrap_window_s},
-            "next": "Six native-resolution windows seed clear player tracklets; team/number consensus anchors identities; KPR supplements association. Possession clips update this library."}, indent=2))
+            "allow_shared_gpu": args.allow_shared_gpu, "qwen_min_free_gib": args.qwen_min_free_gib,
+            "allow_unreviewed": args.allow_unreviewed,
+            "next": ("Skip seeded initialization; possession clip evidence incrementally builds the player library."
+                     if args.skip_bootstrap else
+                     "Six native-resolution windows seed clear player tracklets; possession clips update this library.")}, indent=2))
         return
     normalize_omp_threads()
     root.mkdir(parents=True, exist_ok=True)
@@ -82,6 +95,13 @@ def main():
         if match_file.is_file() and json.loads(match_file.read_text()) != identity:
             raise ValueError("Output directory belongs to another match/source")
         atomic_json(match_file, identity)
+        atomic_json(root / "execution_policy.json", {
+            "bootstrap_requested": not args.skip_bootstrap,
+            "allow_unreviewed": args.allow_unreviewed,
+            "allow_shared_gpu": args.allow_shared_gpu,
+            "qwen_min_free_gib": args.qwen_min_free_gib,
+            "accuracy_evaluated": False,
+        })
         if args.stage in ("initialize", "full") and not args.skip_bootstrap:
             bootstrap_command = [sys.executable, "-u", "-m", "cli.bootstrap_tracklets",
                 "--input", str(args.input.resolve()), "--run-dir", str(results), "--match-id", args.match_id,
@@ -126,7 +146,9 @@ def main():
                     "jersey_qwen": True, "min_free_gb": args.min_free_gb,
                     "player_match_distance": args.player_match_distance,
                     "player_novelty_distance": args.player_novelty_distance,
-                    "player_min_margin": args.player_min_margin})
+                    "player_min_margin": args.player_min_margin,
+                    "allow_shared_gpu": args.allow_shared_gpu,
+                    "qwen_min_free_gib": args.qwen_min_free_gib})
             print(json.dumps(result, ensure_ascii=False, indent=2))
             if result["failed_clips"]:
                 raise SystemExit(1)

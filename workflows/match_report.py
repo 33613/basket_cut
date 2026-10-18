@@ -66,6 +66,7 @@ def match_report(match_root):
             "excluded_content_clips": sum(not s.get("processing_eligible", True) for s in export.get("videos", [])),
             "model_boundaries": len(plan.get("boundaries", [])), "manually_reviewed": export.get("manually_reviewed", False)},
         "bootstrap": seed, "planned_processing_clips": expected, "selected_processing_clips": len(rows),
+        "execution_policy": load(root / "execution_policy.json", {}),
         "completed_clips": completed, "failed_clips": failed, "clips": rows,
         "library": {k: library.get(k) for k in ("global_person_count", "bootstrap_photo_count", "bootstrap_tracklet_count", "event_count",
             "unmapped_event_count", "held_archive_count", "review_revision", "candidate_person_count",

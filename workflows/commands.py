@@ -101,6 +101,9 @@ class CommandBuilder:
             palette = paths["match_root"] / "bootstrap_tracklets/team_map.json"
             if palette.is_file():
                 command.extend(["--team-map",str(palette)])
+            if options.get("allow_shared_gpu"):
+                command.extend(["--allow-shared-gpu", "--qwen-min-free-gib",
+                                str(options.get("qwen_min_free_gib", 20.))])
             return command
         if stage == "players":
             command = [self.control_python, "-m", "cli.build_person_library",
