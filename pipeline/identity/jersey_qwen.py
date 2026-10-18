@@ -92,9 +92,46 @@ def sample_torsos(video, tracks, output_dir, *, max_samples=6, min_gap_s=.25,
     return samples
 
 
+def shared_samples(observations, tracks, output, track_ids):
+    """Reuse KPR's lossless input crops; never resample or silently fall back."""
+    import shutil
+    from pipeline.media import sha256_file
+    observations = Path(observations).resolve()
+    base = observations.parent
+    originals = {(int(r["track_id"]), int(r["frame_idx"])): r for r in read_jsonl(tracks)}
+    samples, seen = [], set()
+    for row in read_jsonl(observations):
+        tid, frame = int(row["track_id"]), int(row["frame_idx"])
+        if tid not in track_ids:
+            continue
+        key = tid, frame
+        source = (base / row["crop_path"]).resolve()
+        if not source.is_relative_to(base) or not source.is_file():
+            raise ValueError("Shared observation crop is missing or escapes archive")
+        original = originals.get(key)
+        if (key in seen or original is None or
+                list(original["bbox_xyxy"]) != row["bbox_xyxy"] or
+                original.get("video_id") != row.get("video_id") or
+                abs(float(original["timestamp_s"]) - float(row["timestamp_s"])) > 1e-6):
+            raise ValueError("Shared observation differs from tracking evidence")
+        seen.add(key)
+        checksum = sha256_file(source)
+        if not row.get("observation_id") or checksum != row.get("crop_sha256"):
+            raise ValueError("Shared observation lacks verified crop provenance; rerun identity in a new run")
+        relative = f"jersey_media/T{tid:04d}/f{frame:08d}.png"
+        destination = output / relative
+        if not destination.resolve().is_relative_to(output):
+            raise ValueError("Shared observation destination escapes output")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        samples.append({**row, "raw_track_id": tid, "crop_path": relative,
+                        "sampling_strategy": "shared_kpr_observations_v1"})
+    return samples
+
+
 def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *,
                            max_samples=6, min_support=2, min_gap_s=.25, device="cuda", backend=None,
-                           assess_player=False, team_map=None):
+                           assess_player=False, team_map=None, observations=None):
     from PIL import Image
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -103,7 +140,7 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
         raise ValueError("Duplicate identity mapping")
     ids = {int(r["raw_track_id"]) for r in mappings}
     qwen_consensus([], min_support=min_support, min_gap_s=min_gap_s)
-    samples = sample_torsos(video, tracks, output, max_samples=max_samples,
+    samples = shared_samples(observations, tracks, output, ids) if observations is not None else sample_torsos(video, tracks, output, max_samples=max_samples,
                             min_gap_s=min_gap_s, track_ids=ids, full_person=assess_player) if ids else []
     if samples and backend is None:
         backend = QwenBackend(model_dir, device=device)
@@ -152,7 +189,7 @@ def recognize_jerseys_qwen(video, tracks, identity_map, output_dir, model_dir, *
                 write_jsonl_line(handle, row)
     summary = {"backend": "qwen_vl", "provenance": provenance,
         "thresholds": {"min_support": min_support, "min_gap_s": min_gap_s,
-                       "max_samples": max_samples, "sampling_strategy": SAMPLING_STRATEGY,
+                       "max_samples": max((sum(s["raw_track_id"] == tid for s in samples) for tid in ids), default=0) if observations is not None else max_samples, "sampling_strategy": "shared_kpr_observations_v1" if observations is not None else SAMPLING_STRATEGY,
                        **({"assessment":"player_observations_v3","team_map":palette} if assess_player else {})},
         "track_count": len(ids), "sample_count": len(samples),
         "model_invoked": inference_count > 0, "inference_count": inference_count,

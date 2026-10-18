@@ -109,9 +109,12 @@ def evaluate(plan, annotations, *, tolerance_s=2, max_width_s=10):
         "max_candidate_width_s": max_width_s, "ranges": []}
     if annotations.get("human_verified") is not True:
         return report
-    candidates = [r["time_range_s"] for r in plan.get("coarse_candidates", []) if r["kind"] != "camera_cut"]
-    cuts = [[r["start_s"], r["start_s"]] for r in plan["segments"][1:]
-            if r.get("start_boundary_kind") != "camera_cut"]
+    candidates = [r["time_range_s"] for r in plan.get("coarse_candidates", []) if r["kind"] in {"possession_change", "uncertain"}]
+    cuts = [[r["start_s"], r["start_s"]] for i,r in enumerate(plan["segments"][1:], start=1)
+            if r.get("start_boundary_kind") in {"possession_change", "manual"} or
+            (r.get("start_boundary_kind") == "camera_cut" and r.get("possession_id")
+             and plan["segments"][i-1].get("possession_id")
+             and r["possession_id"] != plan["segments"][i-1]["possession_id"])]
     for row in annotations["ranges"]:
         if not row["complete"]:
             continue

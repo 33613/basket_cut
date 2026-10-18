@@ -49,7 +49,7 @@ def match_report(match_root):
         evaluation = {"status": "stale_evaluation", "accuracy_evaluated": False}
     photos = load(results / "bootstrap/photos.json", {})
     tracklets = load(results / "bootstrap_tracklets/protocol.json", {})
-    expected = len(export.get("videos", [])) if export else len(rows)
+    expected = sum(r.get("processing_eligible", True) for r in export.get("videos", [])) if export else len(rows)
     completed = sum(r["status"] == "completed" for r in rows)
     failed = sum(r["status"] == "failed" for r in rows)
     initialized = seed.get("status") == "completed_not_accuracy_evaluated"
@@ -61,6 +61,9 @@ def match_report(match_root):
             "boundary_convention": plan.get("boundary_convention"), "planned_clips": len(plan.get("segments", [])),
             "exported_clips": len(export.get("videos", [])), "unresolved_boundaries": len(plan.get("unresolved", [])),
             "coarse_candidates": len(plan.get("coarse_candidates", [])),
+            "possession_count": len({s["possession_id"] for s in plan.get("segments", []) if s.get("possession_id")}),
+            "shot_count": len({s["shot_id"] for s in plan.get("segments", []) if s.get("shot_id")}),
+            "excluded_content_clips": sum(not s.get("processing_eligible", True) for s in export.get("videos", [])),
             "model_boundaries": len(plan.get("boundaries", [])), "manually_reviewed": export.get("manually_reviewed", False)},
         "bootstrap": seed, "planned_processing_clips": expected, "selected_processing_clips": len(rows),
         "completed_clips": completed, "failed_clips": failed, "clips": rows,

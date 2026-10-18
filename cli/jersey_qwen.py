@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--assess-player",action="store_true")
     parser.add_argument("--team-map",type=Path)
+    parser.add_argument("--observations", type=Path, help="Verified KPR sample manifest; reuse its exact crops")
     from pipeline.identity.jersey_qwen import recognize_jerseys_qwen
     print(json.dumps(recognize_jerseys_qwen(**vars(parser.parse_args())), ensure_ascii=False, indent=2))
 

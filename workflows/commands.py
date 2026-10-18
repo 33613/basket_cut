@@ -63,7 +63,7 @@ class CommandBuilder:
         if stage == "players" and not (paths["match_root"] / "library/players.sqlite3").is_file():
             return False
         dependencies = {
-            "jersey": [paths["stable_tracks"], paths["identity_map"]],
+            "jersey": [paths["stable_tracks"], paths["identity_map"], paths["identity_raw"] / "kpr_samples.jsonl"],
             "players": [paths["identity"] / "resolution_summary.json"] +
                        ([paths["events"]] if paths["events"].is_file() else []) +
                        ([expected["jersey"]] if expected["jersey"].is_file() else []),
@@ -95,10 +95,12 @@ class CommandBuilder:
             command = [str(self.settings.qwen_python), "-m", "cli.jersey_qwen",
                     "--video", str(paths["source"]), "--tracks", str(paths["stable_tracks"]),
                     "--identity-map", str(paths["identity_map"]), "--output-dir", str(paths["identity"]),
-                    "--model-dir", str(self.settings.qwen_model_dir)]
+                    "--model-dir", str(self.settings.qwen_model_dir),
+                    "--observations", str(paths["identity_raw"] / "kpr_samples.jsonl"),
+                    "--assess-player", "--min-gap-s", "0.5"]
             palette = paths["match_root"] / "bootstrap_tracklets/team_map.json"
             if palette.is_file():
-                command.extend(["--assess-player","--team-map",str(palette),"--min-gap-s","0.5"])
+                command.extend(["--team-map",str(palette)])
             return command
         if stage == "players":
             command = [self.control_python, "-m", "cli.build_person_library",

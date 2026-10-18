@@ -87,7 +87,11 @@ def run_batch(settings, input_dir: Path, output_dir: Path, *, limit: int = 30,
                 raise ValueError("Clip source/ID differs from its export provenance")
             lineage_by_input[row["path"]] = row
         selection = selection or clips_manifest
-    sources = select_inputs(input_dir, limit, selection)
+    sources = select_inputs(input_dir, limit if not clips_manifest else max(limit, len(lineage_by_input)), selection)
+    if clips_manifest:
+        sources = [p for p in sources if lineage_by_input[p.relative_to(input_dir.resolve()).as_posix()].get("processing_eligible", True)][:limit]
+        if not sources:
+            raise ValueError("No eligible game clips; inspect content labels and segmentation review")
     output = output_dir.resolve()
     # Outputs must never be mixed into the data tree or overlap source inputs.
     data = input_dir.resolve()

@@ -17,7 +17,7 @@ from pipeline.media import atomic_json, cut_video, probe_video, sha256_file
 from pipeline.segmentation.prompts import RULES, coarse_prompt, boundary_prompt, retry_prompt
 from contracts.lineage import clip_id_for
 
-KINDS = {"possession_change", "camera_cut", "uncertain"}
+KINDS = {"possession_change", "camera_cut", "uncertain", "content_transition"}
 MAX_FORMAT_ATTEMPTS = 3
 
 
@@ -36,10 +36,13 @@ class SegmentOptions:
     min_clip_s: float = .5
     min_free_gb: float = 2
     context: str = "5v5 basketball; team identities unknown"
-    coarse_method: str = "boundaries"
+    coarse_method: str = "states"
+    scene_threshold: float = .45
     video_tokens: int = 2048
 
     def validate(self):
+        if not math.isfinite(self.scene_threshold) or not 0 <= self.scene_threshold <= 1:
+            raise ValueError("Scene threshold must be 0 (disabled) or in (0,1]")
         if self.coarse_method not in {"boundaries", "states"}:
             raise ValueError("Unknown coarse method")
         if type(self.video_tokens) is not int or not 256 <= self.video_tokens <= 8192:
@@ -135,6 +138,10 @@ def parse_boundary(raw, duration_s):
             raise ValueError("Invalid verified boundary")
     if value["confirmed"] and point is None and not value["needs_review"]:
         raise ValueError("A confirmed boundary needs a time or a review flag")
+    if result["kind"] == "content_transition" and value["confirmed"] and not value["needs_review"]:
+        if value.get("content_after") not in {"game", "replay", "non_play"}:
+            raise ValueError("Content transition needs content_after")
+        result["content_after"] = value["content_after"]
     return {**result, "confirmed": value["confirmed"], "boundary_s": point}
 
 
@@ -142,13 +149,19 @@ def merge_candidates(candidates, tolerance_s):
     """Fuse overlapping-window observations; retain all supporting windows."""
     groups = []
     for row in sorted(candidates, key=lambda r: r["time_range_s"]):
-        if (groups and row["kind"] == groups[-1]["kind"]
-                and row["time_range_s"][0] <= groups[-1]["time_range_s"][1] + tolerance_s):
-            group = groups[-1]
-            group["time_range_s"][1] = max(group["time_range_s"][1], row["time_range_s"][1])
-            group["support"].append(row)
+        low, high = row["time_range_s"]
+        target = next((g for g in reversed(groups) if g["kind"] == row["kind"]
+                       and g.get("transition") == row.get("transition")
+                       and max(g["intersection"][0], low) <= min(g["intersection"][1], high) + tolerance_s), None)
+        if target is None:
+            groups.append({"time_range_s":[low,high], "intersection":[low,high],
+                           "kind":row["kind"], "transition":row.get("transition"), "support":[row]})
         else:
-            groups.append({"time_range_s": list(row["time_range_s"]), "kind": row["kind"], "support": [row]})
+            # Require a common intersection, preventing transitive chains from
+            # swallowing several distinct possessions into one wide candidate.
+            target["intersection"] = [max(target["intersection"][0],low),min(target["intersection"][1],high)]
+            target["time_range_s"] = [min(target["time_range_s"][0],low),max(target["time_range_s"][1],high)]
+            target["support"].append(row)
     return groups
 
 
@@ -162,6 +175,10 @@ def make_segments(source_id, duration_s, reviews, min_clip_s):
             continue
         if point is None or review["needs_review"] or review["kind"] == "uncertain":
             unresolved.append(review)
+            continue
+        if accepted and abs(point-accepted[-1]["source_boundary_s"]) < 1e-6:
+            # One physical cut can establish both a new shot and possession;
+            # attach_scopes retains both semantic labels from the reviews.
             continue
         if point - (accepted[-1]["source_boundary_s"] if accepted else 0) < min_clip_s or duration_s - point < min_clip_s:
             unresolved.append({**review, "suppressed_reason": "boundary_too_close"})
@@ -197,7 +214,8 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
     protocol = {"schema_version": 1, "source": {**meta, "sha256": checksum, "source_video_id": source_id},
                 "options": asdict(options), "model": backend.provenance,
                 "rules_sha256": digest(RULES), "service_sha256": sha256_file(Path(__file__)),
-                "prompts_sha256": sha256_file(Path(__file__).with_name("prompts.py"))}
+                "prompts_sha256": sha256_file(Path(__file__).with_name("prompts.py")),
+                "timeline_sha256": sha256_file(Path(__file__).with_name("timeline.py"))}
     if options.coarse_method == "states":
         from pipeline.segmentation import possession
         protocol["possession_sha256"] = sha256_file(Path(possession.__file__))
@@ -280,7 +298,7 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
             if options.coarse_method == "states":
                 observation = query(key, start, end, possession.state_prompt(end-start, options.context),
                     options.coarse_frames, possession.parse_states)
-                rows = observation["candidates"]
+                rows = observation["camera_cuts"]
                 observations.extend({**r, "source_observation_s": start + r["observation_s"],
                     "window_id": key} for r in observation["states"])
             else:
@@ -289,18 +307,18 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
                 "time_range_s": [start + t for t in row["time_range_s"]]} for row in rows)
             state["coarse_completed"] += 1
             atomic_json(state_path, state)
-        if observations:
-            previous = None
-            for row in sorted(observations, key=lambda r: r["source_observation_s"]):
-                if row["attacking_team"] == "unknown":
-                    continue
-                if (previous and row["attacking_team"] != previous["attacking_team"]
-                        and previous["window_id"] != row["window_id"]
-                        and row["source_observation_s"] > previous["source_observation_s"]):
-                    proposals.append({"time_range_s": [previous["source_observation_s"], row["source_observation_s"]],
-                        "kind": "possession_change", "needs_review": True, "window_id": row["window_id"],
-                        "evidence": "cross-window state change; requires independent review"})
-                previous = row
+        from pipeline.segmentation.timeline import reconcile_states, shot_candidates, special_review_prompt
+        timeline, state_proposals, opening_content = reconcile_states(observations, meta["duration_s"])
+        proposals.extend(state_proposals)
+        shot_path = output / "shot_proposals.json"
+        if shot_path.is_file():
+            shot_rows = json.loads(shot_path.read_text())
+        else:
+            print("[segmentation] CPU camera-cut proposal scan", flush=True)
+            shot_rows = shot_candidates(source, ffmpeg=ffmpeg, threshold=options.scene_threshold)
+            atomic_json(shot_path, shot_rows)
+        proposals.extend({**r,"time_range_s":[max(0.,r["time_range_s"][0]),min(meta["duration_s"],r["time_range_s"][1])]}
+                         for r in shot_rows if r["time_range_s"][0] < meta["duration_s"])
         groups = merge_candidates(proposals, options.merge_tolerance_s)
         reviews = []
         state["review_total"] = len(groups)
@@ -317,13 +335,17 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
                      "kind": candidate["kind"], "evidence": [s["evidence"] for s in candidate["support"]]}
             key = f"review-{index:06d}"
             review_prompt = possession.boundary_prompt if options.coarse_method == "states" else boundary_prompt
+            if candidate["kind"] != "possession_change":
+                review_prompt = special_review_prompt
             # Do not prime the reviewer with the coarse model's guessed explanation.
-            review_input = {"time_range_s": local["time_range_s"]} if options.coarse_method == "states" else local
+            review_input = {"time_range_s": local["time_range_s"], "kind":candidate["kind"]} if options.coarse_method == "states" else local
             if end - start > 40:
                 row = {"confirmed": True, "boundary_s": None, "kind": "uncertain",
                     "needs_review": True, "evidence": "candidate exceeds bounded 40s review; manual review required"}
             else:
                 row = query(key, start, end, review_prompt(end - start, review_input, options.context), options.review_frames, parse_boundary)
+            if candidate["kind"] in {"camera_cut", "content_transition"} and row["kind"] != candidate["kind"]:
+                row = {**row, "needs_review": True, "evidence": row["evidence"] + "; review kind differs from candidate"}
             point = start + row["boundary_s"] if row["boundary_s"] is not None else None
             if options.coarse_method != "states" and high - low > 2 * options.review_radius_s:
                 row["needs_review"] = True
@@ -335,10 +357,13 @@ def analyze_video(source, output, backend, *, options=None, ffmpeg="ffmpeg", ffp
             state["review_completed"] += 1
             atomic_json(state_path, state)
         segments, unresolved = make_segments(source_id, meta["duration_s"], reviews, options.min_clip_s)
+        from pipeline.segmentation.timeline import attach_scopes
+        segments = attach_scopes(segments, reviews, opening_content if observations else "game")
         result = {"schema_version": 1, "status": "completed_not_accuracy_evaluated", "protocol_sha256": signature,
                   "source": protocol["source"], "windows": windows, "boundaries": reviews, "segments": segments,
-                  "unresolved": unresolved, "needs_review": bool(unresolved),
+                  "unresolved": unresolved, "needs_review": bool(unresolved) or any(s["needs_review"] for s in segments),
                   "time_scope": meta["time_scope"], "boundary_accuracy_evaluated": False}
+        result["state_observations"] = timeline
         result["coarse_candidates"] = groups
         result["boundary_convention"] = protocol.get("boundary_convention", "opponent_control_legacy")
         atomic_json(output / "segmentation.json", result)
@@ -371,10 +396,18 @@ def export_segments(output, *, review_file=None, ffmpeg="ffmpeg", ffprobe="ffpro
             raise ValueError("Clips must be contiguous, ordered, nonoverlapping source intervals")
         start, finish = end, min(finish, source["duration_s"])
         clip_id = clip_id_for(source["source_video_id"], start, finish)
+        content = row.get("content_type", "game")
+        if content not in {"game", "replay", "non_play", "unknown"}:
+            raise ValueError("Invalid clip content label")
+        if "processing_eligible" in row and (type(row["processing_eligible"]) is not bool
+                                             or row["processing_eligible"] != (content == "game")):
+            raise ValueError("Clip eligibility conflicts with its content label")
         normalized.append({"clip_id": clip_id, "source_video_id": source["source_video_id"],
             "start_s": start, "end_s": finish, "needs_review": False if review_file else bool(row["needs_review"]),
             "start_boundary_kind": row.get("start_boundary_kind", "manual"),
-            "unresolved_candidate_ids": [] if review_file else row.get("unresolved_candidate_ids", [])})
+            "unresolved_candidate_ids": [] if review_file else row.get("unresolved_candidate_ids", []),
+            **{k:row[k] for k in ("possession_id","shot_id","content_type","processing_eligible",
+                                 "partial_possession_start","partial_possession_end") if k in row}})
         end = finish
     if abs(end - source["duration_s"]) > 1e-6:
         raise ValueError("Clips must cover the complete source duration")

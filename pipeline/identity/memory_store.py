@@ -20,8 +20,27 @@ class MemoryStore:
                 "detached": bool(row["detached"]), "non_player": player["status"] == "non_player",
                 "established": player["status"] == "candidate" and states.get(row["id"], {}).get("status") == "accepted",
                 "active_template_keys": [t["key"] for t in states.get(row["id"], {}).get("templates", [])],
-                "rejected": states.get(row["id"], {}).get("manual_rejected", False)})
+                "rejected": states.get(row["id"], {}).get("manual_rejected", False),
+                "match_dependencies": states.get(row["id"], {}).get("match_dependencies", {}),
+                "matched_against_revision": states.get(row["id"], {}).get("matched_against_revision"),
+                "dependency_invalidated": states.get(row["id"], {}).get("dependency_invalidated", False)})
         return result
+
+    def _invalidate_dependents(self, roots):
+        """Invalidate the transitive evidence graph, retaining raw observations."""
+        states = {r["id"]: json.loads(r["data"]) for r in self.db.execute("SELECT * FROM memory_state")}
+        affected = set(roots)
+        while True:
+            added = {key for key, state in states.items() if key not in affected and
+                     affected.intersection(state.get("match_dependencies", {}).get("observations", []))}
+            if not added:
+                break
+            affected.update(added)
+        for key in affected - set(roots):
+            state = states[key]
+            state.update(dependency_invalidated=True, invalidated_by=sorted(roots))
+            self.db.execute("UPDATE memory_state SET data=? WHERE id=?", (json.dumps(state), key))
+        return sorted(affected - set(roots))
 
     def _memory_projection(self):
         return {"players": [dict(r) for r in self.db.execute("SELECT * FROM players ORDER BY id")],
@@ -100,7 +119,11 @@ class MemoryStore:
                     self.db.execute("UPDATE players SET status='needs_review',alias_of=NULL WHERE id=?", (pid,))
             pid = assignments[i]
             state.pop("feature_indices", None)
+            state["planner_version"] = plan["planner_version"]
             state["manual_rejected"] = record["rejected"]
+            state["matched_against_revision"] = (record.get("matched_against_revision")
+                if state.get("match_dependencies") == record.get("match_dependencies")
+                else self.meta("revision")) if state.get("match_dependencies") else None
             state["decision"] = ("memory_matched" if state["status"] == "accepted" else state["status"])
             self.db.execute("UPDATE observations SET player=?,gallery=? WHERE id=?",
                             (pid, int(bool(state["templates"]) and not record["detached"]), record["node"]["node_id"]))

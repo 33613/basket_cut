@@ -8,6 +8,7 @@ temporally compatible track pairs.  It never rewrites MOTIP IDs automatically.
 from __future__ import annotations
 
 import itertools
+import json
 import hashlib
 import math
 import shutil
@@ -285,9 +286,9 @@ def load_selected_crops(
         ):
             crop, crop_xyxy = padded_crop(frame, record.bbox_xyxy, padding=padding)
             sample_id = f"track_{record.track_id:04d}_frame_{record.frame_idx:06d}"
-            crop_path = media_dir / f"{sample_id}_crop.jpg"
+            crop_path = media_dir / f"{sample_id}_crop.png"
             context_path = media_dir / f"{sample_id}_context.jpg"
-            if not cv2.imwrite(str(crop_path), crop, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+            if not cv2.imwrite(str(crop_path), crop):
                 raise RuntimeError(f"Failed to write KPR crop: {crop_path}")
             save_context_image(
                 frame,
@@ -322,6 +323,11 @@ def load_selected_crops(
             metadata.append(
                 {
                     "sample_id": sample_id,
+                    "observation_id": "OBS-" + hashlib.sha256(json.dumps([
+                        record.video_id, record.track_id, record.frame_idx,
+                        list(record.bbox_xyxy)], sort_keys=True).encode()).hexdigest()[:24],
+                    "video_id": record.video_id,
+                    "crop_sha256": hashlib.sha256(crop_path.read_bytes()).hexdigest(),
                     "track_id": record.track_id,
                     "frame_idx": record.frame_idx,
                     "timestamp_s": record.timestamp_s,

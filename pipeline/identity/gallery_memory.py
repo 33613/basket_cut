@@ -88,10 +88,18 @@ def box_overlap(a, b):
     return inter/max(aa+ab-inter, 1), inter/max(min(aa, ab), 1)
 
 
-def select_templates(items, distance, limit):
+def select_templates(items, distance, limit, *, protected=()):
     """Quality first; prefer new supplied views and nonredundant appearances."""
-    chosen, remaining = [], list(items)
+    chosen = list(dict.fromkeys(i for i in protected if i in items))[:min(2, limit)]
+    remaining = [i for i in items if i not in chosen]
     while remaining and len(chosen) < limit:
+        remaining = [i for i in remaining if not any(
+            items[i].get("source_frame") == items[j].get("source_frame") or
+            (distance[i,j] < .025 and items[i].get("view") == items[j].get("view")) for j in chosen)
+            and not (items[i].get("view") not in (None, "unknown") and
+                     sum(items[j].get("view") == items[i].get("view") for j in chosen) >= 2)]
+        if not remaining:
+            break
         def rank(i):
             nearest = min((distance[i, j] for j in chosen), default=0.)
             diversity = min(.3, nearest) if math.isfinite(nearest) else 0.
@@ -127,6 +135,9 @@ def plan_memory(records, evidence, policy, *, incremental=False):
                      "quality": float(node.get("cover", {}).get("archive_quality_score", .7)),
                      "source_frame": f'{node["node_id"]}:{k}', "kind": "track_prototype"}
                     for k, (f, v) in enumerate(zip(record["features"], record["visibility"]))]
+        bank = [{**t, "source_frame": f"{node['source_video_id']}:{float(t['timestamp_s']):.6f}"}
+                if node.get("evidence_kind") == "bootstrap_tracklet" and node.get("source_video_id")
+                and "timestamp_s" in t else t for t in bank]
         keep = [t for t in bank if t["quality"] >= policy.min_quality
                 and np.count_nonzero(np.asarray(t["visibility"]) > 0) >= policy.min_common_parts]
         states[i]["quality"] = max((t["quality"] for t in keep), default=0.)
@@ -139,14 +150,19 @@ def plan_memory(records, evidence, policy, *, incremental=False):
         banks.append(keep)
         reasons = list(info.get("hold_reasons", []))
         reasons += [r for r in node.get("hold_reasons", []) if r != "ambiguous_or_uncomparable_identity"]
-        if not keep and not anchor:
+        appearance_reasons = {"no_clear_assessed_kpr_images", "no_usable_quality_templates"}
+        identity_only = bool(strong_identity(node)) and not record.get("rejected") and not record.get("non_player")
+        if identity_only:
+            reasons = [r for r in reasons if r not in appearance_reasons]
+        if not keep and not anchor and not identity_only:
             reasons.append("no_usable_quality_templates")
+        states[i]["template_admission_reasons"] = [] if keep else ["no_usable_quality_templates"]
         if record.get("rejected"):
             reasons.append("manually_rejected")
         if record.get("non_player"):
             reasons.append("non_player")
         states[i]["reasons"] = sorted(set(reasons))
-        if (not keep and not anchor) or record.get("rejected") or record.get("non_player"):
+        if (not keep and not anchor and not identity_only) or record.get("rejected") or record.get("non_player"):
             states[i]["status"] = "rejected"
         idx = []
         for template in keep:
@@ -207,7 +223,7 @@ def plan_memory(records, evidence, policy, *, incremental=False):
     eligible = [i for i in eligible if not states[i]["reasons"]]
     anchors = {}
     for i in eligible:
-        if incremental and records[i].get("established"):
+        if incremental and records[i].get("established") and not records[i].get("dependency_invalidated"):
             anchors.setdefault(records[i]["player"], []).append(i)
     anchored = {i for group in anchors.values() for i in group}
     groups = [[i] for i in eligible if i not in anchored] + list(anchors.values())
@@ -257,37 +273,71 @@ def plan_memory(records, evidence, policy, *, incremental=False):
         threshold = policy.supported_distance if supported else policy.strong_distance
         return value if value <= threshold else math.inf
 
-    # Cache unchanged edges: a merge only changes costs touching its group.
-    # This avoids recomputing the whole quadratic candidate graph each round.
-    groups = dict(enumerate(groups))
-    costs = {}
-    for x, a in groups.items():
-        for y, b in groups.items():
-            if y >= x: continue
-            value = merge_distance(a,b)
-            if math.isfinite(value): costs[(x,y)] = value
-    while costs:
-        edges = sorted((value,x,y) for (x,y),value in costs.items())
-        accepted = None
-        for value, x, y in edges:
-            if not math.isfinite(value): break
-            rivals = [d for d, u, v in edges if math.isfinite(d) and (u in (x,y) or v in (x,y)) and {u,v} != {x,y}]
-            # Competing same-number views of the same complete-link cluster
-            # may join together; uncertain appearance-only rivals abstain.
-            a, b = groups[x], groups[y]
-            shared = {number_hint(nodes[i]) for i in a+b} - {None}
-            number_supported = len(shared) == 1 and all(number_hint(nodes[i]) for i in a+b) and (len(a) >= 2 or len(b) >= 2)
-            if rivals and min(rivals)-value < policy.min_margin and not number_supported and value >= 0:
+    dependencies = {}
+    frozen_anchors = list(anchors.values()) + list(locked.values())
+    if incremental and frozen_anchors:
+        # Calculate all proposals against this immutable revision. Neither a
+        # new template nor an accepted proposal can be queried in this batch.
+        incoming = [g for g in groups if not any(i in anchored or i in locks for i in g)]
+        groups = {k: list(g) for k, g in enumerate(frozen_anchors)}
+        proposals, unmatched = {}, []
+        for group in incoming:
+            ranked = sorted((merge_distance(group, anchor), k) for k, anchor in enumerate(frozen_anchors))
+            viable = [(d, k) for d, k in ranked if math.isfinite(d)]
+            if not viable or (len(viable) > 1 and viable[1][0] - viable[0][0] < policy.min_margin
+                              or len(viable) > 1 and viable[0][0] == viable[1][0] == -1):
+                unmatched.append(group)
                 continue
-            accepted = x, y; break
-        if accepted is None: break
-        x, y = accepted
-        groups[y] = sorted(groups[y]+groups.pop(x))
-        costs = {edge:value for edge,value in costs.items() if x not in edge and y not in edge}
-        for z, other in groups.items():
-            if z == y: continue
-            value = merge_distance(groups[y],other)
-            if math.isfinite(value): costs[(max(z,y),min(z,y))] = value
+            score, target = viable[0]
+            proposals.setdefault(target, []).append((group, score))
+        for target, proposals_for_target in proposals.items():
+            # Conflicting arrivals all abstain; iteration order picks no winner.
+            for group, score in proposals_for_target:
+                if any(any(incompatible(nodes[i], nodes[j]) for i in group for j in other)
+                       for other, _ in proposals_for_target if other is not group):
+                    unmatched.append(group)
+                    continue
+                groups[target].extend(group)
+                for i in group:
+                    dependencies[i] = {"basis": "team_number" if score < 0 else "appearance",
+                        "distance": None if score < 0 else score,
+                        "observations": [nodes[j]["node_id"] for j in frozen_anchors[target]],
+                        "templates": [{"node_id": nodes[j]["node_id"], "key": t["key"]}
+                                      for j in frozen_anchors[target] for t in banks[j]]}
+        for group in unmatched:
+            groups[len(groups)] = group
+    else:
+        # Cache unchanged edges: a merge only changes costs touching its group.
+        # This avoids recomputing the whole quadratic candidate graph each round.
+        groups = dict(enumerate(groups))
+        costs = {}
+        for x, a in groups.items():
+            for y, b in groups.items():
+                if y >= x: continue
+                value = merge_distance(a,b)
+                if math.isfinite(value): costs[(x,y)] = value
+        while costs:
+            edges = sorted((value,x,y) for (x,y),value in costs.items())
+            accepted = None
+            for value, x, y in edges:
+                if not math.isfinite(value): break
+                rivals = [d for d, u, v in edges if math.isfinite(d) and (u in (x,y) or v in (x,y)) and {u,v} != {x,y}]
+                # Competing same-number views of the same complete-link cluster
+                # may join together; uncertain appearance-only rivals abstain.
+                a, b = groups[x], groups[y]
+                shared = {number_hint(nodes[i]) for i in a+b} - {None}
+                number_supported = len(shared) == 1 and all(number_hint(nodes[i]) for i in a+b) and (len(a) >= 2 or len(b) >= 2)
+                if rivals and min(rivals)-value < policy.min_margin and not number_supported and value >= 0:
+                    continue
+                accepted = x, y; break
+            if accepted is None: break
+            x, y = accepted
+            groups[y] = sorted(groups[y]+groups.pop(x))
+            costs = {edge:value for edge,value in costs.items() if x not in edge and y not in edge}
+            for z, other in groups.items():
+                if z == y: continue
+                value = merge_distance(groups[y],other)
+                if math.isfinite(value): costs[(max(z,y),min(z,y))] = value
     planned = []
     for group in groups.values():
         photos = [i for i in group if nodes[i].get("evidence_kind") == "bootstrap_photo"]
@@ -299,7 +349,7 @@ def plan_memory(records, evidence, policy, *, incremental=False):
         # against a gallery with only two initial templates.
         other = [j for j in eligible if j not in group and not any(incompatible(nodes[i],nodes[j]) for i in group)]
         nearest = min((float(np.min(pair[np.ix_(group,[j])])) for j in other), default=math.inf)
-        established = any(records[i].get("established") for i in group)
+        established = any(records[i].get("established") and not records[i].get("dependency_invalidated") for i in group)
         numbered = [i for i in group if number_hint(nodes[i])]
         number_backed = len({nodes[i]["clip_name"] for i in numbered}) >= 2 and len({number_hint(nodes[i]) for i in numbered}) == 1
         promoted = (independent or track_support or any(i in locks for i in group)) and (
@@ -307,6 +357,11 @@ def plan_memory(records, evidence, policy, *, incremental=False):
             or any(strong_identity(nodes[i]) for i in group))
         if all(nodes[i].get("evidence_kind") == "bootstrap_tracklet" for i in group):
             promoted = promoted and (any(strong_identity(nodes[i]) for i in group) or any(i in locks for i in group))
+        if incremental and frozen_anchors and not established and not any(i in locks for i in group):
+            # Unmatched incoming appearance alone is not a new identity anchor.
+            promoted = promoted and any(strong_identity(nodes[i]) for i in group)
+        if any(records[i].get("dependency_invalidated") for i in group):
+            promoted = promoted and (established or any(strong_identity(nodes[i]) or i in locks for i in group))
         planned.append({"members": group, "promoted": promoted, "nearest_other_distance": nearest if math.isfinite(nearest) else None,
                         "novel_by_distance": math.isfinite(nearest) and nearest >= policy.novelty_distance})
         for i in group:
@@ -317,6 +372,9 @@ def plan_memory(records, evidence, policy, *, incremental=False):
                     if nodes[i].get("evidence_kind") == "bootstrap_tracklet" and not any(strong_identity(nodes[j]) for j in group)
                     else ["ambiguous_nearby_identity" if nearest <= policy.supported_distance else "insufficient_independent_support"])
             states[i]["status"] = "accepted" if promoted else "pending"
+            states[i]["match_dependencies"] = dependencies.get(i, records[i].get("match_dependencies", {}))
+            states[i]["dependency_invalidated"] = bool(records[i].get("dependency_invalidated")) and i not in dependencies
+            states[i]["association_only"] = promoted and not bool(banks[i])
         if promoted:
             items, indices = {}, []
             for i in group:
@@ -324,9 +382,13 @@ def plan_memory(records, evidence, policy, *, incremental=False):
                 for k, template in enumerate(banks[i]):
                     items[len(items)] = {**template, "owner": i, "bank_index": k}
                     indices.append(states[i]["feature_indices"][k])
-            selected = select_templates(items, distances[np.ix_(indices, indices)], policy.gallery_limit)
+            protected = [k for k,t in items.items() if records[t["owner"]].get("established")
+                         and t["key"] in records[t["owner"]].get("active_template_keys", [])]
+            protected.sort(key=lambda k: (-items[k]["quality"], k))
+            selected = select_templates(items, distances[np.ix_(indices, indices)], policy.gallery_limit,
+                                        protected=protected[:1] if incremental else ())
             for k in selected:
                 item = items[k]
                 states[item["owner"]]["templates"].append({key: value for key,value in item.items() if key not in {"feature", "visibility", "owner", "bank_index"}})
     return {"states": states, "groups": planned, "duplicates": duplicates,
-            "policy": asdict(policy), "accuracy_evaluated": False}
+            "policy": asdict(policy), "planner_version": "frozen_revision_v1", "accuracy_evaluated": False}

@@ -93,17 +93,27 @@ def curate_records(root, records, *, per_observation=8):
                     source_stamps[relative] = [path.stat().st_size,path.stat().st_mtime_ns]
                     grouped[int(tid)].append({**image_quality(path),
                         "key": row["sample_id"], "crop_path": row["crop_path"], "media_kind": "identity_raw",
-                        "source_frame": f"{name}:{int(frame)}", "view": row.get("view", "unknown"),
+                        "source_frame": (f"{node['source_video_id']}:{float(node['source_clip_start_s']) + float(row['timestamp_s']):.6f}"
+                            if node.get("source_video_id") and "timestamp_s" in row else f"{name}:{int(frame)}"),
+                        "observation_id": row.get("observation_id"), "view": row.get("view", "unknown"),
                         "kind": "image_sample", "frame_idx": int(frame), "feature": feature.tolist(), "visibility": vis.tolist()})
             clip_samples[name] = grouped, source_hashes, source_stamps
         grouped, source_hashes, source_stamps = clip_samples[name]
         bank = [item for tid in node["raw_track_ids"] for item in grouped.get(int(tid), [])]
         clear_assessment = (node.get("jersey") or {}).get("method") == "clear_player_multiframe_v1"
         if clear_assessment:
-            approved={(int(t["raw_track_id"]),int(r["frame_idx"]))
+            approved={(int(t["raw_track_id"]),int(r["frame_idx"])): r
                 for t in node["jersey"].get("tracks",[]) for r in t.get("readings",[]) if r.get("usable") is True}
             bank=[item for tid in node["raw_track_ids"] for item in grouped.get(int(tid),[])
                 if (int(tid),int(item["frame_idx"])) in approved]
+            for item in bank:
+                reading = next((r for r in approved.values() if r.get("observation_id") == item.get("observation_id")), None) if item.get("observation_id") else None
+                if item.get("observation_id") and reading is None:
+                    raise ValueError("Qwen/KPR observation ID mismatch")
+                if reading is not None:
+                    if reading.get("crop_sha256") != item["image_sha256"]:
+                        raise ValueError("Qwen/KPR observation image mismatch")
+                    item["view"] = reading.get("view", "unknown")
         if bank:
             # Remove unusable images before diversity selection; no source file
             # is unlinked. A larger existing sample archive need not fill DB.

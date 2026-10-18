@@ -63,7 +63,7 @@ class MatchChecks(unittest.TestCase):
         self.source = self.root / "source.mp4"
         shutil.copyfile(self.source_fixture, self.source)
         self.output = self.root / "segmentation"
-        self.options = SegmentOptions(window_s=4, overlap_s=1, review_radius_s=1, min_free_gb=0)
+        self.options = SegmentOptions(coarse_method="boundaries", scene_threshold=0, window_s=4, overlap_s=1, review_radius_s=1, min_free_gb=0)
 
     def analyze(self, backend=None):
         return analyze_video(self.source, self.output, backend or SyntheticQwen(), options=self.options)
@@ -560,6 +560,7 @@ class MatchChecks(unittest.TestCase):
                     video_meta=paths["video_meta"], overwrite=True))
             elif module == "cli.identity":
                 shutil.copytree(fixture / "identity_raw", paths["identity_raw"])
+                rows(paths["identity_raw"] / "kpr_samples.jsonl", [])
                 write_json(paths["identity_raw"] / "identity_archive_manifest.json", {})
             elif module == "cli.resolve_identity":
                 shutil.copytree(fixture / "identity", paths["identity"])

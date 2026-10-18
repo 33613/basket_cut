@@ -302,8 +302,13 @@ class PlayerRegistry(MemoryStore):
             else:
                 raise ValueError("Unsupported review operation; persistent identity history cannot be reset")
             if self.meta("memory_policy") or operation in {"reject_observation", "reinstate_observation"}:
-                self._refresh_memory(evidence=curation)
-                revision = self._save_memory_update(before, operation, {"player": person_id, "node": node_id, "label": label})
+                affected = []
+                if operation in {"reject_observation", "detach", "exclude"}:
+                    roots = [node_id] if node_id else [r[0] for r in self.db.execute(
+                        "SELECT id FROM observations WHERE player=?", (person_id,))]
+                    affected = self._invalidate_dependents(roots)
+                self._refresh_memory(evidence=curation, incremental=bool(affected))
+                revision = self._save_memory_update(before, operation, {"player": person_id, "node": node_id, "label": label, "invalidated_dependents": affected})
             else:
                 revision = self._record(operation, {"player": person_id, "node": node_id, "label": label})
         return revision

@@ -25,6 +25,8 @@ def clip_context(batch, clip_name):
                        "source_path": lineage["source_path"], "source_sha256": lineage["source_sha256"],
                        "source_clip_start_s": start, "source_clip_end_s": end,
                        "segmentation_needs_review": bool(lineage.get("needs_review", True))})
+        result.update({k:lineage[k] for k in ("possession_id", "shot_id", "content_type",
+                       "partial_possession_start", "partial_possession_end") if k in lineage})
         if lineage.get("sha256"):
             result["clip_sha256"] = lineage["sha256"]
         result["timestamp_quantization_s"] = float(lineage.get("encoded", {}).get("timestamp_quantization_s", .15))
