@@ -1,6 +1,6 @@
 """Preserve TrackID3x3 MOT10 boxes and native video frame order."""
 import csv
-from collections import defaultdict
+from collections import Counter, defaultdict
 from fractions import Fraction
 import json
 import math
@@ -75,6 +75,21 @@ def parse_gt(path, frames):
     return grouped
 
 
+def inspect_manifest(root):
+    """Read uploader diagnostics verbatim, without decoding or trusting them."""
+    root = Path(root).resolve()
+    with (root/'manifest.csv').open(encoding='utf-8-sig',newline='') as stream:
+        rows=list(csv.DictReader(stream))
+    fields=('subset','sequence','check_status','vfr_status','notes','decode_errors',
+            'invalid_gt_rows','duplicate_frame_id_rows','out_of_image_gt_rows',
+            'actual_decoded_frames','gt_frame_min','gt_frame_max')
+    return {'dataset_root':str(root),'rows':len(rows),
+            'views':dict(Counter(r.get('subset','<missing>') for r in rows)),
+            'status_counts':dict(Counter(r.get('check_status','<missing>') for r in rows)),
+            'non_verified_rows':[{k:r.get(k) for k in fields} for r in rows if r.get('check_status')!='verified'],
+            'meaning':'Uploader diagnostics only, not an evaluation or source integrity verdict'}
+
+
 def sources(root, *, subset='all', limit_per_view=0):
     root = Path(root).resolve()
     if subset not in ('all', *SUBSETS) or type(limit_per_view) is not int or limit_per_view < 0:
@@ -91,8 +106,6 @@ def sources(root, *, subset='all', limit_per_view=0):
         if view not in SUBSETS or not re.fullmatch(r'[A-Za-z0-9_-]+',name) or (view,name) in seen:
             raise ValueError('Invalid/duplicate TrackID sequence')
         seen.add((view,name))
-        if row.get('check_status') != 'verified':
-            raise ValueError(f'{view}/{name}: source inspection is not verified')
     selected=[]
     for view in SUBSETS:
         if subset not in ('all',view):
@@ -106,6 +119,19 @@ def sources(root, *, subset='all', limit_per_view=0):
         raise ValueError('No selected sequences')
     result=[]
     for row in selected:
+        # Upload tools have no shared vocabulary for verified/warning/VFR
+        # states. Preserve the label; evaluate only after our concrete checks.
+        uploaded_status = (row.get('check_status') or '').strip()
+        if re.match(r'^(failed|failure|error|invalid|incomplete|missing|corrupt)(?:$|[\s:_-])',
+                    uploaded_status, flags=re.IGNORECASE):
+            raise ValueError(f"{row['subset']}/{row['sequence']}: uploaded inspection reports {uploaded_status!r}; notes={row.get('notes', '')}")
+        for key in ('decode_errors', 'invalid_gt_rows', 'duplicate_frame_id_rows'):
+            if row.get(key) not in (None, '') and integer(row[key], key) != 0:
+                raise ValueError(f"{row['subset']}/{row['sequence']}: uploaded {key}={row[key]}; inspect source before evaluation")
+        if uploaded_status != 'verified':
+            print(f"[prepare] {row['subset']}/{row['sequence']}: uploaded check_status={uploaded_status!r}; "
+                  f"vfr_status={row.get('vfr_status', '')!r}; notes={row.get('notes', '')!r}. "
+                  'Rechecking hashes, all decoded frames and GT; status label is not validation evidence.', flush=True)
         video, annotation = (contained(root,row[k]) for k in ('video_path','gt_path'))
         if (not video.is_relative_to(root/'videos'/row['subset'])
                 or not annotation.is_relative_to(root/'annotations')
@@ -161,7 +187,8 @@ def prepare(root, output, *, subset='all', limit_per_view=0):
         grouped=parse_gt(seq['annotation_path'],frames)
         boxes=sum(map(len,grouped.values()))
         row=seq['source_manifest_row']
-        observed={'gt_rows':boxes,'gt_annotated_frames':len(grouped),'identity_count':len({b[0] for a in grouped.values() for b in a})}
+        observed={'gt_rows':boxes,'gt_annotated_frames':len(grouped),'identity_count':len({b[0] for a in grouped.values() for b in a}),
+                  'gt_frame_min':min(grouped), 'gt_frame_max':max(grouped)}
         for key,value in observed.items():
             if row.get(key) and integer(row[key],key)!=value:
                 raise ValueError(f'{name}: {key} differs from uploaded inspection')
@@ -191,6 +218,8 @@ def prepare(root, output, *, subset='all', limit_per_view=0):
         if decoded!=frames:
             raise ValueError(f'{name}: decoded {decoded} != declared {frames}; no evaluation allowed')
         outside=sum(x<0 or y<0 or x+w>seq['width'] or y+h>seq['height'] for rows in grouped.values() for _,x,y,w,h in rows)
+        if row.get('out_of_image_gt_rows') not in (None, '') and integer(row['out_of_image_gt_rows'],'out_of_image_gt_rows') != outside:
+            raise ValueError(f'{name}: source outside-image box count differs from decoded geometry')
         gt=folder/'gt'/name/'gt/gt.txt'; gt.parent.mkdir(parents=True,exist_ok=True)
         with gt.open('w') as stream:
             for frame in sorted(grouped):
@@ -204,6 +233,7 @@ def prepare(root, output, *, subset='all', limit_per_view=0):
             'decoder_rotation_degrees':rotation,'decoder_auto_rotation':auto_rotation,**observed})
         print(f'[prepare] {name}: {frames} native frames, {boxes} GT boxes, {fps:.6f} FPS',flush=True)
     result={**identity,'sequences':sequences,'protocol':{
+        'uploaded_check_status':'recorded verbatim, not a substitute for source checks; explicit failures/error counters rejected',
         'frame_base':1,'coordinate_format':'source pixel xywh, no coordinate offset or clipping',
         'source_gt_tail':'-1,-1,-1,-1 placeholders; not MOT17 confidence/class/visibility',
         'derived_gt_tail':'1,1,1 for evaluable player class only; raw GT unchanged',

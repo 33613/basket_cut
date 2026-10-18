@@ -4,6 +4,8 @@
 
 本入口使用此前验证过的 SportsMOT 权重和 MOTIP 适配器：FP32、关闭 matmul/cuDNN TF32、PIL 预处理，短边 800、长边上限 1440；det=0.3、newborn=0.6、id=0.2、object-max、miss_tolerance=60 帧。模型一次加载，各原始视频重置 tracker，不通过 KPR/Qwen、号码、人数上限或 GT 删除预测。Indoor 与 Outdoor 的帧率不同，60 帧对应的秒数也不同，本轮保留模型原协议，不为数据集单独调参。
 
+上传工具的 `check_status` 名称不作为评估通过证明：原文、VFR 状态和备注全部保留，非标准成功/警告标签会打印并重新进行实际检查；明确失败状态和非零解码错误、非法 GT、重复身份计数会阻止所选序列。未选中的视角状态不影响单视角试验。不修改源 manifest 将其伪装成 `verified`。
+
 ## 原始标注与时间
 
 源 MOT10 的前六列是 `frame,id,x,y,width,height`，后四列均为 `-1` 占位。它们不能被当作 MOT17 的无效置信度、忽略类别或遮挡信息。派生评估 GT 仅将尾部写为 `1,1,1`，供 TrackEval 的球员类别使用；前六列不偏移、不裁剪，源文件不改写。遇到非占位尾字段直接停止，先核查语义，不猜测忽略规则。越界框保留并计数；不补缺帧人物框。
@@ -11,6 +13,13 @@
 GT 一基帧号对应原视频按顺序解码出的第 N 帧。Indoor 示例约 19.98 FPS，Outdoor 为 4K MOV、约 29.97 FPS，可能存在时间戳变化。没有统一 FPS、补帧、抽帧、转码或把 Outdoor 先降为 720p。模型内部按原协议缩放，输出映射回原图坐标。检查每帧解码尺寸、总帧数、重复 ID、GT 几何、manifest 汇总数、来源 SHA-256。校验清单中的 `.DS_Store`、`._*` 和 `__MACOSX/` 仅为 macOS 文件管理元数据，打印说明并排除，不要求复制到服务器；不改写校验清单。视频、GT 和其他正常清单文件缺失或损坏仍会失败。记录自动旋转元数据，并导出首/中/尾 GT 叠加图片；旋转是否与标注方向一致仍须目视核查，尺寸检查不能排除 180 度方向问题。
 
 原视频逐帧流式读取，不解包成庞大的 PNG/JPEG 图像目录。准备阶段 CPU 校验和推理各读取视频，文件存储较慢时会增加耗时。模型推理完成后评估前再核查原始视频/GT，避免恢复时输入悄悄变化。
+
+无需 Python 长单行即可打印原上传检查状态（只读 CPU，不要求输出目录）：
+
+```bash
+/root/autodl-tmp/env/control/bin/python -m cli.benchmark_trackid \
+  --dataset-root /root/autodl-fs/data/trackid3x3-fixed-camera --stage inspect
+```
 
 ## 单 GPU 顺序运行
 

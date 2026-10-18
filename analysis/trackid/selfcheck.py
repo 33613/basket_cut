@@ -90,6 +90,55 @@ class TrackIDChecks(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'unsafe'):
             sources(self.raw)
 
+    def test_upload_warning_label_does_not_replace_actual_validation(self):
+        self.rows[1]['check_status']='verified_with_warnings'
+        self.write_manifest()
+        result=prepare(self.raw,self.output)
+        outdoor=next(s for s in result['sequences'] if s['view']=='Outdoor')
+        self.assertEqual(outdoor['source_manifest_row']['check_status'],'verified_with_warnings')
+        self.assertEqual(outdoor['frames'],6)
+        self.assertAlmostEqual(outdoor['fps'],29.97,places=2)
+        self.assertEqual(outdoor['gt_boxes'],6)
+
+    def test_warning_status_cannot_hide_invalid_gt_or_missing_frames(self):
+        self.rows[1]['check_status']='warning'
+        self.rows[1]['actual_decoded_frames']=7
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError,'decoded 6'):
+            prepare(self.raw,self.output)
+        self.assertFalse((self.output/SPLIT/'dataset.json').exists())
+        self.rows[1]['actual_decoded_frames']=6
+        self.files[3].write_text('1,1,0,0,-1,1,-1,-1,-1,-1\n')
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError,'geometry'):
+            prepare(self.raw,self.output)
+
+    def test_selected_explicit_failures_and_error_counts_are_rejected(self):
+        self.rows[1]['check_status']='failed: invalid decode'
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError,'inspection reports'):
+            sources(self.raw)
+        # A failing unselected view must not block a valid Indoor-only run.
+        self.assertEqual(len(sources(self.raw,subset='Indoor')),1)
+        self.rows[1]['check_status']='warning'
+        for row in self.rows:row['decode_errors']=0
+        self.rows[1]['decode_errors']=1
+        self.write_manifest()
+        with self.assertRaisesRegex(ValueError,'decode_errors=1'):
+            sources(self.raw)
+
+    def test_inspect_reports_original_status_without_gpu_or_output_dir(self):
+        self.rows[1]['check_status']='verified_with_warnings'
+        self.write_manifest()
+        result=subprocess.run([sys.executable,'-m','cli.benchmark_trackid',
+            '--dataset-root',str(self.raw),'--stage','inspect'],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        data=json.loads(result.stdout)
+        self.assertEqual(data['rows'],2)
+        self.assertEqual(data['status_counts']['verified_with_warnings'],1)
+        self.assertEqual(data['non_verified_rows'][0]['sequence'],'IMG_0104')
+        self.assertFalse(self.output.exists())
+
     def test_selection_uses_shortest_complete_sequence_per_view(self):
         self.add_sequence('Indoor','short',2,20); self.write_manifest()
         result=sources(self.raw,limit_per_view=1)

@@ -12,15 +12,20 @@ from analysis.teamtrack.dataset import save_json
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--dataset-root',type=Path)
-    p.add_argument('--output-dir',required=True,type=Path)
+    p.add_argument('--output-dir',type=Path)
     p.add_argument('--env-file',type=Path)
     p.add_argument('--checkpoint',type=Path)
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--subset',choices=('all','Indoor','Outdoor'),default='all')
     p.add_argument('--limit-per-view',type=int,default=0,help='0=all; 1=shortest complete sequence per selected view for alignment')
-    p.add_argument('--stage',choices=('prepare','infer','evaluate','preview','status','all'),default='all')
+    p.add_argument('--stage',choices=('inspect','prepare','infer','evaluate','preview','status','all'),default='all')
     args=p.parse_args()
     if args.limit_per_view<0:p.error('--limit-per-view must be nonnegative')
+    if args.stage=='inspect':
+        if args.dataset_root is None:p.error('--dataset-root is required for inspection')
+        from analysis.trackid.dataset import inspect_manifest
+        print(json.dumps(inspect_manifest(args.dataset_root),ensure_ascii=False,indent=2)); return
+    if args.output_dir is None:p.error('--output-dir is required except for inspect')
     if args.stage=='status':
         from analysis.trackid.benchmark import status
         print(json.dumps(status(args.output_dir),ensure_ascii=False,indent=2)); return
