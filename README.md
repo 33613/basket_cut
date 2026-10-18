@@ -86,4 +86,4 @@ SQLite 是身份事实来源，JSON 是按修订号发布的可浏览索引。�
 
 `cli.check_match` 实际执行合成视频的窗口切分、边界合并、来源映射、身份检索和 FFmpeg 导出；模型回答使用明确标注的合成输入。其他 CPU 检查由 `tools/setup_control.sh` 执行。真实 Qwen 切分及 MOTIP/KPR/SlowFast 联合推理需要在有空闲 GPU 时另行验证。
 
-保留独立的 [SportsMOT 原始帧评估](docs/sportsmot.md) 和 [TeamTrack 评估](docs/teamtrack.md)，不把业务切分混入基准评估。模型来源：[MOTIP](https://github.com/MCG-NJU/MOTIP)、[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification)、[MMAction2](https://github.com/open-mmlab/mmaction2)、[Qwen3-VL](https://github.com/QwenLM/Qwen3-VL)。
+保留独立的 [SportsMOT 原始帧评估](docs/sportsmot.md) 、[TeamTrack 评估](docs/teamtrack.md) 和 [TrackID3x3 评估](docs/trackid.md)，不把业务切分混入基准评估。模型来源：[MOTIP](https://github.com/MCG-NJU/MOTIP)、[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification)、[MMAction2](https://github.com/open-mmlab/mmaction2)、[Qwen3-VL](https://github.com/QwenLM/Qwen3-VL)。

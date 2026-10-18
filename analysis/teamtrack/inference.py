@@ -31,6 +31,8 @@ def infer(output, split, checkpoint, device='cuda:0'):
     code_paths = [ROOT / 'pipeline/tracking/motip_backend.py', Path(__file__), ROOT / 'analysis/teamtrack/dataset.py']
     for pattern in ('models/**/*.py', 'configs/**/*.yaml', 'configs/**/*.py', 'utils/**/*.py'):
         code_paths.extend((ROOT / 'MOTIP').glob(pattern))
+    if dataset.get('dataset') == 'TrackID3x3':
+        code_paths.extend((ROOT / 'analysis/trackid').glob('*.py'))
     protocol = {
         'checkpoint_sha256': sha256(checkpoint), 'config': config,
         'runtime': runtime.to_dict(), 'preprocessing': 'upstream-pil',
@@ -58,14 +60,16 @@ def infer(output, split, checkpoint, device='cuda:0'):
         name = seq['sequence']
         pred = prediction_dir / f'{name}.txt'
         complete = folder / 'completed' / f'{name}.json'
+        if sha256(seq['video_path']) != seq['video_sha256']:
+            raise ValueError(f'{name}: source video changed')
+        if seq.get('annotation_sha256') and sha256(seq['annotation_path']) != seq['annotation_sha256']:
+            raise ValueError(f'{name}: source GT changed')
         if complete.exists():
             record = json.loads(complete.read_text())
             if record['protocol_sha256'] != protocol_hash or record['prediction_sha256'] != sha256(pred):
                 raise ValueError(f'{name}: completed prediction was modified')
             print(f'[{split}] Reusing complete prediction: {name}', flush=True)
             continue
-        if sha256(seq['video_path']) != seq['video_sha256']:
-            raise ValueError(f'{name}: source video changed')
         random.seed(0)
         np.random.seed(0)
         torch.manual_seed(0)
