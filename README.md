@@ -1,4 +1,39 @@
-# CourtVision · 篮球视频与同场球员库
+# CourtVision · link_player
+
+本分支实现 **外部进球时刻 → 回看窗口 → MOTIP 正向追踪 → SlowFast 投篮动作证据 → 出手球员轨迹 → 身份识别交接包**。从同场比赛短视频开始，不依赖先初始化球员库或完成回合切分。
+
+输入使用 `video_id,filename,goal_time_s` 的 CSV 或 JSON 列表，同一视频可有多次进球。进球检测由其他模块提供；本分支负责定位出手者，跨片段身份识别和球员库由下游接收轨迹、原尺寸人物图及来源信息。
+
+```mermaid
+flowchart LR
+    E[进球时间 + 视频] --> W[前8秒连续窗口]
+    W --> T[MOTIP 正向跟踪]
+    T --> A[SlowFast 投篮证据]
+    A --> R[先查前4秒 必要时扩展]
+    R --> C[候选轨迹 或待复核]
+    C --> H[原尺寸裁剪 + 时间与轨迹清单]
+    H --> I[交给身份识别与球员库模块]
+```
+
+自动结果是动作证据支持的候选，**目前没有球的飞行验证**，不宣称已确认最后一次有效出手。未知和歧义保留，不强行分配 ID；人工复核单独保存，不覆盖自动结果。
+
+从仓库根目录执行：
+
+```bash
+python -m cli.link_player --env-file .env \
+  --input-dir /path/to/videos --annotations /path/to/annotations.csv \
+  --output-dir /path/to/new-run --match-id game-001
+python -m cli.link_player --output-dir /path/to/new-run --stage status
+```
+
+支持校验复用十片段导出的 MOTIP：`--tracking-root /root/autodl-fs/test`。上游 `MOTIP/`、`MMAction2/` 保持原样；复用现有模型适配层。模块组织、人工复核、服务器命令及交接格式见 **[link_player 操作说明](docs/link-player.md)**。
+
+CPU 集成检查：`python -m analysis.link_player_selfcheck`。已有独立数据导出见 [十片段 MOTIP/KPR 测试包](docs/goal-test-export.md)。
+
+<details>
+<summary>main 分支原有长视频与球员库工具（保留兼容，非本分支入口）</summary>
+
+## 篮球视频与同场球员库
 
 先从一场比赛的长视频选取 6 个清晰短窗口，各自连续运行 MOTIP，再筛选清晰、无遮挡的人物轨迹建立候选球员库。明确的多帧队伍与号码共识作为强身份线索，KPR 辅助关联。长视频再经过 Qwen3-VL 状态观察、边界复核后切成片段，逐片段运行 MOTIP。轨迹的 KPR 外观特征与 Qwen 球衣号码证据一起更新同场球员库；SlowFast 动作按片段和轨迹关联到球员。前端以球员照片为入口，支持检索、复核与视频剪辑，并展示流程统计和已有标注的切分指标。
 
@@ -87,3 +122,5 @@ SQLite 是身份事实来源，JSON 是按修订号发布的可浏览索引。�
 `cli.check_match` 实际执行合成视频的窗口切分、边界合并、来源映射、身份检索和 FFmpeg 导出；模型回答使用明确标注的合成输入。其他 CPU 检查由 `tools/setup_control.sh` 执行。真实 Qwen 切分及 MOTIP/KPR/SlowFast 联合推理需要在有空闲 GPU 时另行验证。
 
 保留独立的 [SportsMOT 原始帧评估](docs/sportsmot.md) 、[TeamTrack 评估](docs/teamtrack.md) 和 [TrackID3x3 评估](docs/trackid.md)，不把业务切分混入基准评估。模型来源：[MOTIP](https://github.com/MCG-NJU/MOTIP)、[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification)、[MMAction2](https://github.com/open-mmlab/mmaction2)、[Qwen3-VL](https://github.com/QwenLM/Qwen3-VL)。
+
+</details>

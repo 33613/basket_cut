@@ -20,6 +20,21 @@ def sha256_file(path):
     return checksum.hexdigest()
 
 
+def verify_frame_clock(source, fps, ffprobe="ffprobe"):
+    """Reject VFR/irregular timestamps before using a frame_idx/fps time contract."""
+    result = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(source)],
+        capture_output=True, text=True, check=True)
+    frames = json.loads(result.stdout).get("frames", [])
+    if not frames or any("best_effort_timestamp_time" not in f for f in frames):
+        raise ValueError(f"Cannot verify decoded frame clock: {source}")
+    pts = [float(f["best_effort_timestamp_time"]) for f in frames]
+    if any(not math.isfinite(t) or abs(t - pts[0] - i/fps) > max(.002, .1/fps)
+           for i, t in enumerate(pts)):
+        raise ValueError(f"Variable/irregular frame timing in {source}; normalize and recheck annotations first")
+    return len(frames)
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--label-prefix", default="basketball_")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--sampling-fps", type=float, help="Reference FPS for physical-time context; default keeps legacy frame sampling")
     return parser
 
 
@@ -51,6 +52,7 @@ def main() -> None:
             top_k=args.top_k,
             label_prefix=args.label_prefix,
             overwrite=args.overwrite,
+            sampling_fps=args.sampling_fps,
         )
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

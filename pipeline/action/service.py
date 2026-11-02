@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from mmaction.registry import MODELS
 from mmaction.structures import ActionDataSample
 
 from pipeline.action.proposals import group_by_track, nearest_proposals
-from pipeline.action.sampling import sample_frame_indices
+from pipeline.action.sampling import sample_frame_indices, physical_sampling
 from contracts.schema import TrackRecord, read_jsonl, write_json, write_jsonl_line
 
 
@@ -40,6 +41,7 @@ class ActionOptions:
     top_k: int = 3
     label_prefix: str = "basketball_"
     overwrite: bool = False
+    sampling_fps: float | None = None
 
 
 def load_labels(path: Path, prefix: str) -> dict[int, str]:
@@ -98,6 +100,8 @@ def sampler_settings(config: mmengine.Config) -> tuple[int, int]:
 
 
 def recognize_actions(options: ActionOptions) -> dict[str, Any]:
+    if options.sampling_fps is not None and (not math.isfinite(options.sampling_fps) or options.sampling_fps <= 0):
+        raise ValueError("sampling_fps must be finite and positive")
     output_path = options.output.expanduser().resolve()
     if output_path.exists() and not options.overwrite:
         raise FileExistsError(
@@ -117,12 +121,14 @@ def recognize_actions(options: ActionOptions) -> dict[str, Any]:
 
     config = mmengine.Config.fromfile(str(options.config))
     clip_len, frame_interval = sampler_settings(config)
-    window_size = clip_len * frame_interval
+    reference_interval = frame_interval
+    frame_interval, cadence = physical_sampling(video_meta["fps"], frame_interval,
+                                              options.predict_stepsize, options.sampling_fps)
     if not frames:
         raise ValueError("Video contains no decoded frames")
     # Predict across the whole source clip. Boundary context repeats edge frames;
     # timestamps always refer to real frames, including clips shorter than a window.
-    timestamps = np.arange(1, len(frames) + 1, options.predict_stepsize)
+    timestamps = np.arange(1, len(frames) + 1, cadence)
 
     try:
         config["model"]["test_cfg"]["rcnn"] = dict(action_thr=0)
@@ -242,6 +248,9 @@ def recognize_actions(options: ActionOptions) -> dict[str, Any]:
             "clip_len": clip_len,
             "frame_interval": frame_interval,
             "predict_stepsize": options.predict_stepsize,
+            "actual_cadence_frames": cadence,
+            "sampling_fps": options.sampling_fps,
+            "reference_frame_interval": reference_interval,
             "proposal_max_gap": options.proposal_max_gap,
             "min_det_score": options.min_det_score,
             "action_threshold": options.action_threshold,

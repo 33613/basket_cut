@@ -13,11 +13,11 @@ import tarfile
 
 from contracts.schema import read_jsonl, write_jsonl_line
 from contracts.tracks import load_tracks
-from pipeline.media import atomic_json, probe_video, sha256_file
+from pipeline.media import atomic_json, probe_video, sha256_file, verify_frame_clock
 
 
 # User annotations: seconds from the beginning of each supplied clip.
-DEMO_EVENTS = [(3, 10, "27"), (6, 12, "27"), (20, 4, "27"),
+DEMO_EVENTS = [(3, 10, "27"), (6, 12, "27"), (20, 3.5, "27"),
                (43, 10, "27"), (50, 5, "27"), (68, 27, "27"),
                (11, 7, "15"), (30, 13, "15"), (37, 10, "15"), (63, 12, "15")]
 
@@ -36,21 +36,6 @@ def write_csv(path, rows, fields):
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-
-
-def verify_frame_clock(source, fps, ffprobe):
-    """Tracking uses frame_idx/fps: reject VFR rather than silently shifting labels."""
-    result = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", str(source)],
-        capture_output=True, text=True, check=True)
-    frames = json.loads(result.stdout).get("frames", [])
-    if not frames or any("best_effort_timestamp_time" not in f for f in frames):
-        raise ValueError(f"Cannot verify decoded frame clock: {source}")
-    pts = [float(f["best_effort_timestamp_time"]) for f in frames]
-    if any(not math.isfinite(t) or abs(t - pts[0] - i/fps) > max(.002, .1/fps)
-           for i, t in enumerate(pts)):
-        raise ValueError(f"Variable/irregular frame timing in {source}; normalize and recheck annotations first")
-    return len(frames)
 
 
 def manifest(root):
