@@ -12,7 +12,7 @@ import numpy as np
 
 from cli.ball_track import Options, run
 from cli.pl_nba_annotations import inventory, parse_timestamp
-from pipeline.ball.tracker import BallTracker
+from pipeline.ball.tracker import BallTracker, associate_rows
 
 
 def detection(x, score=0.8):
@@ -20,6 +20,42 @@ def detection(x, score=0.8):
 
 
 class BallTests(unittest.TestCase):
+    def test_short_occlusion_distractor_does_not_change_velocity_or_id(self):
+        tracker = BallTracker(0.12)
+        for i in range(4):
+            good = tracker.update([detection(10 + 2 * i)], i / 60, 1000, 1000)
+        velocity = tracker.velocity
+        for i in (4, 5):
+            # This jump fitted the old 6%-of-image gate, but not the new gate.
+            point = tracker.update([detection(80, 0.99)], i / 60, 1000, 1000)
+            self.assertFalse(point["observed"])
+            self.assertEqual(tracker.velocity, velocity)
+        recovered = tracker.update([detection(22)], 6 / 60, 1000, 1000)
+        self.assertTrue(recovered["observed"])
+        self.assertEqual(recovered["ball_track_id"], good["ball_track_id"])
+
+    def test_large_box_is_not_accepted_as_ball_and_short_seed_stays_tentative(self):
+        tracker = BallTracker()
+        tracker.update([detection(10)], 0, 1000, 1000)
+        oversized = {"bbox_xyxy": [1, 1, 25, 25], "score": 0.99}
+        point = tracker.update([oversized], 1 / 60, 1000, 1000)
+        self.assertFalse(point["observed"])
+        rows = [
+            {
+                "source_frame_idx": i,
+                "source_timestamp_s": i / 60,
+                "detections": [dict(detection(10), label="ball")],
+            }
+            for i in range(2)
+        ]
+        result = associate_rows(rows, 1000, 1000)
+        self.assertTrue(all(r["ball_track"] is None for r in result))
+        self.assertTrue(all(r["tentative_ball_track"]["observed"] for r in result))
+        rows.append(dict(rows[-1], source_frame_idx=2, source_timestamp_s=2 / 60))
+        self.assertTrue(
+            all(r["ball_track"]["confirmed"] for r in associate_rows(rows, 1000, 1000))
+        )
+
     def test_prediction_expiration_and_new_id(self):
         tracker = BallTracker(0.12)
         first = tracker.update([detection(10)], 0, 100, 100)
@@ -98,6 +134,63 @@ class BallTests(unittest.TestCase):
             self.assertEqual(rows[-1]["source_frame_idx"], 37)
             self.assertTrue(all(r["ball_track"]["observed"] for r in rows))
             self.assertTrue((root / "result/ball_vis.mp4").is_file())
+            original_bytes = (root / "result/ball.jsonl").read_bytes()
+            # Emulate the old v1 option contract and exercise the actual CPU CLI.
+            old_summary = json.loads((root / "result/summary.json").read_text())
+            old_summary["options"].pop("min_confirm_frames")
+            old_summary["options"].pop("max_size_ratio")
+            (root / "result/summary.json").write_text(json.dumps(old_summary))
+            import sys
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "cli.ball_track",
+                    "--input",
+                    str(source),
+                    "--reuse-detections",
+                    str(root / "result"),
+                    "--output-dir",
+                    str(root / "replay"),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            replay = [
+                json.loads(s)
+                for s in (root / "replay/ball.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(
+                [r["detections"] for r in rows], [r["detections"] for r in replay]
+            )
+            self.assertEqual((root / "result/ball.jsonl").read_bytes(), original_bytes)
+            self.assertTrue((root / "replay/ball_vis.mp4").is_file())
+            with self.assertRaisesRegex(ValueError, "outside cached"):
+                run(
+                    source,
+                    weight,
+                    root / "outside",
+                    Options(),
+                    reuse_detections=root / "result",
+                )
+            bad = json.loads(original_bytes.splitlines()[0])
+            bad["source_timestamp_s"] = 9.0
+            (root / "result/ball.jsonl").write_bytes(
+                json.dumps(bad).encode()
+                + b"\n"
+                + b"\n".join(original_bytes.splitlines()[1:])
+                + b"\n"
+            )
+            with self.assertRaisesRegex(ValueError, "timestamps"):
+                run(
+                    source,
+                    weight,
+                    root / "badtime",
+                    Options(start_s=1, end_s=3.8),
+                    reuse_detections=root / "result",
+                )
             with self.assertRaisesRegex(ValueError, "not empty"):
                 run(source, weight, root / "result", Options(), model=Detector())
             with self.assertRaisesRegex(ValueError, "inside"):

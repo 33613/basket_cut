@@ -10,7 +10,11 @@ Use `/root/autodl-tmp/env/ball/bin/python` with `requirements-ball.txt`.
 The operator verified torch 2.6.0+cu124, torchvision 0.21.0+cu124,
 RF-DETR 1.10.1 and CUDA on the RTX 4090. A checkpoint loaded as RFDETRSmall
 with classes ball, holder, rim, scorer, player, referee, ball-in-basket.
-No GPU inference result has yet been verified for this module.
+The operator subsequently ran video 37, source frames 360–659, on the 4090:
+300 frames processed; ball detections on 280 frames, rims on 300, v1 accepted
+observations on 250 and predictions on 50. Visual review reported usable ball
+tracking with a short false association around player occlusion. These are
+coverage counts and qualitative feedback, not accuracy measurements.
 
 Checkpoint source: [basketball RF-DETR](https://github.com/feifeifei85/OpenHoopVision/blob/ec969037b2c02b983a77b260c50cb9eb36fe9fc1/weights/rf-detr-basketball.pth).
 Expected bytes: 129499889. SHA-256:
@@ -40,8 +44,8 @@ Outputs:
 
 - `ball.jsonl`: all detector classes, accepted rim boxes and selected ball track;
   original zero-based `source_frame_idx`, original seconds and window-local frame index.
-- `ball_vis.mp4`: silent H.264 preview. Ball boxes green, rim boxes blue,
-  selected observed centers yellow and predicted centers red.
+- `ball_vis.mp4`: silent H.264 preview. All ball candidate boxes gray, accepted
+  ball boxes green, rim boxes blue, accepted centers yellow and predictions red.
 - `summary.json`: source/checkpoint hashes, package version, dimensions, options,
   detection counts and explicit unevaluated status. Counts are not accuracy.
 
@@ -51,6 +55,38 @@ All raw detections are retained so future offline association can revisit a mist
 single-ball choice. Do not extrapolate across long occlusion or camera cuts.
 For the initial test choose a window without a camera cut. The module checks CFR
 timing before using `source_frame_idx / fps`; it refuses irregular frame clocks.
+
+## Continuity v2 and cached replay
+
+V1 used a gate equal to 6% of the frame diagonal and could accept background
+objects after occlusion. V2 uses 1% of the diagonal plus a term based on recent
+median ball-box size and motion uncertainty; candidates with size ratios beyond
+2.5 are excluded. Velocity uses a rolling median of displacement estimates.
+Rejected detections and predicted positions do not update observation/velocity
+history. New segments need at least 3 consecutive observed source frames;
+short seeds remain under `tentative_ball_track`, with `ball_track=null`.
+Confirmation is performed offline and can retrospectively retain the first
+observations of a supported segment. It confirms temporal support, not visual
+correctness. Persistent background objects and plausible close false detections
+can still survive. No parabolic-path constraint is imposed on dunks or bounces.
+
+Rebuild the existing 5s run without any GPU inference:
+
+```bash
+/root/autodl-tmp/env/ball/bin/python -m cli.ball_track \
+  --input /root/autodl-fs/data/goal-demo-input/37.mp4 \
+  --reuse-detections /root/autodl-fs/ball-demo-37-001 \
+  --output-dir /root/autodl-fs/ball-demo-37-002 \
+  --min-confirm-frames 3
+```
+
+The CLI inherits the original window and options, and loads no RF-DETR model.
+It checks source/checkpoint hashes, complete contiguous frame IDs, row count and
+original timestamps; it refuses windows outside the cache and detector resolution
+changes. Thresholds below the original detector floor require fresh inference.
+The old run is read-only. New summary records the reused JSONL hash. No package
+upgrade or model download is needed. Compare actual false associations and
+reacquisition, not just the number of accepted observations (which may decrease).
 
 ## PL-NBA source audit
 
