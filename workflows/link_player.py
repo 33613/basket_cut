@@ -56,13 +56,27 @@ def verify_sources(protocol):
             raise ValueError("Source video changed after planning")
 
 
-def prepare(input_dir, annotations, root, match_id, options, settings, tracking_root=None):
+def prepare(input_dir, annotations, root, match_id, options, settings, tracking_root=None, *, ball_config=None, reuse_run=None):
     root = Path(root).resolve()
     inputs = Path(input_dir).resolve()
     if root == inputs or root in inputs.parents or inputs in root.parents:
         raise ValueError("Input and output directories must be separate and non-nested")
     protocol = load_events(inputs, annotations, match_id, options, ffprobe=settings.ffprobe)
     protocol["tracking_root"] = str(Path(tracking_root).resolve()) if tracking_root else None
+    if ball_config:
+        protocol['ball']=ball_config
+        protocol['algorithm_version']='ball-contact-action-v2'
+    if reuse_run:
+        old=saved(reuse_run)
+        for event in protocol['events']:
+            prior=next((e for e in old['events'] if e['event_id']==event['event_id']),None)
+            if (prior is None or prior['goal_time_s']!=event['goal_time_s']
+                    or old['sources'][event['video_id']]['sha256']!=protocol['sources'][event['video_id']]['sha256']):
+                raise ValueError('Prior run does not match event/source/goal annotations')
+            for stage in ('track','action','link'):
+                require_stage(folder(reuse_run,prior),stage)
+        protocol['reuse_run']=str(Path(reuse_run).resolve())
+        protocol['reuse_protocol_sha256']=sha256_file(Path(reuse_run)/'protocol.json')
     file = root / "protocol.json"
     if file.exists():
         if saved(root) != protocol:
@@ -186,10 +200,13 @@ def track(root, settings):
 def action(root, settings):
     protocol = saved(root)
     options = protocol["options"]
-    model = model_protocol(settings, "action")
+    model = None if protocol.get('reuse_run') else model_protocol(settings, "action")
     for event in protocol["events"]:
         directory = folder(root, event)
         require_stage(directory, "track")
+        if protocol.get('reuse_run'):
+            reuse_actions(protocol,event,directory)
+            continue
         signature = dict(model=model, window=sha256_file(directory / "window.mkv"),
             tracks=sha256_file(directory / "tracks.jsonl"), options=options)
         names = ["actions.jsonl", "actions.summary.json"]
@@ -209,6 +226,71 @@ def action(root, settings):
         mark(directory, "action", signature, names)
 
 
+def reuse_actions(protocol,event,directory):
+    """Rebase prior action centers; retain their original inference context provenance."""
+    old_root=Path(protocol['reuse_run']); old=saved(old_root)
+    if sha256_file(old_root/'protocol.json')!=protocol['reuse_protocol_sha256']:
+        raise ValueError('Prior run protocol changed')
+    prior=next(e for e in old['events'] if e['event_id']==event['event_id'])
+    old_dir=folder(old_root,prior); require_stage(old_dir,'action'); require_stage(old_dir,'track')
+    fps=protocol['sources'][event['video_id']]['fps']
+    if event['window_start_frame'] < prior['window_start_frame']:
+        raise ValueError('New action search begins outside prior context')
+    signature=dict(reused_actions=sha256_file(old_dir/'actions.jsonl'),
+                   old_tracks=sha256_file(old_dir/'tracks.jsonl'),event=event,
+                   old_window_start=prior['window_start_frame'])
+    names=['actions.jsonl','actions.summary.json']
+    if complete(directory,'action',signature,names):
+        return
+    shift=prior['window_start_frame']-event['window_start_frame']
+    count=0
+    with (directory/'actions.jsonl').open('w') as stream:
+        for a in read_jsonl(old_dir/'actions.jsonl'):
+            if a['video_id']!=event['event_id'] or abs(a['timestamp_s']-a['frame_idx']/fps)>1/fps:
+                raise ValueError('Prior action clock/video mismatch')
+            frame=a['frame_idx']+shift
+            if not 0<=frame<event['window_end_frame_exclusive']-event['window_start_frame']:
+                continue
+            value=dict(a,frame_idx=frame,timestamp_s=frame/fps,
+                       proposal_frame_idx=a.get('proposal_frame_idx',a['frame_idx'])+shift,
+                       reused_context_window_source_frames=[prior['window_start_frame'],prior['window_end_frame_exclusive']])
+            write_jsonl_line(stream,value); count+=1
+    atomic_json(directory/'actions.summary.json',dict(status='reused_prior_inference',count=count,
+        source=str(old_dir/'actions.jsonl'),source_sha256=signature['reused_actions'],
+        context_note='Original wider inference context retained; only center timestamps rebased'))
+    mark(directory,'action',signature,names)
+
+
+def ball(root,settings):
+    protocol=saved(root); config=protocol.get('ball')
+    if not config:
+        raise ValueError('Run was not prepared with a ball checkpoint')
+    if sha256_file(config['checkpoint'])!=config['checkpoint_sha256']:
+        raise ValueError('Ball checkpoint changed')
+    verify_sources(protocol)
+    for event in protocol['events']:
+        directory=folder(root,event); require_stage(directory,'prepare')
+        source=protocol['sources'][event['video_id']]
+        cached=config.get('cache',{}).get(event['video_id'])
+        signature=dict(model=config['checkpoint_sha256'],event=event,
+            source=source['sha256'],tracker=sha256_file(settings.repository_root/'pipeline/ball/tracker.py'),
+            adapter=sha256_file(settings.repository_root/'cli/ball_track.py'),
+            cache=sha256_file(Path(cached)/'ball.jsonl') if cached else None,
+            cache_summary=sha256_file(Path(cached)/'summary.json') if cached else None)
+        names=['ball/ball.jsonl','ball/summary.json','ball/ball_vis.mp4']
+        if complete(directory,'ball',signature,names):
+            continue
+        command=[config['python'],'-u','-m','cli.ball_track','--input',source['path'],
+            '--checkpoint',config['checkpoint'],'--output-dir',directory/'ball',
+            '--start-s',event['window_start_s'],'--end-s',event['window_end_s'],
+            '--goal-time-s',event['goal_time_s']]
+        if cached:
+            command+=['--reuse-detections',cached]
+        print(f"[ball] {event['event_id']} / video {event['video_id']}",flush=True)
+        run_command(command,settings)
+        mark(directory,'ball',signature,names)
+
+
 def link(root, options):
     protocol = saved(root)
     for event in protocol["events"]:
@@ -217,12 +299,21 @@ def link(root, options):
         signature = dict(tracks=sha256_file(directory / "tracks.jsonl"),
             actions=sha256_file(directory / "actions.jsonl"), options=asdict(options), version="action-evidence-v1",
             ranker=sha256_file(Path(__file__).resolve().parents[1] / "pipeline/player_link/evidence.py"))
+        if protocol.get('ball'):
+            require_stage(directory,'ball')
+            signature.update(ball=sha256_file(directory/'ball/ball.jsonl'),version='ball-contact-action-v2',
+                ball_ranker=sha256_file(Path(__file__).resolve().parents[1]/'pipeline/player_link/ball_evidence.py'))
         if complete(directory, "link", signature, ["link.json"]):
             continue
         meta = read(directory / "video_meta.json")
         grouped = load_tracks(directory / "tracks.jsonl", meta)
-        result = rank_shooters(event, protocol["sources"][event["video_id"]],
-            [r for rs in grouped.values() for r in rs], list(read_jsonl(directory / "actions.jsonl")), options)
+        args=(event,protocol['sources'][event['video_id']],
+              [r for rs in grouped.values() for r in rs],list(read_jsonl(directory/'actions.jsonl')))
+        if protocol.get('ball'):
+            from pipeline.player_link.ball_evidence import rank_with_ball
+            result=rank_with_ball(*args,list(read_jsonl(directory/'ball/ball.jsonl')),options)
+        else:
+            result=rank_shooters(*args,options)
         atomic_json(directory / "link.json", result)
         mark(directory, "link", signature, ["link.json"])
         print(f"[link] {event['event_id']}: {result['status']} / T={result['shooter_track_id']}", flush=True)
@@ -239,7 +330,8 @@ def status(root):
         result = read(directory / "link.json") if (directory / "link.json").exists() else {}
         handoff = read(directory / "handoff/manifest.json") if (directory / "handoff/manifest.json").exists() else {}
         results.append(dict(event_id=event["event_id"], video_id=event["video_id"], goal_time_s=event["goal_time_s"],
-            stages={stage: (directory / f".{stage}.json").exists() for stage in ("prepare", "track", "action", "link", "export")},
+            stages={stage: (directory / f".{stage}.json").exists() for stage in
+                    (("prepare","track","action","ball","link","export") if protocol.get('ball') else ("prepare", "track", "action", "link", "export"))},
             attribution_status=result.get("status"), shooter_track_id=result.get("shooter_track_id"),
             handoff_status=handoff.get("attribution_status"), handoff_track_id=handoff.get("shooter_track_id")))
     done = all(all(row["stages"].values()) for row in results)

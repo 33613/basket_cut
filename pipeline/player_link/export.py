@@ -81,6 +81,9 @@ def export_actor(directory, tracks, event, source, result, chosen, trajectory, a
         automatic_result="../link.json", window_video="../window.mkv", window_metadata="../window.json",
         source_video_path=source["path"],
         samples=[], notes="Raw local track identity is not a cross-video player identity.")
+    record['attribution_method']=result.get('attribution_method')
+    record['ball_evidence_used']=result.get('ball_evidence_used',False)
+    record['ball_path_supported']=result.get('ball_path_supported',False)
     if review:
         record["manual_review"] = review
     if chosen is not None:
@@ -91,6 +94,9 @@ def export_actor(directory, tracks, event, source, result, chosen, trajectory, a
         (temporary / "crops").mkdir()
         selected = set(round(i*(len(rows)-1)/max(1, min(options.samples_per_track, len(rows))-1))
                        for i in range(min(options.samples_per_track, len(rows))))
+        quality_selection=result.get('ball_evidence_used',False)
+        best_samples={}
+        record['sample_selection']='sharpness_size_detection_per_time_bin' if quality_selection else 'uniform_observed_frames'
         sample_frames = {rows[i].frame_idx for i in selected}
         by_frame = {r.frame_idx: r for r in rows}
         capture = cv2.VideoCapture(str(directory / "window.mkv"))
@@ -120,12 +126,21 @@ def export_actor(directory, tracks, event, source, result, chosen, trajectory, a
                         image_path = f"crops/F{idx:07d}.png"
                         if not cv2.imwrite(str(temporary / image_path), crop):
                             raise RuntimeError("Cannot write raw shooter crop")
-                        if idx in sample_frames:
-                            record["samples"].append(dict(sample_id=f"{event['event_id']}-T{chosen}-F{idx}",
+                        sample=dict(sample_id=f"{event['event_id']}-T{chosen}-F{idx}",
                                 crop_path=image_path, window_frame_idx=idx,
                                 source_frame_idx=idx+event["window_start_frame"],
                                 source_timestamp_s=(idx+event["window_start_frame"])/source["fps"],
-                                bbox_xyxy=list(r.bbox_xyxy), crop_sha256=sha256_file(temporary / image_path)))
+                                bbox_xyxy=list(r.bbox_xyxy))
+                        if quality_selection:
+                            gray=cv2.resize(cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY),(64,128))
+                            sharpness=float(cv2.Laplacian(gray,cv2.CV_64F).var())
+                            score=math.log1p(sharpness)*min(1,crop.shape[0]/160)*min(1,crop.shape[1]/64)*r.det_score
+                            sample.update(quality_score=score,sharpness=sharpness)
+                            bin_id=min(options.samples_per_track-1,(idx-start)*options.samples_per_track//(end-start+1))
+                            if bin_id not in best_samples or score>best_samples[bin_id]['quality_score']:
+                                best_samples[bin_id]=sample
+                        elif idx in sample_frames:
+                            record['samples'].append(sample)
                         scale = min(256/crop.shape[1], 512/crop.shape[0])
                         w, h = max(1,round(crop.shape[1]*scale)), max(1,round(crop.shape[0]*scale))
                         canvas[(512-h)//2:(512-h)//2+h, (256-w)//2:(256-w)//2+w] = cv2.resize(crop, (w,h))
@@ -152,6 +167,10 @@ def export_actor(directory, tracks, event, source, result, chosen, trajectory, a
                 value.update(source_video_id=event["video_id"], source_frame_idx=r.frame_idx+event["window_start_frame"],
                              source_timestamp_s=(r.frame_idx+event["window_start_frame"])/source["fps"])
                 write_jsonl_line(stream, value)
+        if quality_selection:
+            record['samples']=sorted(best_samples.values(),key=lambda s:s['window_frame_idx'])
+        for sample in record['samples']:
+            sample['crop_sha256']=sha256_file(temporary/sample['crop_path'])
     atomic_json(temporary / "manifest.json", record)
     if target.exists():
         shutil.rmtree(target)
@@ -193,6 +212,9 @@ def export_run(root, options, settings, review_file=None):
         signature = dict(link=sha256_file(directory / "link.json"), tracks=sha256_file(directory / "tracks.jsonl"),
             window=sha256_file(directory / "window.mkv"), actions=sha256_file(directory / "actions.jsonl"),
             review=review, samples=options.samples_per_track)
+        if protocol.get('ball'):
+            signature.update(exporter=sha256_file(Path(__file__)),
+                             renderer=sha256_file(Path(__file__).resolve().parents[2]/'analysis/visualization/render.py'))
         marker = directory / ".export.json"
         if marker.exists() and flow.read(marker)["signature"] == signature:
             old = flow.read(marker)
@@ -206,7 +228,9 @@ def export_run(root, options, settings, review_file=None):
                               attribution_status, review, options, settings.ffmpeg)
         raw = directory / ".preview.mp4"
         render_results(RenderOptions(input=directory / "window.mkv", tracks=directory / "tracks.jsonl",
-            actions=directory / "actions.jsonl", output=raw, show_top_candidate=True, overwrite=True))
+            actions=directory / "actions.jsonl", output=raw, show_top_candidate=True, overwrite=True,
+            ball_points=directory/'ball/ball.jsonl' if protocol.get('ball') else None,
+            source_frame_offset=event['window_start_frame'],highlight_track_id=chosen))
         converted = directory / ".preview.h264.mp4"
         subprocess.run([settings.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", str(raw), "-an", "-c:v", "libx264",
             "-threads", "2", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(converted)], check=True)
@@ -228,7 +252,7 @@ def export_run(root, options, settings, review_file=None):
     sections = []
     for event in protocol["events"]:
         result = flow.read(flow.folder(root,event) / "link.json")
-        cards = "".join(f'<li>T{c["track_id"]}: action score {c["score"]:.3f}, '
+        cards = "".join(f'<li>T{c["track_id"]}: evidence score {c["score"]:.3f}, '
                         f'candidate interval {c["action_interval_source_s"][0]:.2f}–{c["action_interval_source_s"][1]:.2f}s '
                         f'(source clip)</li>' for c in result["candidates"])
         eid = event["event_id"]
@@ -237,11 +261,26 @@ def export_run(root, options, settings, review_file=None):
         sections.append(f'<section><h2>Video {html.escape(event["video_id"])} / {eid}</h2>'
             f'<p>Goal {event["goal_time_s"]}s; {record["attribution_status"]}; selected T={record["shooter_track_id"]}</p>'
             f'<video controls width="720" src="events/{eid}/evidence.mp4"></video><ul>{cards}</ul>{imgs}</section>')
+    description=('Observed ball, rim, upper-body contact and action evidence; contact is a box proxy, review required. '
+                 if protocol.get('ball') else 'Action-only hypotheses; ball flight is not verified. ')
     (root / "review.html").write_text('<!doctype html><meta charset="utf-8"><title>link_player evidence</title>'
         '<style>body{font:16px sans-serif;margin:32px}section{margin-bottom:48px}img{margin:5px}</style>'
-        '<h1>Goal → shooter track</h1><p>Action-only hypotheses; ball flight is not verified. '
+        '<h1>Goal → shooter track</h1><p>'+description+
         'Review frame indices are local to each EVENT WINDOW. Player identity is downstream.</p>' + "".join(sections))
     atomic_json(root / "status.json", flow.status(root))
+    if protocol.get('reuse_run'):
+        # Comparison is descriptive; no jersey/player ground truth enters inference.
+        with (root/'comparison.csv').open('w',newline='') as stream:
+            writer=csv.DictWriter(stream,fieldnames=['video_id','goal_time_s','first_status','first_track_id',
+                'second_status','second_track_id','ball_path_supported','diagnostics'])
+            writer.writeheader()
+            for event in protocol['events']:
+                old=flow.read(flow.folder(protocol['reuse_run'],event)/'link.json')
+                new=flow.read(flow.folder(root,event)/'link.json')
+                writer.writerow(dict(video_id=event['video_id'],goal_time_s=event['goal_time_s'],
+                    first_status=old['status'],first_track_id=old['shooter_track_id'],
+                    second_status=new['status'],second_track_id=new['shooter_track_id'],
+                    ball_path_supported=new.get('ball_path_supported',False),diagnostics=';'.join(new['diagnostics'])))
 
 
 def pack_run(root):
@@ -251,7 +290,7 @@ def pack_run(root):
         raise ValueError("Finish all stages before packing")
     for event in flow.saved(root)["events"]:
         directory = flow.folder(root, event)
-        for stage in ("prepare", "track", "action", "link", "export"):
+        for stage in (("prepare","track","action","ball","link","export") if flow.saved(root).get('ball') else ("prepare", "track", "action", "link", "export")):
             marker = flow.read(directory / f".{stage}.json")
             for name, checksum in marker["outputs"].items():
                 if sha256_file(directory / name) != checksum:

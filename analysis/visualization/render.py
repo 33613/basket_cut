@@ -24,6 +24,9 @@ class RenderOptions:
     show_top_candidate: bool = False
     max_frames: int | None = None
     overwrite: bool = False
+    ball_points: Path | None = None
+    source_frame_offset: int = 0
+    highlight_track_id: int | None = None
 
 
 def load_tracks(path: Path) -> dict[int, list[TrackRecord]]:
@@ -70,6 +73,13 @@ def render_results(options: RenderOptions) -> dict[str, Any]:
     tracks = load_tracks(options.tracks)
     actions = load_actions(options.actions)
     identities = load_identity_map(options.identity_map)
+    ball_points={}
+    if options.ball_points:
+        for row in read_jsonl(options.ball_points):
+            idx=row['window_frame_idx']
+            if idx in ball_points or row['source_frame_idx']!=idx+options.source_frame_offset:
+                raise ValueError('Ball render clock mismatch/duplicate frame')
+            ball_points[idx]=row
 
     capture = cv2.VideoCapture(str(input_path))
     if not capture.isOpened():
@@ -98,6 +108,8 @@ def render_results(options: RenderOptions) -> dict[str, Any]:
             for track in tracks.get(frame_idx, []):
                 x1, y1, x2, y2 = (int(value) for value in track.bbox_xyxy)
                 color = color_for(track.track_id)
+                if track.track_id==options.highlight_track_id:
+                    color=(255,255,255)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 identity = identities.get(track.track_id)
                 if identity is None:
@@ -111,6 +123,8 @@ def render_results(options: RenderOptions) -> dict[str, Any]:
                         else f"{person_id} / T{track.track_id}"
                     )
                 labels = [f"{identity_text} det {track.det_score:.2f}"]
+                if track.track_id==options.highlight_track_id:
+                    labels.append('SHOOTER CANDIDATE')
                 action = nearest_action(
                     actions.get(track.track_id, []),
                     frame_idx,
@@ -132,6 +146,20 @@ def render_results(options: RenderOptions) -> dict[str, Any]:
                         color,
                         2,
                     )
+            ball_row=ball_points.get(frame_idx)
+            if ball_row:
+                for rim in ball_row.get('rims',[]):
+                    x1,y1,x2,y2=map(round,rim['bbox_xyxy'])
+                    cv2.rectangle(frame,(x1,y1),(x2,y2),(255,180,0),2)
+                ball=ball_row.get('ball_track')
+                if ball:
+                    color=(0,255,255) if ball['observed'] else (0,0,255)
+                    center=tuple(round(x) for x in ball['center_xy'])
+                    cv2.circle(frame,center,7,color,2)
+                    cv2.putText(frame,'ball observed' if ball['observed'] else 'ball predicted',
+                                (center[0]+8,center[1]),cv2.FONT_HERSHEY_SIMPLEX,.5,color,1)
+                cv2.putText(frame,f"Source F{frame_idx+options.source_frame_offset}",(12,25),
+                            cv2.FONT_HERSHEY_SIMPLEX,.65,(255,255,255),2)
             writer.write(frame)
             frame_idx += 1
     finally:
