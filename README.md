@@ -30,6 +30,8 @@ python -m cli.link_player --output-dir /path/to/new-run --stage status
 
 CPU 集成检查：`python -m analysis.link_player_selfcheck`。已有独立数据导出见 [十片段 MOTIP/KPR 测试包](docs/goal-test-export.md)。
 
+新增独立的[篮球检测与轨迹测试入口](docs/ball-tracking.md)：`cli.ball_track` 在指定短窗口逐帧运行 RF-DETR，保存球/篮筐检测、区分观测与预测的球轨迹及 H.264 视频；尚未并入上述出手者归因。`cli.pl_nba_annotations` 从官方 ZIP 筛选进球动作区间，保留原始时间格式和姓名标签，不将动作终点当作精确进球时刻。CPU 检查：`python -m analysis.ball_selfcheck`。
+
 <details>
 <summary>main 分支原有长视频与球员库工具（保留兼容，非本分支入口）</summary>
 
