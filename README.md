@@ -1,134 +1,56 @@
 # CourtVision · link_player
 
-当前进球归因基线已固定为 `goal-link-v3-baseline-20261106`（代码 `6be0adb`）。实际流程与十段结果见[基线记录](docs/checkpoints/goal-link-v3-20261106.md)，下一阶段跟踪改进见[TCEI 调研与对照协议](docs/tcei-evaluation-plan.md)。该记录不表示已经接入TCEI。
-
-本分支实现 **外部进球时刻 → 回看窗口 → MOTIP 正向追踪 → SlowFast 投篮动作证据 → 出手球员轨迹 → 身份识别交接包**。从同场比赛短视频开始，不依赖先初始化球员库或完成回合切分。
-
-输入使用 `video_id,filename,goal_time_s` 的 CSV 或 JSON 列表，同一视频可有多次进球。进球检测由其他模块提供；本分支负责定位出手者，跨片段身份识别和球员库由下游接收轨迹、原尺寸人物图及来源信息。
+从篮球视频的进球时刻定位出手球员，导出可复核轨迹和身份图片，供下游球员库检索、剪辑使用。进球时刻由外部模块或人工标注提供。
 
 ```mermaid
 flowchart LR
-    E[进球时间 + 视频] --> W[前8秒连续窗口]
-    W --> T[MOTIP 正向跟踪]
-    T --> A[SlowFast 投篮证据]
-    A --> R[先查前4秒 必要时扩展]
-    R --> C[候选轨迹 或待复核]
-    C --> H[原尺寸裁剪 + 时间与轨迹清单]
-    H --> I[交给身份识别与球员库模块]
+    E[视频 + 进球时刻] --> W[约5秒候选窗口]
+    W --> P[MOTIP 人物轨迹]
+    W --> B[RF-DETR 球与篮筐轨迹]
+    P --> A[SlowFast 动作证据]
+    P --> R[前3秒 接触与离手或手到筐]
+    B --> R
+    A --> S[候选排序 + 持球证据消歧]
+    R --> S
+    S --> H[局部轨迹 + 清晰原尺寸图片 + 复核视频]
+    H --> I[下游身份识别与球员库]
 ```
 
-自动结果是动作证据支持的候选，**目前没有球的飞行验证**，不宣称已确认最后一次有效出手。未知和歧义保留，不强行分配 ID；人工复核单独保存，不覆盖自动结果。
+## 使用
 
-从仓库根目录执行：
+控制环境和各模型环境独立配置，路径见 [.env.example](.env.example)，安装见 [GPU 环境](docs/gpu.md)。控制机需要 FFmpeg。
 
 ```bash
 python -m cli.link_player --env-file .env \
   --input-dir /path/to/videos --annotations /path/to/annotations.csv \
-  --output-dir /path/to/new-run --match-id game-001
+  --output-dir /path/to/new-run --match-id game-001 \
+  --ball-python /path/to/ball/bin/python \
+  --ball-checkpoint /path/to/rf-detr-basketball.pth
 python -m cli.link_player --output-dir /path/to/new-run --stage status
+python -m cli.export_link_review --output-dir /path/to/new-run
 ```
 
-支持校验复用十片段导出的 MOTIP：`--tracking-root /root/autodl-fs/test`。上游 `MOTIP/`、`MMAction2/` 保持原样；复用现有模型适配层。模块组织、人工复核、服务器命令及交接格式见 **[link_player 操作说明](docs/link-player.md)**。
+输入为 CSV/JSON 的 `video_id,filename,goal_time_s`；号码等评估答案不参与选人。球证据模式默认取 `[goal-4, goal+1)`，进球前3秒判断出手，其余时间补充清晰图。不带球参数时兼容原动作模式。
 
-CPU 集成检查：`python -m analysis.link_player_selfcheck`。已有独立数据导出见 [十片段 MOTIP/KPR 测试包](docs/goal-test-export.md)。
+轨迹 ID 只属于一次视频追踪，可能发生换人；自动 `candidate` 需要检查局部身份纯度。当前入口不运行 KPR 或建立永久球员 ID，下游负责身份归并与球员库。
 
-独立的[篮球检测与轨迹测试入口](docs/ball-tracking.md)：`cli.ball_track` 在指定短窗口逐帧运行 RF-DETR，保存球/篮筐检测、区分观测与预测的球轨迹及 H.264 视频。`cli.pl_nba_annotations` 从官方 ZIP 筛选进球动作区间，保留原始时间格式和姓名标签，不将动作终点当作精确进球时刻。CPU 检查：`python -m analysis.ball_selfcheck`。
+## 模块与文档
 
-第二轮[球轨迹与出手者归因](docs/link-player-ball.md)通过 `cli.link_player --ball-checkpoint ...` 启用：约 5 秒窗口、前 3 秒搜索，球与人物上半身接触/分离、到筐关系和动作分数共同形成候选。`--reuse-run` 复用第一轮动作推理，`--ball-cache VIDEO_ID=DIRECTORY` 复用球检测；生成新结果、对比表及人物/球叠加视频。默认不带球参数时仍运行原动作方案。CPU 检查：`python -m analysis.link_ball_selfcheck`。
+| 内容 | 说明 |
+|---|---|
+| [进球出手者](docs/link-player.md) | 输入、证据、缓存复用、复核和身份交接 |
+| [球检测与 PL-NBA](docs/ball-tracking.md) | RF-DETR 权重、连续性过滤、公开标注读取 |
+| [MOTIP/KPR 数据导出](docs/goal-test-export.md) | 独立追踪与身份特征测试包 |
+| [TCEI 适配](docs/tcei.md) | 环境、外部适配器、SportsMOT 对照与实现差异 |
+| [SportsMOT](docs/sportsmot.md)、[TeamTrack](docs/teamtrack.md)、[TrackID3x3](docs/trackid.md) | 独立数据集评测配置 |
+| [原长视频流程](docs/workflow.md) | 保留的分段、球员库和 Web 工具 |
 
-诊断修订 v3 保留多个到筐球段，并利用缓存中的持续持球检测消解人物框重叠歧义；`--ball-cache-run` 可复用上一轮所有事件的球证据。诊断原因、持球匹配条件及第三轮命令约定见同一操作说明。
+`pipeline/` 负责模型与业务逻辑，`adapters/` 封装外部实现，`workflows/` 编排，`cli/` 提供入口，`analysis/` 保存自检和评测代码。权重、环境、私人配置、原视频、输出和单次实验日志不提交 Git。
 
-<details>
-<summary>main 分支原有长视频与球员库工具（保留兼容，非本分支入口）</summary>
-
-## 篮球视频与同场球员库
-
-先从一场比赛的长视频选取 6 个清晰短窗口，各自连续运行 MOTIP，再筛选清晰、无遮挡的人物轨迹建立候选球员库。明确的多帧队伍与号码共识作为强身份线索，KPR 辅助关联。长视频再经过 Qwen3-VL 状态观察、边界复核后切成片段，逐片段运行 MOTIP。轨迹的 KPR 外观特征与 Qwen 球衣号码证据一起更新同场球员库；SlowFast 动作按片段和轨迹关联到球员。前端以球员照片为入口，支持检索、复核与视频剪辑，并展示流程统计和已有标注的切分指标。
-
-```mermaid
-flowchart TD
-    S[原视频 source_video_id] --> C[Qwen 粗看窗口 → 边界复核 → 片段 clip_id]
-    S --> B[6 个清晰短窗口 → 连续 MOTIP → 无遮挡多帧队伍/号码 + KPR]
-    B --> P
-    C --> T[MOTIP：每片段独立追踪]
-    T --> Q[质量筛选，保留原始轨迹]
-    Q --> K[KPR 人物特征]
-    Q --> N[Qwen 多帧号码证据]
-    K --> P[(同场比赛球员库 player_id)]
-    N --> P
-    Q --> A[SlowFast 轨迹动作 → 事件区间]
-    A --> J[clip_id + track_id → player_id]
-    P --> J
-    J --> W[按球员、动作、片段检索 → 视频剪辑]
-```
-
-## ID 与时间
-
-| 字段 | 含义 |
-| --- | --- |
-| `match_id` | 一场比赛；一份球员库只属于这一场 |
-| `source_video_id` | 原视频内容 SHA-256 派生的 `SRC-*` |
-| `clip_id` | 原视频与切分起止时间派生的 `CL-*`；切点改变则 ID 改变 |
-| `track_id` / `raw_track_ids` | MOTIP 在片段内的数字 ID；不同片段可以重复 |
-| `track_uid` / `track_uids` | `clip_id:T0000`，用于唯一定位轨迹 |
-| `local_person_id` | 片段内档案 ID `P*`，保留旧接口与审计证据 |
-| `player_id` | 同场持久化身份 `PL-*`，兼容字段为 `global_person_id` |
-| `event_id` | 动作事件 ID，关联片段、原轨迹和当前球员 |
-
-事件 `start/end` 是片段内秒数；`source_start_s/source_end_s` 是原视频秒数。来源时间从原视频首个视频呈现时间戳开始计算，不是比赛计时器。导出片段明确转为 CFR，供现有 `frame_idx/fps` 后端使用，切点量化误差随元数据保存。
-
-## 运行
-
-在仓库根目录执行。控制环境与各 GPU 环境独立，私人解释器和权重路径参考 [.env.example](.env.example)；部署见 [GPU 环境](docs/gpu.md)。控制机需要 `ffmpeg`、`ffprobe`。
+`main` 与 `link_player` 独立维护；不改上游 `MOTIP/`、`MMAction2/` 或外置 TCEI 仓库。当前出手者基线保存在 Git 标签 `goal-link-v3-baseline-20261106`（`6be0adb`），实验记录以运行目录的协议和结果为准。
 
 ```bash
-bash tools/setup_control.sh
-.venv/bin/python -m cli.check_runtime --env-file .env
-.venv/bin/python -u -m cli.process_match \
-  --env-file .env --match-id game-001 \
-  --input runtime/data/game-001.mp4 \
-  --output-dir runtime/outputs/game-001
+python -m unittest analysis.ball_selfcheck analysis.link_player_selfcheck analysis.link_ball_selfcheck
 ```
 
-`--dry-run` 查看计划，不加载模型。`--stage initialize` 只测试 6 个初始化窗口，默认每个 4 秒；也可通过 `--bootstrap-windows-file` 提供六个起点秒数。`--stage segment` 只切分；`--stage process --limit 1` 先处理一个已导出片段，移除 `--limit` 后继续全部。切分参数、人工修订、断点恢复和检索剪辑见 [完整流程](docs/workflow.md)。
-
-已有短视频仍可使用 `cli.process_batch --input-dir ... --output-dir ... --match-id ...`。同一批次的历史成员不会因为本次只选部分片段而删除。单张 GPU 串行运行，Qwen 切分子进程退出后才启动 MOTIP；每片段执行：
-
-`tracking → quality → action → aggregate → identity → resolution → jersey → players → link → render → review`
-
-## 球员库与网页
-
-初始化使用原分辨率、原帧率的 FFV1 无损短窗口。每个时间层做少量检测探查，选择清晰人物较多的窗口；探查图不建立身份。每个窗口从零开始连续 MOTIP 追踪，不跨不相邻窗口保留追踪状态。人物尺寸、清晰度、画面边缘完整性和重叠率先做硬筛选，Qwen 再判断球员角色、无遮挡、队服颜色、号码和朝向。至少两个相隔 0.5 秒的清晰帧支持队伍与号码，才作为初始身份锚点；单帧号码、同号异队、冲突读数不会直接合并。自动队伍是比赛内匿名的 `KIT-*`，不能推断主客队；颜色不明确时保留待定，也可配置颜色到队伍的映射。
-
-同队同号的独立强证据可关联不同外观模式，KPR 距离保留作辅助依据。没有明确号码的清晰轨迹可以通过严格外观规则补充已有身份，尚不能关联的保留待处理。每人最多 6 个模板，同一已知朝向最多 2 个，缺少其他朝向不会阻止建库。多角度标签来自 Qwen，仍需实测核查。
-
-KPR 权重固定，增量更新数据库和外观图库。纯外观距离默认 `0.12`，有号码支持时为 `0.2`，候选差 `0.05`，均是待验证工程初值。更新、重处理、拒绝和回滚机制保留；低质量图不进入初始库，原始证据保留便于排查。球员 ID 不重新编号、不跨比赛合并。旧照片库仅保留审计与维护兼容，新流程不再使用独立照片建库，换用新输出目录测试。[参数与维护说明](docs/workflow.md#追踪身份与动作)。
-
-```bash
-.venv/bin/python -m cli.serve_web --env-file .env --host 0.0.0.0 --port 6006
-```
-
-网页“导入结果”选择长视频运行目录下的 **`results/`**。流程页显示原视频、片段时间和 Qwen 边界证据；球员库可查看原尺寸模板、朝向、队伍/号码来源，并下载初始化短窗口；支持、调整身份、检索动作，并下载动作前后各一秒或整个对应片段。号码、模型分数和处理成功均不代表准确率。服务通过平台受控端口访问。
-
-SQLite 是身份事实来源，JSON 是按修订号发布的可浏览索引。人工修正后检索和导出读取当前归属，无须重新运行模型。已注册的特征、号码或动作证据不能被静默覆盖；改变模型或切点后使用新的输出目录，保留旧数据库和证据。
-
-## 文件管理与验证
-
-| 目录 | 职责 |
-| --- | --- |
-| `pipeline/segmentation`、`pipeline/media.py` | Qwen 切分、时间映射、CPU 视频导出 |
-| `pipeline/tracking` | MOTIP、轨迹质量 |
-| `pipeline/identity` | KPR、号码证据、持久化球员库 |
-| `pipeline/action`、`adapters/mmaction2` | 原有 MultiSports SlowFast 动作方案 |
-| `contracts`、`workflows`、`cli` | 数据契约、执行编排、命令行入口 |
-| `web` | 检查、身份修正、检索与下载 |
-| `analysis` | CPU 自检、数据集评估 |
-| `MOTIP`、`MMAction2` | 保留的上游实现 |
-
-权重、环境、私人配置、原视频和输出均不提交 Git。部署目录可继续分为 `model/`、`tool/`、`env/`、`basket_cut/`、`data/`、`output/`。
-
-`cli.check_match` 实际执行合成视频的窗口切分、边界合并、来源映射、身份检索和 FFmpeg 导出；模型回答使用明确标注的合成输入。其他 CPU 检查由 `tools/setup_control.sh` 执行。真实 Qwen 切分及 MOTIP/KPR/SlowFast 联合推理需要在有空闲 GPU 时另行验证。
-
-保留独立的 [SportsMOT 原始帧评估](docs/sportsmot.md) 、[TeamTrack 评估](docs/teamtrack.md) 和 [TrackID3x3 评估](docs/trackid.md)，不把业务切分混入基准评估。模型来源：[MOTIP](https://github.com/MCG-NJU/MOTIP)、[KPR](https://github.com/VlSomers/keypoint_promptable_reidentification)、[MMAction2](https://github.com/open-mmlab/mmaction2)、[Qwen3-VL](https://github.com/QwenLM/Qwen3-VL)。
-
-</details>
+TCEI 默认关闭，只在显式选择的跟踪对照实验中启用；GPU 环境兼容检查通过不代表跟踪准确率提升。
