@@ -151,3 +151,22 @@ and per-candidate `role_evidence` with match counts/frames/confidences. Geometri
 scores are unchanged; a selected holder can therefore precede a slightly higher
 geometric score. `comparison.csv` compares the run passed as `--reuse-run` with
 the current run: for this third experiment, its first/second columns mean 002/003.
+
+## Lightweight offline review package
+
+```bash
+python -m cli.export_link_review --output-dir /root/autodl-fs/link-player-demo-003
+```
+
+Creates the sibling `link-player-demo-003-review.zip` and SHA-256 file, reading
+the completed run without modifying it. It verifies export artifacts and includes
+person/ball videos, target trajectory videos, selected original-size samples,
+candidate evidence, a Chinese offline review page and a blank review checklist.
+It omits lossless windows, unused crops, model caches and logs. It is a review
+bundle, not a complete identity handoff; source provenance remains in manifests.
+
+Unzip and open `review.html`. Check shooter, local identity purity, usable images
+and complete action coverage. A white highlight follows a local track ID in the
+context video and does not certify identity throughout the whole 5s window.
+Inspect the target trajectory's stated original-frame bounds, especially video 3/T6.
+Fill `review_checklist.csv`; it does not change server-side review decisions.

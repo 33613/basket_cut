@@ -1,9 +1,11 @@
 """Ball-conditioned attribution and isolated second-run CPU integration checks."""
 
 import os
+import re
 import subprocess
 import sys
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,10 +13,12 @@ import numpy as np
 
 from analysis import link_player_selfcheck as prior_tests
 from cli.ball_track import Options, run
+from cli.export_link_review import export_review
 from contracts.schema import TrackRecord, read_jsonl, write_jsonl_line
 from pipeline.media import atomic_json, sha256_file
 from pipeline.player_link.ball_evidence import rank_with_ball
 from pipeline.player_link.events import LinkOptions
+from pipeline.player_link.export import export_run
 from workflows import link_player as flow
 
 
@@ -368,6 +372,7 @@ class Integration(unittest.TestCase):
             }
             # Populate immutable first-round automatic decisions for comparison.
             flow.link(fixture.root, fixture.options)
+            export_run(fixture.root, fixture.options, fixture.settings)
             before = {
                 str(p): sha256_file(p) for p in fixture.root.rglob("*") if p.is_file()
             }
@@ -463,6 +468,33 @@ class Integration(unittest.TestCase):
             snapshot = {
                 str(p): sha256_file(p) for p in destination.rglob("*") if p.is_file()
             }
+            review_archive = base / "first-review.zip"
+            export_review(fixture.root, review_archive)
+            with zipfile.ZipFile(review_archive) as archive:
+                names = set(archive.namelist())
+                prefix = fixture.root.name + "-review/"
+                page = archive.read(prefix + "review.html").decode()
+                self.assertIn("· T0", page)
+                for link in re.findall(r'(?:src|href)="([^"]+)"', page):
+                    self.assertIn(prefix + link, names)
+                self.assertFalse(any(n.endswith("window.mkv") for n in names))
+                self.assertTrue(any(n.endswith("trajectory.mp4") for n in names))
+                selected_count = sum(
+                    len(
+                        flow.read(
+                            flow.folder(fixture.root, e) / "handoff/manifest.json"
+                        )["samples"]
+                    )
+                    for e in fixture.protocol["events"]
+                )
+                self.assertEqual(sum(n.endswith(".png") for n in names), selected_count)
+                self.assertIn(prefix + "review_checklist.csv", names)
+            self.assertEqual(
+                snapshot,
+                {str(p): sha256_file(p) for p in destination.rglob("*") if p.is_file()},
+            )
+            with self.assertRaises(FileExistsError):
+                export_review(fixture.root, review_archive)
             third_command = command.copy()
             third_command[third_command.index("--output-dir") + 1] = str(base / "third")
             third_command[third_command.index("--reuse-run") + 1] = str(destination)
