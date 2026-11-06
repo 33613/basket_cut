@@ -48,11 +48,18 @@ class MotipBackend:
         runtime_config: MotipRuntimeConfig,
         device: str = "cuda:0",
         preprocessing: str = "tensor",
+        calibration=None,
+        tcei_reference=None,
     ) -> None:
         self.motip_root = Path(motip_root).expanduser().resolve()
         self.config_path = self._resolve_under_root(config_path)
         self.checkpoint_path = Path(checkpoint_path).expanduser().resolve()
         self.runtime_config = runtime_config
+        self.calibration = calibration
+        self.tcei_reference = tcei_reference
+        self._tcei_wide_caches = ({}, {})
+        if calibration is not None and (runtime_config.fp16 or tcei_reference is None):
+            raise ValueError("TCEI requires FP32 and the pinned author reference helpers")
         if preprocessing not in ("tensor", "upstream-pil"):
             raise ValueError(f"Unknown preprocessing: {preprocessing}")
         self.preprocessing = preprocessing
@@ -113,7 +120,7 @@ class MotipBackend:
         return path.resolve() if path.is_absolute() else (self.motip_root / path).resolve()
 
     def create_tracker(self, *, height: int, width: int, only_detr=None):
-        return self._runtime_tracker_class(
+        arguments = dict(
             model=self.model,
             sequence_hw=(height, width),
             use_sigmoid=self.runtime_config.use_sigmoid,
@@ -126,6 +133,12 @@ class MotipBackend:
             only_detr=self.runtime_config.only_detr if only_detr is None else only_detr,
             dtype=self.dtype,
         )
+        if self.calibration is not None:
+            from pipeline.tracking.tcei import create_tracker
+            wide = self._tcei_wide_caches if self.calibration.cache_scope == "stream" else None
+            return create_tracker(self._runtime_tracker_class, calibration=self.calibration,
+                                  reference=self.tcei_reference, wide_caches=wide, **arguments)
+        return self._runtime_tracker_class(**arguments)
 
     @torch.inference_mode()
     def infer_frame(self, tracker: Any, frame_bgr: Any) -> list[dict[str, Any]]:

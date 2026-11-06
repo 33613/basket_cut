@@ -17,7 +17,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-TCEI_COMMIT = "145d1b8431398156f8d9f854430e306fdee39eaa"
+from adapters.tcei import source_revision
+
 PACKAGES = (
     "torch",
     "torchvision",
@@ -32,18 +33,6 @@ PACKAGES = (
     "opencv-python",
     "opencv-python-headless",
 )
-
-
-def source_revision(root: Path) -> str:
-    commit = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=root,
-        text=True,
-    ).strip()
-    if commit != TCEI_COMMIT:
-        raise ValueError(f"Expected TCEI {TCEI_COMMIT}; got {commit}")
-    subprocess.run(["git", "diff", "--exit-code", "HEAD", "--"], cwd=root, check=True)
-    return commit
 
 
 def cuda_ops(report: dict) -> None:
