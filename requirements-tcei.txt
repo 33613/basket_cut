@@ -1,0 +1,9 @@
+# Inference dependencies for the pinned author TCEI checkout.
+# Reuse the MOTIP environment's torch/torchvision, cv2 and compiled CUDA op.
+# Do not use this file to select or upgrade PyTorch.
+PyYAML>=6,<7
+tqdm>=4.66,<5
+scipy>=1.11,<2
+einops>=0.7,<1
+accelerate>=0.33,<2
+wandb>=0.19,<0.20
