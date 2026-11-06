@@ -1,5 +1,7 @@
 # TrackID3x3 固定机位跨数据集评估
 
+MOTIP与TCEI的Indoor成对比较使用[统一TCEI入口](tcei.md#trackid-indoor-对照)，下文保留原版独立评测配置。
+
 数据根目录保留上传包的 `manifest.csv`、`checksums.sha256`、`videos/{Indoor,Outdoor}/` 与 `annotations/original/{Indoor,Outdoor}/`。当前包是 Indoor 42 条、Outdoor 12 条；这是有标注的固定机位序列范围，不将其称为已核实的官方 test 划分，不混入 SportsMOT/TeamTrack 汇总。
 
 本入口使用此前验证过的 SportsMOT 权重和 MOTIP 适配器：FP32、关闭 matmul/cuDNN TF32、PIL 预处理，短边 800、长边上限 1440；det=0.3、newborn=0.6、id=0.2、object-max、miss_tolerance=60 帧。模型一次加载，各原始视频重置 tracker，不通过 KPR/Qwen、号码、人数上限或 GT 删除预测。Indoor 与 Outdoor 的帧率不同，60 帧对应的秒数也不同，本轮保留模型原协议，不为数据集单独调参。

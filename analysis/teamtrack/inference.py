@@ -11,7 +11,8 @@ from .dataset import save_json, sha256
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def infer(output, split, checkpoint, device='cuda:0'):
+def infer(output, split, checkpoint, device='cuda:0', *, calibration=None,
+          tcei_reference=None, extra_protocol=None, audit_performance=False):
     import cv2
     import numpy as np
     import torch
@@ -43,6 +44,11 @@ def infer(output, split, checkpoint, device='cuda:0'):
         'code_sha256': {str(p.relative_to(ROOT)): sha256(p) for p in sorted(set(code_paths))},
         'dataset_sha256': sha256(folder / 'dataset.json'),
     }
+    if extra_protocol is not None:
+        from dataclasses import asdict
+        protocol['experiment'] = extra_protocol
+        protocol['calibration'] = asdict(calibration) if calibration is not None else None
+        protocol['audit_performance'] = audit_performance
     protocol_path = folder / 'inference_protocol.json'
     if protocol_path.exists() and json.loads(protocol_path.read_text()) != protocol:
         raise ValueError('Inference protocol changed; choose a new output directory to avoid mixing runs')
@@ -64,7 +70,7 @@ def infer(output, split, checkpoint, device='cuda:0'):
             raise ValueError(f'{name}: source video changed')
         if seq.get('annotation_sha256') and sha256(seq['annotation_path']) != seq['annotation_sha256']:
             raise ValueError(f'{name}: source GT changed')
-        if complete.exists():
+        if complete.exists() and not (calibration is not None and calibration.cache_scope == 'stream'):
             record = json.loads(complete.read_text())
             if record['protocol_sha256'] != protocol_hash or record['prediction_sha256'] != sha256(pred):
                 raise ValueError(f'{name}: completed prediction was modified')
@@ -74,9 +80,10 @@ def infer(output, split, checkpoint, device='cuda:0'):
         np.random.seed(0)
         torch.manual_seed(0)
         if backend is None:
+            optional = dict(calibration=calibration, tcei_reference=tcei_reference) if calibration is not None else {}
             backend = MotipBackend(motip_root=ROOT / 'MOTIP', config_path=config,
                                    checkpoint_path=checkpoint, runtime_config=runtime,
-                                   device=device, preprocessing='upstream-pil')
+                                   device=device, preprocessing='upstream-pil', **optional)
         # Loading the model may consume random state; each tracker starts from the same seed.
         random.seed(0)
         np.random.seed(0)
@@ -85,6 +92,9 @@ def infer(output, split, checkpoint, device='cuda:0'):
         capture = cv2.VideoCapture(seq['video_path'])
         if not capture.isOpened():
             raise ValueError(f'Cannot open {seq["video_path"]}')
+        if audit_performance and str(device).startswith('cuda'):
+            torch.cuda.synchronize()
+            torch.cuda.reset_peak_memory_stats()
         start, count, detections = time.monotonic(), 0, 0
         temporary = pred.with_suffix('.txt.part')
         try:
@@ -114,7 +124,15 @@ def infer(output, split, checkpoint, device='cuda:0'):
             capture.release()
         if count != seq['frames']:
             raise ValueError(f'{name}: processed {count}, expected {seq["frames"]}; incomplete prediction not evaluated')
+        if audit_performance and str(device).startswith('cuda'):
+            torch.cuda.synchronize()
+        seconds = time.monotonic()-start
         temporary.replace(pred)
-        save_json(complete, {'frames': count, 'detections': detections, 'seconds': time.monotonic()-start,
-                             'protocol_sha256': protocol_hash, 'prediction_sha256': sha256(pred)})
+        record = {'frames': count, 'detections': detections, 'seconds': seconds,
+                  'protocol_sha256': protocol_hash, 'prediction_sha256': sha256(pred)}
+        if audit_performance:
+            record.update(fps=count/seconds,
+                          peak_memory_mib=torch.cuda.max_memory_allocated()/1024**2 if str(device).startswith('cuda') else 0,
+                          calibrated_rows=tracker.calibrator.calibrated_rows if calibration is not None else 0)
+        save_json(complete, record)
         del tracker

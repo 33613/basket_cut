@@ -17,6 +17,65 @@ from analysis.teamtrack.selfcheck import TeamTrackChecks
 
 
 class TrackIDChecks(unittest.TestCase):
+    def test_paired_tcei_reuses_native_indoor_frames_and_gt(self):
+        from dataclasses import dataclass
+        from types import SimpleNamespace
+        from analysis.trackid import tcei
+        from analysis.teamtrack.inference import infer as native_infer
+        from analysis.teamtrack.dataset import save_json
+
+        @dataclass
+        class Off:
+            mode: str = 'off'
+            cache_scope: str = 'sequence'
+
+        source = self.root/'reference'
+        helper = source/'TCEI/tcei.py'
+        helper.parent.mkdir(parents=True)
+        helper.write_text('# Fixture only; reference execution is tested separately.\n')
+        output = self.root/'paired'
+        originals = {p: p.read_bytes() for p in self.files}
+        with patch.object(tcei, 'source_revision', return_value=tcei.TCEI_COMMIT):
+            protocol = tcei.prepare(output, self.raw, source, self.checkpoint, 0,
+                                    ['baseline','off'], 'sequence')
+            selected = json.loads((output/'dataset.json').read_text())['sequences']
+            self.assertEqual([(s['view'],s['frames']) for s in selected], [('Indoor',4)])
+            for variant in protocol['variants']:
+                modules, calls = self.mock_model()
+                parent = modules['pipeline.tracking.motip_backend'].MotipBackend
+
+                class Tracker(dict):
+                    pass
+
+                class Backend(parent):
+                    def __init__(self, **kwargs):
+                        super().__init__(**kwargs)
+                        self.configuration = kwargs.get('calibration')
+
+                    def create_tracker(self, **kwargs):
+                        result = Tracker(super().create_tracker(**kwargs))
+                        result.calibrator = SimpleNamespace(calibrated_rows=0)
+                        return result
+
+                modules['pipeline.tracking.motip_backend'].MotipBackend = Backend
+                with patch.dict(sys.modules, modules):
+                    native_infer(output/variant, SPLIT, self.checkpoint, device='cpu',
+                                 calibration=Off() if variant=='off' else None,
+                                 tcei_reference=object(), audit_performance=True,
+                                 extra_protocol={'experiment_sha256':sha256(output/'protocol.json'),
+                                                 'variant':variant})
+                self.assertEqual((calls['loads'],calls['trackers']), (1,1))
+            tcei.evaluate(output)
+            result = json.loads((output/'status.json').read_text())
+            self.assertEqual((result['sequences'],result['frames']), (1,4))
+            self.assertTrue(json.loads((output/'parity.json').read_text())['passed'])
+            self.assertEqual(originals, {p:p.read_bytes() for p in self.files})
+            manifest = json.loads((output/'off'/SPLIT/'dataset.json').read_text())
+            manifest['sequences'][0]['frames'] += 1
+            save_json(output/'off'/SPLIT/'dataset.json', manifest)
+            with self.assertRaisesRegex(ValueError,'scope changed'):
+                tcei.verified(output)
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name); self.raw=self.root/'raw'; self.raw.mkdir()

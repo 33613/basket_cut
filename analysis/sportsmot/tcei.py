@@ -305,11 +305,11 @@ def infer(output, variant):
         )
 
 
-def parity(output, sequences):
+def parity(output, sequences, split="val"):
     results = []
     for seq in sequences:
         paths = [
-            output / name / "val/predictions/motip/data" / f"{seq['sequence']}.txt"
+            output / name / split / "predictions/motip/data" / f"{seq['sequence']}.txt"
             for name in ("baseline", "off")
         ]
         rows = [sorted(prediction_rows(path, seq["frames"])) for path in paths]

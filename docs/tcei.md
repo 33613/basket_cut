@@ -93,6 +93,22 @@ python -m cli.benchmark_tcei --output-dir /outputs/tcei-basketball-dev --stage e
 
 历史参考 HOTA76.94、AssA67.79、IDF1 84.19、IDSW305，只用于同范围核对。主要比较 AssA、IDF1、HOTA、IDSW、Frag，同时看 DetA、MOTA、FP/FN和速度，不能把ID数量减少等同于准确率提高。新的GPU准确率需在服务器运行后报告。
 
+## TrackID Indoor 对照
+
+同一入口支持 `--dataset trackid-indoor`，沿用 TrackID 的原始视频解码、MOT10到评估GT转换和TrackEval。Indoor与Outdoor分开，权重、FP32/PIL预处理、阈值和缓存参数保持不变。`--limit 0` 选择全部Indoor（当前上传包42条、7534帧），不抽帧或转码。
+
+```bash
+python -u -m cli.benchmark_tcei --dataset trackid-indoor --env-file .env \
+  --dataset-root /data/trackid3x3-fixed-camera \
+  --source-root /root/autodl-tmp/third_party/TCEI \
+  --output-dir /outputs/tcei-trackid-indoor \
+  --limit 0 --cache-scope sequence --variants baseline off object id dual
+python -m cli.benchmark_tcei --dataset trackid-indoor \
+  --output-dir /outputs/tcei-trackid-indoor --stage status
+```
+
+原版/关闭版先逐帧比较，失败停止校准实验。输出根目录同样提供 `summary.csv/deltas.csv/performance.csv/parity.json`；各变体保留原TrackID的 `fixed_camera/` 结构和逐帧匹配。原视频、原GT和旧实验均不覆盖。缓存不继承SportsMOT的经验；跨序列经验另用新目录和 `--cache-scope stream`。
+
 ## 再接回出手者功能
 
 先看跟踪指标，再保持球证据和归因规则不变做功能回归。新旧T号不能直接比较；若改成5秒冷启动，原版也需要相同5秒输入。追踪变化后重算或严格重新映射动作、裁剪和身份特征；球检测和进球时刻可校验复用。随后再扩展 PL-NBA。

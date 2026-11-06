@@ -1,4 +1,4 @@
-"""Run paired baseline/disabled/TCEI tracking on an existing SportsMOT manifest."""
+"""Paired MOTIP/TCEI on SportsMOT frames or TrackID Indoor native videos."""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--dataset", choices=("sportsmot", "trackid-indoor"), default="sportsmot"
+    )
+    parser.add_argument("--dataset-root", type=Path)
     parser.add_argument(
         "--baseline-run",
         type=Path,
@@ -46,6 +50,11 @@ def main():
     )
     args = parser.parse_args()
     output = args.output_dir.expanduser().resolve()
+    if args.dataset == "trackid-indoor":
+        from analysis.trackid.tcei import run
+
+        run(args)
+        return
     if args.stage == "status":
         path = output / "status.json"
         print(path.read_text() if path.exists() else '{"status": "not_started"}')
