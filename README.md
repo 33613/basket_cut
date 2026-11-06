@@ -1,5 +1,7 @@
 # CourtVision · link_player
 
+当前进球归因基线已固定为 `goal-link-v3-baseline-20261106`（代码 `6be0adb`）。实际流程与十段结果见[基线记录](docs/checkpoints/goal-link-v3-20261106.md)，下一阶段跟踪改进见[TCEI 调研与对照协议](docs/tcei-evaluation-plan.md)。该记录不表示已经接入TCEI。
+
 本分支实现 **外部进球时刻 → 回看窗口 → MOTIP 正向追踪 → SlowFast 投篮动作证据 → 出手球员轨迹 → 身份识别交接包**。从同场比赛短视频开始，不依赖先初始化球员库或完成回合切分。
 
 输入使用 `video_id,filename,goal_time_s` 的 CSV 或 JSON 列表，同一视频可有多次进球。进球检测由其他模块提供；本分支负责定位出手者，跨片段身份识别和球员库由下游接收轨迹、原尺寸人物图及来源信息。

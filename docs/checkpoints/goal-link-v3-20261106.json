@@ -1,0 +1,150 @@
+{
+  "record_date": "2026-11-06",
+  "baseline_commit": "6be0adb7ab6488697d88378343d0fd8bd6fb0807",
+  "baseline_tag": "goal-link-v3-baseline-20261106",
+  "branch": "link_player",
+  "main_changed": false,
+  "functionality": "Externally supplied goal timestamps -> local shooter track and source-mapped identity samples",
+  "windows": {
+    "pre_goal_s": 4,
+    "post_goal_s": 1,
+    "shooter_search_pre_goal_s": 3
+  },
+  "server_run": "/root/autodl-fs/link-player-demo-003",
+  "evidence_provenance": "Completion and selected track IDs reported in user server output; source hashes from uploaded second-run diagnostic protocol, reused by the third run.",
+  "model": {
+    "person_checkpoint": "/root/autodl-tmp/model/motip/r50_deformable_detr_motip_sportsmot.pth",
+    "person_checkpoint_sha256_source": "/root/autodl-fs/test/track/3/tracking_complete.json",
+    "ball_checkpoint_sha256": "69409cbefc4b92c3cd194fb7f877c6e58e52548909e05e3b5467fe0e2fe188c5",
+    "ball_environment": {
+      "python": "3.10.12",
+      "torch": "2.6.0+cu124",
+      "rfdetr": "1.10.1"
+    }
+  },
+  "events": [
+    {
+      "video_id": "3",
+      "goal_time_s": 10.0,
+      "source_sha256": "630a36636c9594680a9b7ce8df85a241b1419f6553a9abb621b6e3796f8cb459",
+      "source_fps": 60.0,
+      "selected_track_id": 6,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review",
+      "known_full_track_id_switch": true
+    },
+    {
+      "video_id": "6",
+      "goal_time_s": 12.0,
+      "source_sha256": "595586d2678c9a9f4e57532b79290c96f65a1571e2f95bc00cdfc621b5fe3dcb",
+      "source_fps": 60.0,
+      "selected_track_id": 4,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    },
+    {
+      "video_id": "20",
+      "goal_time_s": 3.5,
+      "source_sha256": "fb90423427236fd7d3ad87ef75cba05e19a1ff930e75962b7606d05ec1980553",
+      "source_fps": 60.0,
+      "selected_track_id": 3,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    },
+    {
+      "video_id": "43",
+      "goal_time_s": 10.0,
+      "source_sha256": "429a4abc163f8e0dbc437c4b35c6d08158603a5a07ad17a00f3c5699cb0e533a",
+      "source_fps": 60.0,
+      "selected_track_id": 9,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    },
+    {
+      "video_id": "50",
+      "goal_time_s": 5.0,
+      "source_sha256": "31b871809a114ad5395f2f6314eb20fa30e4d0b9e97f4752dc7ab3ae25419a1a",
+      "source_fps": 60.0,
+      "selected_track_id": 7,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    },
+    {
+      "video_id": "68",
+      "goal_time_s": 27.0,
+      "source_sha256": "9da7155db64039b4455ef1d4e34c7d3ad69e2f62b0360f66fdbe224cdb87effa",
+      "source_fps": 60.0,
+      "selected_track_id": 13,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review",
+      "manual_valid_target_source_frame_ranges": {
+        "T8": [
+          0,
+          960
+        ],
+        "T13": [
+          1410,
+          1679
+        ]
+      }
+    },
+    {
+      "video_id": "11",
+      "goal_time_s": 7.0,
+      "source_sha256": "8f9f39007b07b452df456576d3473df3c0e3f3c54e1d73201b3601801d54f063",
+      "source_fps": 60.0,
+      "selected_track_id": 1,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    },
+    {
+      "video_id": "30",
+      "goal_time_s": 13.0,
+      "source_sha256": "195eeeedd52649cc751b154f0c9fe4f4cc40fe077563b3832f2be1a89ffe950a",
+      "source_fps": 60.0,
+      "selected_track_id": 5,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    },
+    {
+      "video_id": "37",
+      "goal_time_s": 10.0,
+      "source_sha256": "b72e4d1eeb58eb7fce367bffd5e09176251d4f85ef7f9af9af9db0d03c6a4dce",
+      "source_fps": 60.0,
+      "selected_track_id": 0,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    },
+    {
+      "video_id": "63",
+      "goal_time_s": 12.0,
+      "source_sha256": "63e3472929250e4d4f6881f53d35d814f2a8f4cae98d04a6b08bb3bcab5df57a",
+      "source_fps": 60.0,
+      "selected_track_id": 7,
+      "id_matches_user_manual_table": true,
+      "local_identity_purity": "pending_visual_review"
+    }
+  ],
+  "scope": {
+    "independent_test": false,
+    "developed_on_these_ten_clips": true,
+    "exact_goal_detection": false,
+    "jersey_or_identity_labels_used_in_attribution": false,
+    "cross_video_identity_library": false,
+    "pl_nba_exact_basket_time_available": false
+  },
+  "code_sha256": {
+    "cli/link_player.py": "07093af7ef1249b1c4e9912baa07696c567321d5109e4320ff238a278b6d109d",
+    "workflows/link_player.py": "0dfd07f95c0117ea64ab95cb26dfc3bfecb3b59f6e8a26076dfc0e76089af0c4",
+    "pipeline/player_link/events.py": "0eabf6f1db3bb3df362b947dae75138eff3ce2db102e03f06ac25d613d6ae4c7",
+    "pipeline/player_link/ball_evidence.py": "efcaed989026c5b1254161b26377158dd9a5b1f1e40aed0b0172a3fbc8d9644d",
+    "pipeline/player_link/roles.py": "85779b92227efdc88f92482cda8603ac122b47c1b07eebfa570eaaa4b6f82069",
+    "pipeline/player_link/export.py": "068b74bfde036f462261e92c325538a6778dc552230a17b63c5c0298e363956b",
+    "pipeline/ball/tracker.py": "63bf4bb01ecf2119a606caae93bdfa67e7673854574eb5b3382bef9fa9b179e0",
+    "cli/ball_track.py": "722734e3623a83930e77f8cde666f3b926f9d413e6ad33981b8c219209ae8d22",
+    "pipeline/tracking/motip_backend.py": "be683941fedf20a3cc838720a4a11e682c78aec732f88c9948bb72874bd0ba5a",
+    "pipeline/tracking/service.py": "630a853985b7df13abf1911d72739a95c68c06360ef93ad9aed8565d0492c7ac",
+    "cli/export_link_review.py": "e1d73e1894fb45b48299db21cdb52d59e21b070a01f8a80b4a9b4ae3925c11a6"
+  },
+  "tcei_integration": "not_implemented_at_this_checkpoint"
+}
