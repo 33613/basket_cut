@@ -102,3 +102,52 @@ GT isolation, predicted-point exclusion, ambiguity, dunk/contact handling,
 passer exclusion, source-offset rebasing, two-pass resume, combined video export,
 tar packaging and preservation of all first-run files. It uses injected detections,
 not a GPU accuracy benchmark.
+
+## Diagnostic-driven v3: all rim paths and persistent holder cues
+
+The operator's second-round diagnostics revealed two concrete causes:
+
+- Video 6 selected the ball segment closest to the rounded 12s annotation.
+  That segment began at 11.95s and had no supported T4 contact. A distinct earlier
+  segment already had 40 near-rim observations during 10.95–11.6s and valid T4
+  contact. V3 evaluates every temporally supported near-rim ball segment, without
+  stitching IDs or propagating an unrelated late fragment backwards.
+- Upper-body proximity gave nearly saturated scores to both shooter and nearby
+  opponent in videos 43/30/68. Cached `holder` boxes provide a more specific cue.
+
+`pipeline/player_link/roles.py` matches role detections to observed people using
+confidence >= .35, person IoU >= .5, and at least .1 IoU separation from the next
+person. Duplicate detections in one frame count once. Temporal support requires
+at least 3 distinct frames spanning .05s, with no gap above .1s. Holder evidence
+is considered only inside the pre-goal search and before the candidate release.
+
+A unique stable holder can resolve **geometrically ambiguous** ball-supported
+actors. Scorer detections alone cannot select an actor. If a stable holder
+contradicts an already unambiguous ball/action choice, v3 abstains and records
+the conflict. Earlier passers remain excluded; equal person-box matches remain
+unassigned. These role outputs share the RF-DETR detector, so they are not added
+as independent calibrated probability votes. No identity/jersey ground truth
+or manually supplied target-frame intervals enter this process.
+
+An offline **ball/role-only development replay** of the uploaded four-event
+diagnostic package selected 6/T4, 43/T9, 30/T5, 68/T13. That package has no full
+action JSONL or video, so this is not a ten-event pipeline result, a held-out
+test, or visual verification of identity purity.
+
+For the full third comparison, use a fresh output directory and provide
+`--reuse-run /root/autodl-fs/link-player-demo-002` together with
+`--ball-cache-run /root/autodl-fs/link-player-demo-002`. Keep the same input,
+annotations, match ID, tracking root, ball checkpoint and ball interpreter.
+Do not also use the video-37-only `--ball-cache` argument from the second run.
+
+The new flag resolves caches by event ID, supporting repeated events in one
+video. Matching verified windows and ball artifacts are copied with hash and
+code checks. No detector, MOTIP or action inference is required when every cache
+matches. Crops, person/ball review videos and the comparison package are rebuilt.
+Prior action inference context is preserved through repeated rebasing.
+
+New `link.json` fields include `ball_path_audits`, `role_policy`, `selection_basis`
+and per-candidate `role_evidence` with match counts/frames/confidences. Geometric
+scores are unchanged; a selected holder can therefore precede a slightly higher
+geometric score. `comparison.csv` compares the run passed as `--reuse-run` with
+the current run: for this third experiment, its first/second columns mean 002/003.

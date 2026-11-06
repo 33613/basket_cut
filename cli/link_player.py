@@ -27,6 +27,7 @@ def main():
     p.add_argument('--ball-checkpoint',type=Path,help='Enable ball-contact/rim attribution in a new run')
     p.add_argument('--ball-python',type=Path)
     p.add_argument('--ball-cache',action='append',default=[],metavar='VIDEO_ID=DIRECTORY')
+    p.add_argument('--ball-cache-run',type=Path,help='Reuse verified per-event ball artifacts from a previous run')
     p.add_argument('--reuse-run',type=Path,help='Read-only reuse of first-run action inference')
     p.add_argument("--stage", choices=("all", "prepare", "track", "action", "ball", "link", "export", "pack", "status"), default="all")
     p.add_argument("--dry-run", action="store_true")
@@ -61,6 +62,12 @@ def main():
     ball_config=existing.get('ball')
     if args.ball_checkpoint:
         cache={}
+        if args.ball_cache_run:
+            cached_run=flow.saved(args.ball_cache_run)
+            for event in cached_run['events']:
+                directory=flow.folder(args.ball_cache_run,event)
+                flow.require_stage(directory,'ball')
+                cache[event['event_id']]=str((directory/'ball').resolve())
         for item in args.ball_cache:
             if '=' not in item:
                 p.error('--ball-cache requires VIDEO_ID=DIRECTORY')
@@ -74,8 +81,8 @@ def main():
             python=str(interpreter.expanduser().absolute()),cache=cache)
         if existing and existing.get('ball')!=ball_config:
             p.error('Ball configuration changed; use a new output directory')
-    elif args.ball_cache or args.ball_python:
-        p.error('--ball-cache/--ball-python require --ball-checkpoint')
+    elif args.ball_cache or args.ball_python or args.ball_cache_run:
+        p.error('--ball-cache/--ball-cache-run/--ball-python require --ball-checkpoint')
     reuse_run=args.reuse_run or (Path(existing['reuse_run']) if existing.get('reuse_run') else None)
     if reuse_run and not ball_config:
         p.error('--reuse-run is reserved for the ball-evidence comparison run')

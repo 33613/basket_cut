@@ -84,6 +84,8 @@ def export_actor(directory, tracks, event, source, result, chosen, trajectory, a
     record['attribution_method']=result.get('attribution_method')
     record['ball_evidence_used']=result.get('ball_evidence_used',False)
     record['ball_path_supported']=result.get('ball_path_supported',False)
+    record['selection_basis']=result.get('selection_basis')
+    record['role_evidence_used']=result.get('role_evidence_used',False)
     if review:
         record["manual_review"] = review
     if chosen is not None:

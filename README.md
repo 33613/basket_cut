@@ -34,6 +34,8 @@ CPU 集成检查：`python -m analysis.link_player_selfcheck`。已有独立数�
 
 第二轮[球轨迹与出手者归因](docs/link-player-ball.md)通过 `cli.link_player --ball-checkpoint ...` 启用：约 5 秒窗口、前 3 秒搜索，球与人物上半身接触/分离、到筐关系和动作分数共同形成候选。`--reuse-run` 复用第一轮动作推理，`--ball-cache VIDEO_ID=DIRECTORY` 复用球检测；生成新结果、对比表及人物/球叠加视频。默认不带球参数时仍运行原动作方案。CPU 检查：`python -m analysis.link_ball_selfcheck`。
 
+诊断修订 v3 保留多个到筐球段，并利用缓存中的持续持球检测消解人物框重叠歧义；`--ball-cache-run` 可复用上一轮所有事件的球证据。诊断原因、持球匹配条件及第三轮命令约定见同一操作说明。
+
 <details>
 <summary>main 分支原有长视频与球员库工具（保留兼容，非本分支入口）</summary>
 

@@ -141,6 +141,16 @@ class AttributionTests(unittest.TestCase):
             for a in self.actions
             if a["track_id"] == 0
         ]
+        # A former passer's holder tag cannot revive an earlier ball control.
+        balls = [
+            dict(
+                r,
+                detections=[
+                    {"label": "holder", "score": 0.99, "bbox_xyxy": [20, 80, 100, 280]}
+                ],
+            )
+            for r in balls
+        ]
         result = self.rank(tracks=tracks, actions=actions, ball_rows=balls)
         self.assertEqual(result["shooter_track_id"], 2)
         self.assertTrue(
@@ -180,6 +190,108 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(one["shooter_track_id"], 0)
         self.assertEqual(
             one["candidates"][0]["ball_evidence"]["mode"], "hand_to_rim_candidate"
+        )
+
+    def test_later_rim_fragment_does_not_discard_earlier_shooter_path(self):
+        # A post-score fragment is nearer the rounded goal timestamp, but has no actor.
+        rows = [
+            dict(r, ball_track=dict(r["ball_track"], ball_track_id=99))
+            if r["source_timestamp_s"] >= 5.9
+            else r
+            for r in self.ball
+        ]
+        result = self.rank(ball_rows=rows)
+        self.assertEqual(result["shooter_track_id"], 0)
+        self.assertEqual(
+            {a["ball_track_id"] for a in result["ball_path_audits"]}, {0, 99}
+        )
+
+    def test_holder_disambiguates_but_scorer_alone_and_duplicate_boxes_do_not(self):
+        tracks = [
+            TrackRecord("EV-ball", f, f / 20, tid, box, 0.9, 0)
+            for f in range(80)
+            for tid, box in [(0, (360, 20, 440, 220)), (1, (350, 10, 450, 230))]
+        ]
+        balls = [
+            {
+                "source_frame_idx": f + 40,
+                "source_timestamp_s": (f + 40) / 20,
+                "ball_track": {
+                    "ball_track_id": 0,
+                    "center_xy": [405, 40],
+                    "observed": True,
+                    "confirmed": True,
+                },
+                "rims": [{"bbox_xyxy": [400, 30, 440, 50]}],
+                "detections": [],
+            }
+            for f in range(80)
+        ]
+        for row in balls:
+            row["detections"] = [
+                {"label": "holder", "score": 0.8, "bbox_xyxy": [360, 20, 440, 220]},
+                {"label": "scorer", "score": 0.99, "bbox_xyxy": [350, 10, 450, 230]},
+            ]
+        result = self.rank(tracks=tracks, actions=[], ball_rows=balls)
+        self.assertEqual(result["shooter_track_id"], 0)
+        self.assertEqual(
+            result["selection_basis"], "exclusive_stable_holder_on_supported_ball_path"
+        )
+        conflicting = [
+            {
+                "video_id": "EV-ball",
+                "frame_idx": f,
+                "timestamp_s": f / 20,
+                "track_id": 1,
+                "proposal_frame_offset": 0,
+                "action_candidates": [
+                    {"label": "basketball_2-point_shot", "score": 1.0}
+                ],
+            }
+            for f in (74, 75)
+        ]
+        conflict = self.rank(tracks=tracks, actions=conflicting, ball_rows=balls)
+        self.assertIsNone(conflict["shooter_track_id"])
+        self.assertIn(
+            "conflicting_stable_holder_and_ball_action_evidence",
+            conflict["diagnostics"],
+        )
+        scorer_only = [
+            dict(r, detections=[d for d in r["detections"] if d["label"] == "scorer"])
+            for r in balls
+        ]
+        self.assertIsNone(
+            self.rank(tracks=tracks, actions=[], ball_rows=scorer_only)[
+                "shooter_track_id"
+            ]
+        )
+        duplicate = [dict(r, detections=[]) for r in balls]
+        duplicate[50]["detections"] = balls[50]["detections"] * 20
+        self.assertIsNone(
+            self.rank(tracks=tracks, actions=[], ball_rows=duplicate)[
+                "shooter_track_id"
+            ]
+        )
+        no_rim = [dict(r, rims=[]) for r in balls]
+        self.assertIsNone(
+            self.rank(tracks=tracks, actions=[], ball_rows=no_rim)["shooter_track_id"]
+        )
+        same_boxes = [
+            TrackRecord(
+                "EV-ball",
+                r.frame_idx,
+                r.timestamp_s,
+                r.track_id,
+                (360, 20, 440, 220),
+                0.9,
+                0,
+            )
+            for r in tracks
+        ]
+        self.assertIsNone(
+            self.rank(tracks=same_boxes, actions=[], ball_rows=balls)[
+                "shooter_track_id"
+            ]
         )
 
 
@@ -348,6 +460,29 @@ class Integration(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            snapshot = {
+                str(p): sha256_file(p) for p in destination.rglob("*") if p.is_file()
+            }
+            third_command = command.copy()
+            third_command[third_command.index("--output-dir") + 1] = str(base / "third")
+            third_command[third_command.index("--reuse-run") + 1] = str(destination)
+            i = third_command.index("--ball-cache")
+            third_command[i : i + 2] = ["--ball-cache-run", str(destination)]
+            third = subprocess.run(
+                third_command,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
+            self.assertIn("reused verified artifacts", third.stdout)
+            self.assertIn("reused verified window", third.stdout)
+            self.assertEqual(
+                snapshot,
+                {str(p): sha256_file(p) for p in destination.rglob("*") if p.is_file()},
+            )
             self.assertEqual(
                 before,
                 {

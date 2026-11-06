@@ -5,6 +5,7 @@ from collections import Counter
 import json
 from pathlib import Path
 import subprocess
+import shutil
 
 from contracts.schema import TrackRecord, read_jsonl, write_jsonl_line
 from contracts.tracks import load_tracks
@@ -65,7 +66,7 @@ def prepare(input_dir, annotations, root, match_id, options, settings, tracking_
     protocol["tracking_root"] = str(Path(tracking_root).resolve()) if tracking_root else None
     if ball_config:
         protocol['ball']=ball_config
-        protocol['algorithm_version']='ball-contact-action-v2'
+        protocol['algorithm_version']='ball-role-contact-action-v3'
     if reuse_run:
         old=saved(reuse_run)
         for event in protocol['events']:
@@ -93,6 +94,18 @@ def prepare(input_dir, annotations, root, match_id, options, settings, tracking_
         signature = dict(source_sha256=source["sha256"], event=event)
         if complete(directory, "prepare", signature, ["window.mkv", "window.json"]):
             continue
+        if reuse_run:
+            previous=folder(reuse_run,event)
+            require_stage(previous,'prepare')
+            old_window=read(previous/'window.json')
+            if old_window['event']==event:
+                shutil.copyfile(previous/'window.mkv',directory/'window.mkv')
+                old_window['encoded']['path']=str(directory/'window.mkv')
+                old_window['reused_window_from']=str(previous/'window.mkv')
+                atomic_json(directory/'window.json',old_window)
+                mark(directory,'prepare',signature,['window.mkv','window.json'])
+                print(f"[prepare] {event['event_id']} / reused verified window",flush=True)
+                continue
         print(f"[prepare] {event['event_id']} / video {event['video_id']}", flush=True)
         encoded = cut_video(source["path"], directory / "window.mkv", event["window_start_s"],
             event["window_end_s"], lossless=True, ffmpeg=settings.ffmpeg, ffprobe=settings.ffprobe)
@@ -253,7 +266,8 @@ def reuse_actions(protocol,event,directory):
                 continue
             value=dict(a,frame_idx=frame,timestamp_s=frame/fps,
                        proposal_frame_idx=a.get('proposal_frame_idx',a['frame_idx'])+shift,
-                       reused_context_window_source_frames=[prior['window_start_frame'],prior['window_end_frame_exclusive']])
+                       reused_context_window_source_frames=a.get('reused_context_window_source_frames',
+                           [prior['window_start_frame'],prior['window_end_frame_exclusive']]))
             write_jsonl_line(stream,value); count+=1
     atomic_json(directory/'actions.summary.json',dict(status='reused_prior_inference',count=count,
         source=str(old_dir/'actions.jsonl'),source_sha256=signature['reused_actions'],
@@ -271,7 +285,7 @@ def ball(root,settings):
     for event in protocol['events']:
         directory=folder(root,event); require_stage(directory,'prepare')
         source=protocol['sources'][event['video_id']]
-        cached=config.get('cache',{}).get(event['video_id'])
+        cached=config.get('cache',{}).get(event['event_id']) or config.get('cache',{}).get(event['video_id'])
         signature=dict(model=config['checkpoint_sha256'],event=event,
             source=source['sha256'],tracker=sha256_file(settings.repository_root/'pipeline/ball/tracker.py'),
             adapter=sha256_file(settings.repository_root/'cli/ball_track.py'),
@@ -280,6 +294,25 @@ def ball(root,settings):
         names=['ball/ball.jsonl','ball/summary.json','ball/ball_vis.mp4']
         if complete(directory,'ball',signature,names):
             continue
+        # Same code, source clock and verified prior stage: copy the artifacts,
+        # rather than rerunning detector, association or ball-video encoding.
+        if cached and (Path(cached).parent/'.ball.json').exists():
+            prior_dir=Path(cached).parent
+            require_stage(prior_dir,'ball')
+            old_marker=read(prior_dir/'.ball.json')
+            summary=read(Path(cached)/'summary.json')
+            same_code=all(old_marker['signature'].get(k)==signature[k] for k in ('tracker','adapter'))
+            same_window=(summary['source_start_frame']==event['window_start_frame'] and
+                         summary['source_end_frame_exclusive']==event['window_end_frame_exclusive'])
+            if (same_code and same_window and summary['source_sha256']==source['sha256'] and
+                    summary['checkpoint_sha256']==config['checkpoint_sha256']):
+                target=directory/'ball'
+                target.mkdir(exist_ok=False)
+                for name in ('ball.jsonl','summary.json','ball_vis.mp4'):
+                    shutil.copyfile(Path(cached)/name,target/name)
+                mark(directory,'ball',signature,names)
+                print(f"[ball] {event['event_id']} / reused verified artifacts",flush=True)
+                continue
         command=[config['python'],'-u','-m','cli.ball_track','--input',source['path'],
             '--checkpoint',config['checkpoint'],'--output-dir',directory/'ball',
             '--start-s',event['window_start_s'],'--end-s',event['window_end_s'],
@@ -301,8 +334,9 @@ def link(root, options):
             ranker=sha256_file(Path(__file__).resolve().parents[1] / "pipeline/player_link/evidence.py"))
         if protocol.get('ball'):
             require_stage(directory,'ball')
-            signature.update(ball=sha256_file(directory/'ball/ball.jsonl'),version='ball-contact-action-v2',
-                ball_ranker=sha256_file(Path(__file__).resolve().parents[1]/'pipeline/player_link/ball_evidence.py'))
+            signature.update(ball=sha256_file(directory/'ball/ball.jsonl'),version='ball-role-contact-action-v3',
+                ball_ranker=sha256_file(Path(__file__).resolve().parents[1]/'pipeline/player_link/ball_evidence.py'),
+                roles=sha256_file(Path(__file__).resolve().parents[1]/'pipeline/player_link/roles.py'))
         if complete(directory, "link", signature, ["link.json"]):
             continue
         meta = read(directory / "video_meta.json")
