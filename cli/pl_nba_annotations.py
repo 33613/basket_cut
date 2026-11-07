@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+import shutil
 import zipfile
 from collections import Counter
 from pathlib import Path, PurePosixPath
@@ -11,6 +12,52 @@ from pathlib import Path, PurePosixPath
 from pipeline.media import atomic_json, sha256_file
 
 SHOT_LABELS = {"2ptshot", "3ptshot", "layup", "dunk", "freethrow", "putback"}
+
+
+def selection_package(output, development_video_ids=()):
+    """Make a self-contained Mac selection ZIP on the server, outside Git."""
+    output = Path(output)
+    path = output / "made_events.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if not rows or len({row["match_id"] for row in rows}) != 1:
+        raise ValueError("Selection package requires made events from one match")
+    development = set(map(str, development_video_ids))
+    if development - {row["video_id"] for row in rows}:
+        raise ValueError("Development IDs must exist in the selected made inventory")
+    for row in rows:
+        row["evaluation_cohort"] = (
+            "development" if row["video_id"] in development else "new_test"
+        )
+    rows.sort(key=lambda row: row["video_id"])
+    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+    summary_path = output / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["evaluation_cohorts"] = dict(
+        Counter(row["evaluation_cohort"] for row in rows)
+    )
+    atomic_json(summary_path, summary)
+    selector = Path(__file__).resolve().parents[1] / "tools/datasets/select_pl_nba.py"
+    shutil.copyfile(selector, output / "select_pl_nba.py")
+    (output / "README.txt").write_text(
+        "Run select_pl_nba.py with --inventory made_events.jsonl --input-dir VIDEO_DIR --output-dir NEW_DIR.\n"
+        "Standard-library Python only. Does not modify or upload videos.\n"
+        "Missing or ambiguous videos stop selection. Basket timestamps remain blank for review.\n"
+    )
+    archive = output.with_suffix(".zip")
+    with zipfile.ZipFile(archive, "x", zipfile.ZIP_DEFLATED) as bundle:
+        for name in (
+            "made_events.jsonl",
+            "summary.json",
+            "select_pl_nba.py",
+            "README.txt",
+        ):
+            bundle.write(output / name, name)
+    return {
+        "archive": str(archive.resolve()),
+        "sha256": sha256_file(archive),
+        "events": len(rows),
+        "cohorts": summary["evaluation_cohorts"],
+    }
 
 
 def parse_timestamp(value, time_format, fps=None):
@@ -135,7 +182,30 @@ def main():
         default="raw",
     )
     p.add_argument("--timestamp-fps", type=float)
+    p.add_argument(
+        "--selection-package",
+        action="store_true",
+        help="Build a standalone Mac selection ZIP beside the output directory",
+    )
+    p.add_argument("--development-video-ids", nargs="*", default=[])
     a = p.parse_args()
+    if a.selection_package:
+        inventory(
+            a.annotation_zip,
+            a.output_dir,
+            a.match_id,
+            a.video_ids,
+            a.time_format,
+            a.timestamp_fps,
+        )
+        print(
+            json.dumps(
+                selection_package(a.output_dir, a.development_video_ids),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
     print(
         json.dumps(
             inventory(

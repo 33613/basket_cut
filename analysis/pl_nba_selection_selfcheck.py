@@ -4,6 +4,7 @@ import csv
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from tools.datasets.select_pl_nba import select
@@ -76,6 +77,30 @@ class SelectionChecks(unittest.TestCase):
         (self.videos / "3.mp4").symlink_to(outside)
         with self.assertRaisesRegex(ValueError, "Unsafe"):
             select(self.inventory, self.videos, self.root / "unsafe")
+
+    def test_server_package_contains_standalone_script_and_fixed_cohorts(self):
+        from cli.pl_nba_annotations import selection_package
+
+        self.events(["3", "30"])
+        output = self.root / "package"
+        output.mkdir()
+        (output / "made_events.jsonl").write_bytes(self.inventory.read_bytes())
+        (output / "summary.json").write_text(json.dumps({"made_events": 2}))
+        result = selection_package(output, ["3"])
+        self.assertEqual(result["cohorts"], {"development": 1, "new_test": 1})
+        with zipfile.ZipFile(result["archive"]) as bundle:
+            self.assertEqual(
+                set(bundle.namelist()),
+                {"made_events.jsonl", "summary.json", "select_pl_nba.py", "README.txt"},
+            )
+            events = [
+                json.loads(row)
+                for row in bundle.read("made_events.jsonl").decode().splitlines()
+            ]
+            self.assertEqual(
+                [row["evaluation_cohort"] for row in events],
+                ["development", "new_test"],
+            )
 
 
 if __name__ == "__main__":

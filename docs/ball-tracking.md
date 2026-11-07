@@ -63,3 +63,5 @@ python3 tools/datasets/select_pl_nba.py \
 ```
 
 匹配原标注文件名或精确数字片段ID，缺失/歧义会报告并停止，不输出不完整上传清单。生成 `upload_files.txt`、原视频SHA256清单和 `timing_review.csv`，不复制/修改原视频。时间表并列显示“秒:帧（60fps候选）”与“秒:百分秒”两种解释，`goal_time_s` 留空；候选时间不是确认进球时刻。确认时间单位、逐事件进球时间和标签冲突后，再进入出手者评估。
+
+也可在服务器给 `cli.pl_nba_annotations` 增加 `--selection-package`，在输出目录旁生成包含事件清单、摘要和独立脚本的ZIP，然后用 `scp -P SSH_PORT` 下载到Mac。`--development-video-ids` 可明确旧开发片段，其余记为新增测试；无需通过聊天附件传输，也不将这些生成数据提交Git。
