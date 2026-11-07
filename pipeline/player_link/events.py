@@ -26,6 +26,7 @@ class LinkOptions:
     samples_per_track: int = 12
     action_step: int = 2
     action_reference_fps: float = 25.0
+    min_track_observed_s: float = 0.0
 
     def validate(self):
         values = asdict(self)
@@ -41,6 +42,8 @@ class LinkOptions:
             raise ValueError("Counts and action_step must be positive")
         if min(self.evidence_gap_s, self.tracking_gap_s, self.action_reference_fps) <= 0 or self.segment_padding_s < 0:
             raise ValueError("Invalid temporal settings")
+        if self.min_track_observed_s < 0:
+            raise ValueError("Minimum observed track time must be nonnegative")
         return self
 
 
@@ -93,6 +96,7 @@ def load_events(input_dir, annotations, match_id, options, *, ffprobe="ffprobe")
             window_start_s=start/meta["fps"], window_end_s=end/meta["fps"],
             partial_pre_context=goal-options.max_lookback_s < 0,
             partial_post_context=goal+options.post_roll_s > meta["frame_count"]/meta["fps"],
-            evaluation_labels={k: row[k] for k in ("jersey_number", "team_id", "person_gt_id") if row.get(k)}))
+            evaluation_labels={k: row[k] for k in ("jersey_number", "team_id", "person_gt_id",
+                "evaluation_player_name", "evaluation_cohort", "action_label") if row.get(k)}))
     return dict(schema_version=1, match_id=match_id, options=asdict(options),
                 sources=sources, events=events, algorithm_version="action-evidence-v1")

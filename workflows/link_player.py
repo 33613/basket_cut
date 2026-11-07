@@ -191,6 +191,12 @@ def track(root, settings):
         signature = dict(model=model, window=sha256_file(directory / "window.mkv"),
                          reuse=protocol["tracking_root"])
         names = ["tracks.jsonl", "video_meta.json"]
+        minimum = protocol['options'].get('min_track_observed_s', 0.)
+        if minimum:
+            signature['quality'] = dict(min_observed_seconds=minimum,
+                implementation=sha256_file(settings.repository_root / 'pipeline/tracking/quality.py'))
+            names += ['quality/'+name for name in ('tracks.jsonl','quality_tracks.jsonl',
+                                                  'quality_observations.jsonl','quality_summary.json')]
         if complete(directory, "track", signature, names):
             continue
         print(f"[track] {event['event_id']}", flush=True)
@@ -207,7 +213,17 @@ def track(root, settings):
                 or meta["processed_frames"] != read(directory / "window.json")["frame_count"]):
             raise ValueError("MOTIP did not cover the complete event window")
         load_tracks(directory / "tracks.jsonl", meta)
+        if minimum:
+            from pipeline.tracking.quality import QualityOptions, check_track_quality
+            check_track_quality(QualityOptions(tracks=directory/'tracks.jsonl',
+                video_meta=directory/'video_meta.json', output_dir=directory/'quality',
+                min_observations=1, min_observed_seconds=minimum,
+                suppress_duplicates=False, overwrite=True))
         mark(directory, "track", signature, names)
+
+
+def evidence_tracks(protocol, directory):
+    return directory / ('quality/tracks.jsonl' if protocol['options'].get('min_track_observed_s', 0.) else 'tracks.jsonl')
 
 
 def action(root, settings):
@@ -217,21 +233,22 @@ def action(root, settings):
     for event in protocol["events"]:
         directory = folder(root, event)
         require_stage(directory, "track")
+        tracks = evidence_tracks(protocol, directory)
         if protocol.get('reuse_run'):
             reuse_actions(protocol,event,directory)
             continue
         signature = dict(model=model, window=sha256_file(directory / "window.mkv"),
-            tracks=sha256_file(directory / "tracks.jsonl"), options=options)
+            tracks=sha256_file(tracks), options=options)
         names = ["actions.jsonl", "actions.summary.json"]
         if complete(directory, "action", signature, names):
             continue
         print(f"[action] {event['event_id']}", flush=True)
-        if not list(read_jsonl(directory / "tracks.jsonl")):
+        if not list(read_jsonl(tracks)):
             (directory / "actions.jsonl").write_text("")
             atomic_json(directory / "actions.summary.json", dict(status="no_person_tracks"))
         else:
             run_command([settings.action_python, "-u", "-m", "cli.action", "--input", directory / "window.mkv",
-                "--tracks", directory / "tracks.jsonl", "--config", settings.action_config,
+                "--tracks", tracks, "--config", settings.action_config,
                 "--checkpoint", settings.action_checkpoint, "--label-map", settings.action_label_map,
                 "--output", directory / "actions.jsonl", "--predict-stepsize", options["action_step"],
                 "--sampling-fps", options["action_reference_fps"], "--proposal-max-gap", "0",
@@ -328,8 +345,10 @@ def link(root, options):
     protocol = saved(root)
     for event in protocol["events"]:
         directory = folder(root, event)
+        require_stage(directory, 'track')
         require_stage(directory, "action")
-        signature = dict(tracks=sha256_file(directory / "tracks.jsonl"),
+        tracks = evidence_tracks(protocol, directory)
+        signature = dict(tracks=sha256_file(tracks),
             actions=sha256_file(directory / "actions.jsonl"), options=asdict(options), version="action-evidence-v1",
             ranker=sha256_file(Path(__file__).resolve().parents[1] / "pipeline/player_link/evidence.py"))
         if protocol.get('ball'):
@@ -340,7 +359,7 @@ def link(root, options):
         if complete(directory, "link", signature, ["link.json"]):
             continue
         meta = read(directory / "video_meta.json")
-        grouped = load_tracks(directory / "tracks.jsonl", meta)
+        grouped = load_tracks(tracks, meta)
         args=(event,protocol['sources'][event['video_id']],
               [r for rs in grouped.values() for r in rs],list(read_jsonl(directory/'actions.jsonl')))
         if protocol.get('ball'):
@@ -348,6 +367,14 @@ def link(root, options):
             result=rank_with_ball(*args,list(read_jsonl(directory/'ball/ball.jsonl')),options)
         else:
             result=rank_shooters(*args,options)
+        if protocol['options'].get('min_track_observed_s', 0.):
+            summary = read(directory/'quality/quality_summary.json')
+            audit = list(read_jsonl(directory/'quality/quality_tracks.jsonl'))
+            result['track_quality'] = dict(min_observed_seconds=protocol['options']['min_track_observed_s'],
+                raw_track_count=summary['raw_track_count'], retained_track_count=summary['retained_track_count'],
+                rejected_track_ids=[r['track_id'] for r in audit if r['status']=='tentative'],
+                motion_review_track_ids=[r['track_id'] for r in audit if r['status']=='needs_review'],
+                raw_preserved=True, identity_purity_verified=False)
         atomic_json(directory / "link.json", result)
         mark(directory, "link", signature, ["link.json"])
         print(f"[link] {event['event_id']}: {result['status']} / T={result['shooter_track_id']}", flush=True)

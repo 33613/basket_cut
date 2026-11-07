@@ -53,3 +53,13 @@ python -m analysis.ball_selfcheck
 ```
 
 标注读取默认保留原始时间格式；具体转换选项见 `--help`，未核实时不猜测单位。
+
+本地只上传标注进球视频时，可用标准库脚本匹配文件名并生成rsync清单：
+
+```bash
+python3 tools/datasets/select_pl_nba.py \
+  --inventory /outputs/pl-nba-labels/made_events.jsonl \
+  --input-dir /path/to/local/match-videos --output-dir /path/to/new-selection
+```
+
+匹配原标注文件名或精确数字片段ID，缺失/歧义会报告并停止，不输出不完整上传清单。生成 `upload_files.txt`、原视频SHA256清单和 `timing_review.csv`，不复制/修改原视频。时间表并列显示“秒:帧（60fps候选）”与“秒:百分秒”两种解释，`goal_time_s` 留空；候选时间不是确认进球时刻。确认时间单位、逐事件进球时间和标签冲突后，再进入出手者评估。

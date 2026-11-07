@@ -1,6 +1,6 @@
 """CPU contracts/integration with real media and synthetic person/action evidence."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import cv2
 
@@ -69,7 +70,8 @@ class RankTests(unittest.TestCase):
         result = self.rank(points)
         self.assertTrue(result["expanded_search"])
         self.assertEqual(result["shooter_track_id"],1)
-        modified = dict(self.event, evaluation_labels={"jersey_number":"999", "person_gt_id":"fake"})
+        modified = dict(self.event, evaluation_labels={"jersey_number":"999", "person_gt_id":"fake",
+                        "evaluation_player_name":"fake player", "evaluation_cohort":"development"})
         self.assertEqual(result, self.rank(points, event=modified))
 
     def test_earlier_strong_attempt_does_not_hide_later_putback_candidate(self):
@@ -135,6 +137,39 @@ class IntegrationTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_quality_gate_uses_observed_time_and_preserves_raw_tracks(self):
+        options = replace(self.options, min_track_observed_s=.3)
+        protocol = flow.saved(self.root)
+        protocol['options'] = asdict(options)
+        atomic_json(self.root/'protocol.json', protocol)
+        hashes = {}
+        for event in protocol['events']:
+            directory = flow.folder(self.root, event)
+            count = flow.read(directory/'window.json')['frame_count']
+            with (directory/'tracks.jsonl').open('a') as stream:
+                for frame in (0, count-1):
+                    write_jsonl_line(stream, TrackRecord(event['event_id'], frame, frame/10,
+                                     99, (1,1,20,50), .99, 0).to_dict())
+            hashes[event['event_id']] = sha256_file(directory/'tracks.jsonl')
+            (directory/'.track.json').unlink()
+            (directory/'.action.json').unlink()
+        with patch.object(flow, 'model_protocol', return_value={'synthetic':True}):
+            with patch.object(flow, 'run_command'):
+                flow.track(self.root, self.settings)
+            def action_command(command, settings):
+                self.assertEqual(Path(command[command.index('--tracks')+1]).parent.name, 'quality')
+            with patch.object(flow, 'run_command', side_effect=action_command):
+                flow.action(self.root, self.settings)
+        flow.link(self.root, options)
+        for event in protocol['events']:
+            directory = flow.folder(self.root, event)
+            self.assertEqual(sha256_file(directory/'tracks.jsonl'), hashes[event['event_id']])
+            retained = {row['track_id'] for row in read_jsonl(directory/'quality/tracks.jsonl')}
+            self.assertEqual(retained, {0,1})
+            result = flow.read(directory/'link.json')
+            self.assertEqual(result['track_quality']['rejected_track_ids'], [99])
+            self.assertEqual(result['shooter_track_id'], 0)
 
     def test_full_cpu_link_export_pack_review_and_portability(self):
         flow.link(self.root,self.options)
