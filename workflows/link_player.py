@@ -63,10 +63,14 @@ def prepare(input_dir, annotations, root, match_id, options, settings, tracking_
     if root == inputs or root in inputs.parents or inputs in root.parents:
         raise ValueError("Input and output directories must be separate and non-nested")
     protocol = load_events(inputs, annotations, match_id, options, ffprobe=settings.ffprobe)
+    if not ball_config and any('goal_interval_start_s' in e for e in protocol['events']):
+        raise ValueError('Interval inputs require ball evidence')
     protocol["tracking_root"] = str(Path(tracking_root).resolve()) if tracking_root else None
     if ball_config:
         protocol['ball']=ball_config
-        protocol['algorithm_version']='ball-role-contact-action-v3'
+        protocol['algorithm_version']=('ball-role-contact-action-interval-v1'
+            if any('goal_interval_start_s' in e for e in protocol['events'])
+            else 'ball-role-contact-action-v3')
     if reuse_run:
         old=saved(reuse_run)
         for event in protocol['events']:
@@ -332,8 +336,9 @@ def ball(root,settings):
                 continue
         command=[config['python'],'-u','-m','cli.ball_track','--input',source['path'],
             '--checkpoint',config['checkpoint'],'--output-dir',directory/'ball',
-            '--start-s',event['window_start_s'],'--end-s',event['window_end_s'],
-            '--goal-time-s',event['goal_time_s']]
+            '--start-s',event['window_start_s'],'--end-s',event['window_end_s']]
+        if 'goal_interval_start_s' not in event:
+            command+=['--goal-time-s',event['goal_time_s']]
         if cached:
             command+=['--reuse-detections',cached]
         print(f"[ball] {event['event_id']} / video {event['video_id']}",flush=True)

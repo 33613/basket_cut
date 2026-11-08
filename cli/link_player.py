@@ -56,6 +56,8 @@ def main():
             p.error("--input-dir and --annotations required for prepare/all/dry-run")
     if args.dry_run:
         protocol = load_events(args.input_dir, args.annotations, args.match_id, options, ffprobe=settings.ffprobe)
+        if not args.ball_checkpoint and any('goal_interval_start_s' in e for e in protocol['events']):
+            p.error('Interval inputs require --ball-checkpoint')
         print(json.dumps(dict(dry_run=True, **protocol), ensure_ascii=False, indent=2))
         return
     existing=flow.saved(root) if (root/'protocol.json').exists() else {}

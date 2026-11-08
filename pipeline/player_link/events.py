@@ -79,24 +79,45 @@ def load_events(input_dir, annotations, match_id, options, *, ffprobe="ffprobe")
             sources[vid] = dict(video_id=vid, path=str(source), sha256=sha256_file(source),
                                 frame_count=count, **{k: meta[k] for k in ("fps", "width", "height", "duration_s")})
         meta = sources[vid]
-        goal = float(row["goal_time_s"])
+        interval = None
+        if row.get("goal_interval_start_s") not in (None, ""):
+            lo, hi = float(row["goal_interval_start_s"]), float(row["goal_interval_end_s"])
+            if not all(math.isfinite(v) for v in (lo, hi)) or not 0 <= lo < hi:
+                raise ValueError(f"{vid}: invalid goal search interval")
+            lo, hi = max(0., lo), min(hi, (meta["frame_count"]-1)/meta["fps"])
+            if lo >= hi:
+                raise ValueError(f"{vid}: goal search interval outside video")
+            interval = (lo, hi)
+            # Compatibility reference for existing exports, never a measured goal time.
+            goal = hi
+        else:
+            goal = float(row["goal_time_s"])
         if not math.isfinite(goal) or not 0 <= goal < meta["duration_s"]:
             raise ValueError(f"{vid}: goal_time_s={goal} outside [0,{meta['duration_s']})")
-        token = hashlib.sha256(json.dumps([match_id, vid, goal]).encode()).hexdigest()[:16]
+        token = hashlib.sha256(json.dumps([match_id, vid, interval or goal]).encode()).hexdigest()[:16]
         eid = str(row.get("event_id") or f"EV-{token}")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", eid) or eid in ids:
             raise ValueError(f"Duplicate/unsafe event_id: {eid}")
         ids.add(eid)
-        start = max(0, math.floor((goal-options.max_lookback_s)*meta["fps"]))
+        search_start = interval[0] if interval else goal
+        start = max(0, math.floor((search_start-options.max_lookback_s)*meta["fps"]))
         end = min(meta["frame_count"], math.ceil((goal+options.post_roll_s)*meta["fps"]))
         end = max(start+1, end)
         events.append(dict(event_id=eid, video_id=vid, goal_time_s=goal,
             annotation_source=str(row.get("annotation_source") or "external_goal_timestamp"),
             window_start_frame=start, window_end_frame_exclusive=end,
             window_start_s=start/meta["fps"], window_end_s=end/meta["fps"],
-            partial_pre_context=goal-options.max_lookback_s < 0,
+            partial_pre_context=search_start-options.max_lookback_s < 0,
             partial_post_context=goal+options.post_roll_s > meta["frame_count"]/meta["fps"],
             evaluation_labels={k: row[k] for k in ("jersey_number", "team_id", "person_gt_id",
                 "evaluation_player_name", "evaluation_cohort", "action_label") if row.get(k)}))
+        if interval:
+            events[-1].update(
+                goal_interval_start_s=interval[0], goal_interval_end_s=interval[1],
+                goal_time_semantics="interval_end_reference_not_measured_goal",
+                timing_provenance={k: row[k] for k in (
+                    "raw_action_start", "raw_action_end", "timestamp_policy", "flight_padding_s"
+                ) if k in row},
+            )
     return dict(schema_version=1, match_id=match_id, options=asdict(options),
                 sources=sources, events=events, algorithm_version="action-evidence-v1")

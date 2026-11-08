@@ -27,7 +27,10 @@ def rank_with_ball(event, source, tracks, actions, ball_rows, options):
     baseline = rank_shooters(event, source, tracks, actions, options)
     fps = source["fps"]
     goal = event["goal_time_s"]
-    start = goal - options.lookback_s
+    interval_mode = "goal_interval_start_s" in event
+    start = event.get("goal_interval_start_s", goal) - options.lookback_s
+    anchor_start = event.get("goal_interval_start_s", goal - 1.25)
+    anchor_end = event.get("goal_interval_end_s", goal + 0.25)
     person = {(r.frame_idx, r.track_id): r for r in tracks}
     if len(person) != len(tracks):
         raise ValueError("Duplicate person observation")
@@ -48,7 +51,7 @@ def rank_with_ball(event, source, tracks, actions, ball_rows, options):
         ball = row.get("ball_track")
         if not ball or not ball.get("observed") or not ball.get("confirmed", False):
             continue
-        if not start <= time <= goal + 0.25:
+        if not start <= time <= anchor_end:
             continue
         x, y = ball["center_xy"]
         if not all(math.isfinite(v) for v in (x, y)):
@@ -75,7 +78,7 @@ def rank_with_ball(event, source, tracks, actions, ball_rows, options):
     # Anchor to a temporally supported near-rim path around the external goal time.
     near = defaultdict(list)
     for p in observed:
-        if goal - 1.25 <= p["time"] <= goal + 0.25 and p["rim_distance"] <= 0.75:
+        if anchor_start <= p["time"] <= anchor_end and p["rim_distance"] <= 0.75:
             near[p["ball"]["ball_track_id"]].append(p)
     anchors = []
     for tid, points in near.items():
@@ -99,14 +102,26 @@ def rank_with_ball(event, source, tracks, actions, ball_rows, options):
         reasons.append("no_supported_ball_rim_anchor")
     else:
         best_anchors = {}
-        for candidate_anchor in sorted(anchors, key=lambda a: (a[0], a[1])):
-            best_anchors.setdefault(candidate_anchor[2], candidate_anchor)
+        if interval_mode:
+            # Keep separate near-rim visits, including different visits of one ball ID.
+            # Prefer entry to a visit rather than the arbitrary interval-end reference.
+            episode, previous = {}, {}
+            for candidate_anchor in sorted(anchors, key=lambda a: a[3]['time']):
+                tid, time = candidate_anchor[2], candidate_anchor[3]['time']
+                if tid not in previous or time - previous[tid] > 0.12:
+                    episode[tid] = episode.get(tid, -1) + 1
+                previous[tid] = time
+                best_anchors.setdefault((tid, episode[tid]), candidate_anchor)
+        else:
+            for candidate_anchor in sorted(anchors, key=lambda a: (a[0], a[1])):
+                best_anchors.setdefault(candidate_anchor[2], candidate_anchor)
         for _, _, ball_id, anchor in best_anchors.values():
             before = len(ranked)
             path = [
                 p
                 for p in observed
                 if p["ball"]["ball_track_id"] == ball_id and p["time"] <= anchor["time"]
+                and (not interval_mode or p['time'] >= anchor['time'] - options.lookback_s)
             ]
             contacts = defaultdict(list)
             for p in path:
@@ -262,7 +277,8 @@ def rank_with_ball(event, source, tracks, actions, ball_rows, options):
                     )
                 for hypothesis in hypotheses:
                     hypothesis["role_evidence"] = role_support(
-                        roles, tid, start, hypothesis["peak_source_time_s"]
+                        roles, tid, max(start, anchor['time'] - options.lookback_s)
+                        if interval_mode else start, hypothesis["peak_source_time_s"]
                     )
                 if hypotheses:
                     # Last supported contact/release on this anchored ball path.
@@ -292,6 +308,8 @@ def rank_with_ball(event, source, tracks, actions, ball_rows, options):
                 other["track_id"] != c["track_id"]
                 and other["ball_evidence"]["ball_track_id"]
                 == c["ball_evidence"]["ball_track_id"]
+                and (not interval_mode or other["ball_evidence"]["rim_anchor_source_s"]
+                     == c["ball_evidence"]["rim_anchor_source_s"])
                 and other["ball_evidence"]["control_interval_source_s"][0]
                 > c["action_interval_source_s"][1] + 0.025
                 for other in ranked
@@ -388,5 +406,17 @@ def rank_with_ball(event, source, tracks, actions, ball_rows, options):
         )
         result["trajectory"]["source_start_frame"] = (
             event["window_start_frame"] + result["trajectory"]["window_start_frame"]
+        )
+    if interval_mode:
+        result.update(
+            attribution_method='ball_contact_rim_action_roles_interval_v1',
+            goal_time_semantics=event['goal_time_semantics'],
+            goal_search_interval_source_s=[anchor_start, anchor_end],
+            timing_provenance=event.get('timing_provenance', {}),
+            estimated_rim_time_s=(ranked[0]['ball_evidence']['rim_anchor_source_s']
+                                  if unique else None),
+            search_lookback_s=options.lookback_s,
+            action_only_reference=dict(result['action_only_reference'],
+                timing_warning='Uses interval-end reference, not a measured goal time'),
         )
     return result

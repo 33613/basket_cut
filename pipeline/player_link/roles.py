@@ -21,7 +21,7 @@ ROLE_POLICY = {
 
 def match_roles(ball_rows, by_frame, event, fps, eligible_tracks, lookback_s=3.0):
     matched = {}
-    start = event["goal_time_s"] - lookback_s
+    start = event.get("goal_interval_start_s", event["goal_time_s"]) - lookback_s
     for row in ball_rows:
         time = row["source_timestamp_s"]
         if not math.isfinite(time) or abs(time - row["source_frame_idx"] / fps) > 1e-6:

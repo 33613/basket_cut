@@ -86,6 +86,11 @@ def export_actor(directory, tracks, event, source, result, chosen, trajectory, a
     record['ball_path_supported']=result.get('ball_path_supported',False)
     record['selection_basis']=result.get('selection_basis')
     record['role_evidence_used']=result.get('role_evidence_used',False)
+    if 'goal_interval_start_s' in event:
+        record.update(goal_time_semantics=event['goal_time_semantics'],
+            goal_search_interval_source_s=[event['goal_interval_start_s'], event['goal_interval_end_s']],
+            timing_provenance=event.get('timing_provenance', {}),
+            estimated_rim_time_s=result.get('estimated_rim_time_s'))
     if result.get('track_quality'):
         record['track_quality']=result['track_quality']
     if review:
@@ -263,7 +268,7 @@ def export_run(root, options, settings, review_file=None):
         record = next(r for r in records if r["event_id"] == eid)
         imgs = "".join(f'<img height="180" src="events/{eid}/handoff/{s["crop_path"]}">' for s in record["samples"])
         sections.append(f'<section><h2>Video {html.escape(event["video_id"])} / {eid}</h2>'
-            f'<p>Goal {event["goal_time_s"]}s; {record["attribution_status"]}; selected T={record["shooter_track_id"]}</p>'
+            f'<p>{"Search interval " + str(record["goal_search_interval_source_s"]) if "goal_search_interval_source_s" in record else "Goal " + str(event["goal_time_s"]) + "s"}; {record["attribution_status"]}; selected T={record["shooter_track_id"]}</p>'
             f'<video controls width="720" src="events/{eid}/evidence.mp4"></video><ul>{cards}</ul>{imgs}</section>')
     description=('Observed ball, rim, upper-body contact and action evidence; contact is a box proxy, review required. '
                  if protocol.get('ball') else 'Action-only hypotheses; ball flight is not verified. ')

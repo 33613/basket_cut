@@ -85,8 +85,10 @@ def export_review(root, output):
             )
         vid = html.escape(event["video_id"])
         tid = f"T{chosen}" if chosen is not None else "未选择"
+        timing = (f'近筐搜索 {event["goal_interval_start_s"]:.2f}–{event["goal_interval_end_s"]:.2f}s（非精确进球时刻）'
+                  if 'goal_interval_start_s' in event else f'进球 {event["goal_time_s"]}s')
         sections.append(
-            f'<section id="video-{vid}"><h2>视频 {vid} · 进球 {event["goal_time_s"]}s · {tid}</h2>'
+            f'<section id="video-{vid}"><h2>视频 {vid} · {timing} · {tid}</h2>'
             f"<p>{html.escape(record['attribution_status'])} · {interval}</p>"
             f'<div class="media">{media}</div><p>{links}</p><div class="images">{"".join(images)}</div></section>'
         )
@@ -94,6 +96,10 @@ def export_review(root, output):
             {
                 "video_id": event["video_id"],
                 "goal_time_s": event["goal_time_s"],
+                "goal_time_semantics": event.get("goal_time_semantics", "external_timestamp"),
+                "goal_interval_start_s": event.get("goal_interval_start_s", ""),
+                "goal_interval_end_s": event.get("goal_interval_end_s", ""),
+                "estimated_rim_time_s": record.get("estimated_rim_time_s", ""),
                 "predicted_track_id": chosen,
                 "source_start_frame": start,
                 "source_end_frame_inclusive": end,
