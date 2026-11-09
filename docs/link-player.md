@@ -82,7 +82,7 @@ python -m cli.export_link_review --output-dir /outputs/goal-link-run
 
 `cli.goal_demo` 接在核对后的结果之后，复用 main 的 KPR 适配、`PlayerRegistry` SQLite 库、球员查询和原视频裁剪，不重跑追踪/动作/球检测。默认 `reviewed` 模式按人工 `player_key` 建库，无需 GPU；选 `kpr` 才提取 KPR 特征，未填写身份的目标走现有匹配，人工分组优先。不清晰且无身份的事件独立保留，不假造特征或强行归组。
 
-在现有复核 CSV 中填写 `shooter_correct=1`，必要时增加以下列（UTF-8 CSV，Excel 可导出）：
+在现有复核表中填写 `shooter_correct=1`，必要时增加以下列。`--review-file`/`--review-csv` 接受 UTF-8 CSV 或 XLSX（名为 `review_checklist` 的工作表，或唯一工作表）；XLSX直接读取，不需要安装Excel/Pandas。保留无标题备注列，含公式的表需先保存为纯值。
 
 | 列 | 含义 |
 |---|---|
@@ -91,7 +91,7 @@ python -m cli.export_link_review --output-dir /outputs/goal-link-run
 | `player_name` | 可选展示名，不影响分组 |
 | `source_segments` | 混人/换ID时填 `T2:源帧起点-终点;T4:源帧起点-终点`，边界均包含，必须在已追踪窗口内 |
 | `review_start_frame/review_end_frame` | 单T号人工修正的源帧边界，替代自动边界 |
-| `clip_start_s/clip_end_s` | 可选的原视频剪辑秒数，默认保留完整候选处理窗口 |
+| `clip_start_s/clip_end_s` | 可选的原视频剪辑秒数，默认保留完整候选处理窗口；`highlight_complete=0` 时回退为完整原片段，避免漏掉补篮 |
 | `include` | 可选，0 排除、1 纳入；空白时只纳入确认正确或明确修正的目标 |
 
 `track_pure=0` 必须给出修正的源帧段/边界，否则跳过并记录原因。该帧范围不同于旧 `review.csv` 的事件窗口局部帧号。`predicted_track_id` 和原始 `link.json` 不改写。样本图从可信局部段重新抽取；不把整条可能混人的轨迹送入 KPR。

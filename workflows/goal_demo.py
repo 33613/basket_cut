@@ -6,6 +6,9 @@ import json
 import math
 from pathlib import Path
 import re
+import posixpath
+import xml.etree.ElementTree as ET
+import zipfile
 
 from contracts.schema import TrackRecord, read_jsonl, write_jsonl_line
 from pipeline.media import atomic_json, sha256_file
@@ -34,43 +37,100 @@ def track_id(value):
     return int(match[1])
 
 
+def review_table(path):
+    """Read CSV or a review_checklist XLSX without requiring pandas/openpyxl."""
+    path = Path(path)
+    if path.suffix.lower() != '.xlsx':
+        with path.open(encoding='utf-8-sig', newline='') as stream:
+            return list(csv.DictReader(stream))
+    ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+    relns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    with zipfile.ZipFile(path) as archive:
+        strings = []
+        if 'xl/sharedStrings.xml' in archive.namelist():
+            strings = [''.join(t.text or '' for t in si.findall('.//s:t', ns))
+                       for si in ET.fromstring(archive.read('xl/sharedStrings.xml')).findall('s:si', ns)]
+        sheets = ET.fromstring(archive.read('xl/workbook.xml')).findall('s:sheets/s:sheet', ns)
+        selected = next((s for s in sheets if s.get('name') == 'review_checklist'), None)
+        if selected is None:
+            if len(sheets) != 1:
+                raise ValueError('XLSX must have one sheet or a review_checklist sheet')
+            selected = sheets[0]
+        relations = ET.fromstring(archive.read('xl/_rels/workbook.xml.rels'))
+        relation = next(r for r in relations if r.get('Id') == selected.get('{'+relns+'}id'))
+        if relation.get('TargetMode') == 'External':
+            raise ValueError('External XLSX worksheet is not supported')
+        target = relation.get('Target', '')
+        name = posixpath.normpath(target.lstrip('/') if target.startswith('/') else 'xl/'+target)
+        if not name.startswith('xl/'):
+            raise ValueError('Invalid XLSX worksheet path')
+        matrix = []
+        for row in ET.fromstring(archive.read(name)).findall('s:sheetData/s:row', ns):
+            cells = {}
+            for c in row.findall('s:c', ns):
+                letters = re.match(r'[A-Z]+', c.get('r', '')).group()
+                col = 0
+                for letter in letters:
+                    col = col*26 + ord(letter)-64
+                value = c.findtext('s:v', '', ns)
+                if c.get('t') == 's':
+                    value = strings[int(value)]
+                elif c.get('t') == 'inlineStr':
+                    value = ''.join(t.text or '' for t in c.findall('.//s:t', ns))
+                if c.find('s:f', ns) is not None:
+                    raise ValueError('Review XLSX contains formulas; export values-only first')
+                if value:
+                    cells[col-1] = value
+            if cells:
+                matrix.append(cells)
+    if not matrix:
+        raise ValueError('Empty review worksheet')
+    width = max(max(row) for row in matrix)+1
+    headers = [matrix[0].get(i, '').strip() for i in range(width)]
+    note_column = next((i for i, h in enumerate(headers) if not h and any(row.get(i) for row in matrix[1:])), None)
+    headers = [h or ('notes' if i == note_column and 'notes' not in headers else f'unnamed_{i+1}')
+               for i, h in enumerate(headers)]
+    if len(headers) != len(set(headers)):
+        raise ValueError('Duplicate review worksheet headers')
+    return [{key: row.get(i, '') for i, key in enumerate(headers)} for row in matrix[1:]]
+
+
 def reviewed_rows(path, events):
     by_id = {e['event_id']: e for e in events}
     by_video = {}
     for e in events:
         by_video.setdefault(e['video_id'], []).append(e)
     result = {}
-    with Path(path).open(encoding='utf-8-sig', newline='') as stream:
-        for raw in csv.DictReader(stream):
-            row = {str(k).strip(): str(v or '').strip() for k, v in raw.items() if k}
-            if not any(row.values()):
-                continue
-            eid = row.get('event_id')
-            if not eid:
-                choices = by_video.get(row.get('video_id', ''), [])
-                if len(choices) != 1:
-                    raise ValueError('video_id must identify one event; otherwise supply event_id')
-                eid = choices[0]['event_id']
-            if eid not in by_id or eid in result:
-                raise ValueError(f'Unknown/duplicate review event: {eid}')
-            if row.get('video_id') and row['video_id'] != by_id[eid]['video_id']:
-                raise ValueError('Review event_id/video_id mismatch')
-            if not row.get('reviewed_track_id'):
-                row['reviewed_track_id'] = row.get('corrected_track_id') or row.get('轨迹号码', '')
-            if not row.get('player_key'):
-                value = next((v for k, v in row.items() if k.startswith('球员号码')), '')
-                if re.fullmatch(r'\d{1,2}\s*[A-Za-z]+', value):
-                    row['player_key'] = re.sub(r'\s+', '', value).lower()
-            if not row.get('player_key') and row.get('team_id') and row.get('jersey_number'):
-                row['player_key'] = row['team_id'] + ':' + row['jersey_number']
-            jersey = re.fullmatch(r'(\d{1,2})([A-Za-z]+)', row.get('player_key', ''))
-            if jersey:
-                row['player_key'] = jersey[1] + jersey[2].lower()
-                row.setdefault('team_id', '')
-                row.setdefault('jersey_number', '')
-                row['team_id'] = row['team_id'] or jersey[2].lower()
-                row['jersey_number'] = row['jersey_number'] or jersey[1]
-            result[eid] = row
+    for raw in review_table(path):
+        row = {str(k).strip(): str(v or '').strip() for k, v in raw.items() if k}
+        if not any(row.values()):
+            continue
+        eid = row.get('event_id')
+        if not eid:
+            choices = by_video.get(row.get('video_id', ''), [])
+            if len(choices) != 1:
+                raise ValueError('video_id must identify one event; otherwise supply event_id')
+            eid = choices[0]['event_id']
+        if eid not in by_id or eid in result:
+            raise ValueError(f'Unknown/duplicate review event: {eid}')
+        if row.get('video_id') and row['video_id'] != by_id[eid]['video_id']:
+            raise ValueError('Review event_id/video_id mismatch')
+        if not row.get('reviewed_track_id'):
+            row['reviewed_track_id'] = row.get('corrected_track_id') or row.get('轨迹号码', '')
+        if not row.get('player_key'):
+            value = next((v for k, v in row.items() if k.startswith('球员号码')), '')
+            if re.fullmatch(r'\d{1,2}\s*[A-Za-z]+', value):
+                row['player_key'] = re.sub(r'\s+', '', value).lower()
+        if not row.get('player_key') and row.get('team_id') and row.get('jersey_number'):
+            row['player_key'] = row['team_id'] + ':' + row['jersey_number']
+        jersey = re.fullmatch(r'(\d{1,2})([A-Za-z]+)', row.get('player_key', ''))
+        if jersey:
+            row['player_key'] = jersey[1] + jersey[2].lower()
+            row.setdefault('team_id', '')
+            row.setdefault('jersey_number', '')
+            row['team_id'] = row['team_id'] or jersey[2].lower()
+            row['jersey_number'] = row['jersey_number'] or jersey[1]
+        result[eid] = row
     return result
 
 
@@ -120,7 +180,7 @@ def prepare(link_run, review_csv, output, *, identity_mode='reviewed', samples=6
         raise ValueError('Invalid demo options')
     protocol = flow.saved(link_run)
     reviews = reviewed_rows(review_csv, protocol['events'])
-    request = dict(version=2, link_run=str(link_run), protocol_sha256=sha256_file(link_run/'protocol.json'),
+    request = dict(version=3, link_run=str(link_run), protocol_sha256=sha256_file(link_run/'protocol.json'),
                    review_sha256=sha256_file(review_csv), identity_mode=identity_mode, samples=samples)
     request_path = output/'request.json'
     if request_path.exists():
@@ -187,15 +247,17 @@ def prepare(link_run, review_csv, output, *, identity_mode='reviewed', samples=6
                 value = r.to_dict()
                 value.update(frame_idx=r.frame_idx+offset, timestamp_s=(r.frame_idx+offset)/fps)
                 write_jsonl_line(stream, value)
-        atomic_json(dest/'tracking/video_meta.json', dict(input_path=str(directory/'window.mkv'),
-            fps=fps, width=source['width'], height=source['height']))
+        atomic_json(dest/'tracking/video_meta.json', dict(input_path=source['path'],
+            fps=fps, width=source['width'], height=source['height'], frame_count=source['frame_count'],
+            tracking_scope='reviewed_goal_segments_only'))
         ball_path = directory/'ball/ball.jsonl'
         if ball_path.is_file():
             expected = read(directory/'.ball.json')['outputs']['ball/ball.jsonl']
             if sha256_file(ball_path) != expected:
                 raise ValueError('Ball artifact changed')
-        clip_start = float(row.get('clip_start_s') or event['window_start_s'])
-        clip_end = float(row.get('clip_end_s') or event['window_end_s'])
+        incomplete = truth(row.get('highlight_complete')) is False
+        clip_start = float(row.get('clip_start_s') or (0 if incomplete else event['window_start_s']))
+        clip_end = float(row.get('clip_end_s') or (source['duration_s'] if incomplete else event['window_end_s']))
         if not all(math.isfinite(v) for v in (clip_start, clip_end)) or not 0 <= clip_start < clip_end <= source['duration_s']:
             raise ValueError('Invalid source clip range')
         item = dict(event_id=eid, video_id=event['video_id'], player_key=row.get('player_key', ''),
@@ -204,6 +266,7 @@ def prepare(link_run, review_csv, output, *, identity_mode='reviewed', samples=6
             segments=segments, fps=fps, source=source,
             window_start_s=event['window_start_s'], window_end_s=event['window_end_s'],
             clip_start_s=clip_start, clip_end_s=clip_end,
+            clip_range_policy='full_source_for_incomplete_highlight' if incomplete else 'window_or_review_bounds',
             ball_path=str(ball_path) if ball_path.is_file() else None,
             ball_sha256=sha256_file(ball_path) if ball_path.is_file() else None,
             samples=images, feature_eligible=any(s['identity_eligible'] for s in images) and truth(row.get('images_usable')) is not False,
@@ -270,7 +333,7 @@ def features(output, *, kpr_root, config, checkpoint, cpu=False, backend=None):
 
     output = Path(output).resolve()
     plan = read(output/'plan.json')
-    if plan['request'].get('version') != 2:
+    if plan['request'].get('version') not in (2, 3):
         raise ValueError('KPR sampling policy changed; prepare into a new demo output directory')
     verify_sample_images(output, plan)
     contract = dict(backend='KPR', checkpoint_sha256=sha256_file(checkpoint),
@@ -349,8 +412,7 @@ def build_library(output, *, max_distance=.2):
                                context_path=f"{eid}/identity/{s['context_path']}")
         nodes.append(dict(node_id='N-'+hashlib.sha256(eid.encode()).hexdigest()[:20],
             clip_name=eid, video_id=item['video_id'], local_person_id='shooter', raw_track_ids=tids,
-            intervals=[[(s['start']-round(item['window_start_s']*item['fps']))/item['fps'],
-                        (s['end']+1-round(item['window_start_s']*item['fps']))/item['fps']] for s in item['segments']],
+            intervals=[[s['start']/item['fps'], (s['end']+1)/item['fps']] for s in item['segments']],
             review_player_key=item['player_key'], team_id=item['team_id'],
             sample_count=len(samples), observation_count=sum(1 for _ in read_jsonl(output/eid/'target_tracks.jsonl')),
             hold_reasons=[] if item['feature_eligible'] else ['images_not_usable_for_gallery'],
@@ -360,9 +422,9 @@ def build_library(output, *, max_distance=.2):
                         status='candidate_consensus' if item['jersey_number'] else 'unreadable')))
         events.append(dict(clip_name=eid, event_id=eid, video_id=item['video_id'],
             local_person_id='shooter', raw_track_ids=tids, event='made_shot',
-            start=item['clip_start_s']-item['window_start_s'], end=item['clip_end_s']-item['window_start_s'],
+            start=item['clip_start_s'], end=item['clip_end_s'],
             raw_score=item['score'], source_path=source['path'], source_sha256=source['sha256'],
-            source_clip_start_s=item['window_start_s'], source_clip_end_s=item['window_end_s'],
+            source_clip_start_s=0., source_clip_end_s=source['duration_s'],
             source_start_s=item['clip_start_s'], source_end_s=item['clip_end_s'],
             reviewed_target=item['reviewed_target']))
     base = output/'library'

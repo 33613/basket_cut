@@ -14,7 +14,8 @@ from workflows import goal_demo as flow
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--link-run', type=Path)
-    parser.add_argument('--review-csv', type=Path)
+    parser.add_argument('--review-csv', '--review-file', dest='review_csv', type=Path,
+                        help='Reviewed CSV or XLSX (review_checklist worksheet)')
     parser.add_argument('--output-dir', required=True, type=Path)
     parser.add_argument('--env-file', type=Path)
     parser.add_argument('--stage', choices=('all', 'prepare', 'features', 'library', 'render'), default='all')

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 import cv2
@@ -230,6 +231,45 @@ class DemoTests(unittest.TestCase):
         path.write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError, 'crop changed'):
             demo.build_library(self.output)
+
+    def test_xlsx_sparse_columns_numeric_zero_and_untitled_notes(self):
+        path = self.base/'review.xlsx'
+        workbook = ('<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="review_checklist" sheetId="1" r:id="rel1"/></sheets></workbook>')
+        relationships = ('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rel1" Target="worksheets/sheet1.xml"/></Relationships>')
+        sheet = ('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+            '<row r="1"><c r="A1" t="inlineStr"><is><t>video_id</t></is></c>'
+            '<c r="N1" t="inlineStr"><is><t>轨迹号码</t></is></c>'
+            '<c r="O1" t="inlineStr"><is><t>球员号码(g表示绿，y表示黄)</t></is></c></row>'
+            '<row r="2"><c r="A2"><v>1</v></c><c r="N2"><v>0</v></c>'
+            '<c r="O2" t="inlineStr"><is><t>00g</t></is></c>'
+            '<c r="P2" t="inlineStr"><is><t>补篮备注</t></is></c></row></sheetData></worksheet>')
+        with zipfile.ZipFile(path, 'w') as archive:
+            archive.writestr('xl/workbook.xml', workbook)
+            archive.writestr('xl/_rels/workbook.xml.rels', relationships)
+            archive.writestr('xl/worksheets/sheet1.xml', sheet)
+        row = demo.reviewed_rows(path, self.protocol['events'])['EV-1']
+        self.assertEqual(row['reviewed_track_id'], '0')
+        self.assertEqual(row['player_key'], '00g')
+        self.assertEqual(row['notes'], '补篮备注')
+
+    def test_incomplete_highlight_uses_entire_original_not_old_shooter_window(self):
+        with self.review.open(newline='') as stream:
+            rows = list(csv.DictReader(stream))
+        rows[0]['highlight_complete'] = '0'
+        with self.review.open('w', newline='') as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        plan = demo.prepare(self.run, self.review, self.output)
+        self.assertEqual(plan['items'][0]['clip_start_s'], 0)
+        self.assertEqual(plan['items'][0]['clip_end_s'], 4)
+        demo.build_library(self.output)
+        event = next(read_jsonl(self.output/'library/events.jsonl'))
+        self.assertGreaterEqual(event['start'], 0)
+        self.assertEqual(event['source_start_s'], 0)
 
 
 class TemplateMatchingTests(unittest.TestCase):
