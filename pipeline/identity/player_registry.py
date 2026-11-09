@@ -100,6 +100,66 @@ class PlayerRegistry(MemoryStore):
                 return "overlapping_tracks_in_same_clip"
         return None
 
+    def ingest_reviewed(self, nodes, events=(), *, features=(), visibility=(), contract=None):
+        """Register explicit human groups, optionally with real KPR gallery evidence.
+
+        No embeddings are invented for a manual-only observation. Unnamed
+        observations remain separate; automatic matching still uses ingest().
+        """
+        if len(features):
+            part_distances(np.stack(features), np.stack(visibility))
+            if not contract:
+                raise ValueError('Feature provenance is required')
+        with self.db:
+            if contract:
+                value = json.dumps(contract, sort_keys=True)
+                if self.meta('feature_contract') not in (None, value):
+                    raise ValueError('Incompatible KPR feature space')
+                self.db.execute("INSERT OR REPLACE INTO metadata VALUES('feature_contract',?)", (value,))
+            changed = []
+            for node in nodes:
+                payload = {k: v for k, v in node.items() if k != 'feature_indices'}
+                key = str(payload.get('review_player_key') or '').strip()
+                if len(key) > 120:
+                    raise ValueError('Player key too long')
+                indices = node.get('feature_indices', [])
+                vectors = [np.asarray(features[i]).tolist() for i in indices]
+                weights = [np.asarray(visibility[i]).tolist() for i in indices]
+                stamp = digest([payload, vectors, weights])
+                old = self.db.execute('SELECT fingerprint FROM observations WHERE id=?', (node['node_id'],)).fetchone()
+                if old:
+                    if old[0] != stamp:
+                        raise ValueError('Reviewed evidence changed; use a new output directory')
+                    continue
+                player = self.db.execute('SELECT id FROM players WHERE label=? AND alias_of IS NULL', (key,)).fetchone() if key else None
+                if player:
+                    pid = player['id']
+                    members = self.db.execute('SELECT payload FROM observations WHERE player=?', (pid,))
+                    if any(self._conflict(payload, json.loads(m[0])) for m in members):
+                        raise ValueError('Reviewed player group conflicts with team/number/track evidence')
+                else:
+                    pid = self._new_player('manual_grouping' if key else 'needs_review')
+                    if key:
+                        self.db.execute('UPDATE players SET label=? WHERE id=?', (key, pid))
+                gallery = int(bool(key and vectors and not payload.get('hold_reasons')))
+                self.db.execute('INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?,0)', (
+                    node['node_id'], node['clip_name'], pid, pid, stamp,
+                    json.dumps(dict(payload, decision='reviewed' if key else 'unassigned'), ensure_ascii=False),
+                    json.dumps(vectors), json.dumps(weights), gallery))
+                changed.append(node['node_id'])
+            for event in events:
+                eid = 'GE-' + digest([event['clip_name'], event['event_id']])[:20]
+                value = json.dumps(event, sort_keys=True)
+                old = self.db.execute('SELECT payload FROM events WHERE id=?', (eid,)).fetchone()
+                if old and old[0] != value:
+                    raise ValueError('Registered event changed; use a new output directory')
+                if not old:
+                    self.db.execute('INSERT INTO events VALUES(?,?,?)', (eid, event['clip_name'], value))
+                    changed.append(eid)
+            if changed:
+                self._record('reviewed_ingest', {'added': changed})
+        return self.snapshot()
+
     def ingest(self, nodes, features, visibility, events, contract, *, max_distance=.2,
                novelty_distance=.5, min_margin=.05, min_common_parts=2, gallery_limit=12,
                memory_policy=None, curation=None):

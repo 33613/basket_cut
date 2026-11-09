@@ -34,6 +34,8 @@ python -m cli.export_link_review --output-dir /path/to/new-run
 
 轨迹 ID 只属于一次视频追踪，可能发生换人；自动 `candidate` 需要检查局部身份纯度。当前入口不运行 KPR 或建立永久球员 ID，下游负责身份归并与球员库。
 
+核对后可用 `python -m cli.goal_demo --link-run /path/to/run --review-csv /path/to/review.csv --output-dir /path/to/new-demo --identity-mode reviewed`，按人工球队/号码建立球员库并导出每人的进球集锦和播放页；可选 `--identity-mode kpr` 复用现有 KPR。视频仅标注目标球员和球轨迹，详见 [展示流程与核对表字段](docs/link-player.md#按球员输出展示视频)。
+
 ## 模块与文档
 
 | 内容 | 说明 |

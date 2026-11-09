@@ -78,6 +78,41 @@ python -m cli.export_link_review --output-dir /outputs/goal-link-run
 
 ## 实现与回归
 
+### 按球员输出展示视频
+
+`cli.goal_demo` 接在核对后的结果之后，复用 main 的 KPR 适配、`PlayerRegistry` SQLite 库、球员查询和原视频裁剪，不重跑追踪/动作/球检测。默认 `reviewed` 模式按人工 `player_key` 建库，无需 GPU；选 `kpr` 才提取 KPR 特征，未填写身份的目标走现有匹配，人工分组优先。不清晰且无身份的事件独立保留，不假造特征或强行归组。
+
+在现有复核 CSV 中填写 `shooter_correct=1`，必要时增加以下列（UTF-8 CSV，Excel 可导出）：
+
+| 列 | 含义 |
+|---|---|
+| `reviewed_track_id` | 人工修正的 T 号；支持原表的 `轨迹号码` 列 |
+| `player_key` | 本场同人统一键，如 `27g`、`15y`；支持原表以 `球员号码` 开头的列。只填号码不足以区分两队，需队伍标记或独立键 |
+| `player_name` | 可选展示名，不影响分组 |
+| `source_segments` | 混人/换ID时填 `T2:源帧起点-终点;T4:源帧起点-终点`，边界均包含，必须在已追踪窗口内 |
+| `review_start_frame/review_end_frame` | 单T号人工修正的源帧边界，替代自动边界 |
+| `clip_start_s/clip_end_s` | 可选的原视频剪辑秒数，默认保留完整候选处理窗口 |
+| `include` | 可选，0 排除、1 纳入；空白时只纳入确认正确或明确修正的目标 |
+
+`track_pure=0` 必须给出修正的源帧段/边界，否则跳过并记录原因。该帧范围不同于旧 `review.csv` 的事件窗口局部帧号。`predicted_track_id` 和原始 `link.json` 不改写。样本图从可信局部段重新抽取；不把整条可能混人的轨迹送入 KPR。
+
+```bash
+python -u -m cli.goal_demo --env-file /path/to/basket.env \
+  --link-run /outputs/goal-run --review-csv /data/review.csv \
+  --output-dir /outputs/player-demo-001 --identity-mode reviewed
+# 可选 KPR：改为 --identity-mode kpr --kpr-root /path/to/KPR
+python -m cli.goal_demo --output-dir /outputs/player-demo-001 --stage render --player-id PL-xxx
+python -m cli.player_events --run-dir /outputs/player-demo-001 --player-id PL-xxx
+```
+
+阶段可独立运行 `prepare/features/library/render`，便于以后替换身份模块。修改复核表或身份模式时用新 demo 目录；同输入可续跑。`plan.json` 和 `review_rows.json` 记录采用的目标和跳过原因，`library/` 是现有格式的球员库，`videos/PL-*.mp4` 是每个人的合并集锦，`videos/all-players.mp4` 按球员分组拼成一个完整展示视频，`index.html` 可本地播放、下载。KPR 阶段只在独立 KPR 解释器中运行；控制环境需要 numpy/OpenCV/FFmpeg。
+
+视频只显示指定球员的框和身份标签、真实观测且时间确认的球点及短轨迹；不画其他人物、篮筐、分数或调试文字，不连接不同球段/长缺口。画框仅限可信轨迹段，不延伸到未验证的同号轨迹。原片音轨保留，无音轨时补静音，统一 H.264/AAC、默认1280×720/30fps后按视频编号排序拼接；可用 `--width 1920 --height 1080` 调整输出。原尺寸身份图片不随视频缩放。默认窗口不一定覆盖完整攻防回合，可在 CSV 调整剪辑范围，但窗口以外没有追踪时不补造人物框/球点。
+
+```bash
+python -m unittest analysis.goal_demo_selfcheck analysis.person_library_selfcheck
+```
+
 `pipeline/player_link/events.py` 负责事件与窗口，`ball_evidence.py` 负责球与人物关系，`roles.py` 负责角色匹配，`export.py` 负责裁剪、交接和复核，`workflows/link_player.py` 编排各阶段。
 
 ```bash
