@@ -162,7 +162,7 @@ class PlayerRegistry(MemoryStore):
 
     def ingest(self, nodes, features, visibility, events, contract, *, max_distance=.2,
                novelty_distance=.5, min_margin=.05, min_common_parts=2, gallery_limit=12,
-               memory_policy=None, curation=None):
+               memory_policy=None, curation=None, template_matching=False):
         if (max_distance is not None and (not math.isfinite(max_distance) or max_distance < 0)):
             raise ValueError("Invalid match distance")
         if (not math.isfinite(novelty_distance) or novelty_distance <= (max_distance or 0)
@@ -212,11 +212,29 @@ class PlayerRegistry(MemoryStore):
                         raise ValueError("Registered identity evidence changed; use a new match/run database rather than overwrite identity history")
                     continue
                 candidates, comparable = [], []
+                eligible_players = 0
                 players = self.db.execute("SELECT * FROM players WHERE alias_of IS NULL AND status NOT IN ('needs_review','non_player') ORDER BY id").fetchall()
                 for player in ([] if memory_policy is not None else players):
                     members = self.db.execute("SELECT * FROM observations WHERE player=?", (player["id"],)).fetchall()
                     conflict = any(self._conflict(payload, json.loads(m["payload"])) for m in members)
                     galleries = [m for m in members if m["gallery"] and not m["detached"]]
+                    if template_matching and conflict:
+                        continue
+                    eligible_players += 1
+                    if template_matching:
+                        from pipeline.identity.cross_clip import supported_set_distance
+                        gallery_vectors = [f for m in galleries for f in json.loads(m['features'])]
+                        gallery_weights = [v for m in galleries for v in json.loads(m['visibility'])]
+                        distance = math.inf
+                        if gallery_vectors:
+                            current = np.asarray(vectors, dtype=np.float32)
+                            matrix = part_distances(np.concatenate([current, gallery_vectors]),
+                                np.concatenate([weights, gallery_weights]), min_common_parts=min_common_parts)
+                            distance = supported_set_distance(matrix[:len(current), len(current):])
+                        if math.isfinite(distance):
+                            comparable.append(distance)
+                            candidates.append((distance, player['id']))
+                        continue
                     distances = []
                     for member in galleries:
                         old = np.asarray(json.loads(member["features"]), dtype=np.float32)
@@ -235,12 +253,15 @@ class PlayerRegistry(MemoryStore):
                 best = candidates[0][0] if candidates else math.inf
                 second = candidates[1][0] if len(candidates) > 1 else math.inf
                 reasons = list(payload.get("hold_reasons", []))
+                if template_matching and len(vectors) < 2:
+                    reasons.append('insufficient_multiframe_identity_support')
                 if memory_policy is not None:
                     pid, decision = self._new_player("needs_review"), "pending"
                 elif (not reasons and max_distance is not None and best <= max_distance
                         and second - best >= min_margin):
                     pid, decision = candidates[0][1], "matched"
-                elif not reasons and (not players or (comparable and min(comparable) >= novelty_distance)):
+                elif not reasons and (not players or (comparable and min(comparable) >= novelty_distance)
+                        or (template_matching and not eligible_players)):
                     pid, decision = self._new_player("candidate"), "new_candidate"
                 else:
                     reasons.append("ambiguous_or_uncomparable_identity")
@@ -253,9 +274,15 @@ class PlayerRegistry(MemoryStore):
                     "min_margin": min_margin,
                     "best_comparable_distance": min(comparable) if comparable else None,
                 }
+                if template_matching:
+                    payload['match_evidence'].update(policy='mutual_visible_multiframe_v2',
+                        query_templates=len(vectors), min_support_per_side=2,
+                        matched_samples_enter_gallery=False)
                 # Fingerprint uses original evidence, not derived decision/reasons.
                 gallery_count = self.db.execute("SELECT COUNT(*) FROM observations WHERE player=? AND gallery=1", (pid,)).fetchone()[0]
                 gallery = int(decision != "pending" and gallery_count < gallery_limit)
+                if template_matching and decision == 'matched':
+                    gallery = 0  # Automatic matches cannot become self-reinforcing identity references.
                 self.db.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?,0)",
                     (node["node_id"], node["clip_name"], pid, pid, stamp,
                      json.dumps(payload, ensure_ascii=False), json.dumps(vectors), json.dumps(weights), gallery))

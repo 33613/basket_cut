@@ -57,7 +57,7 @@ def _stability(record, previous):
 
 def select_quality_samples(video, records: list[TrackRecord], *, purpose, sample_count,
                            min_score=.5, min_width=16., min_height=40.,
-                           min_gap_s=.25, track_ids=None):
+                           min_gap_s=.25, track_ids=None, eligible_keys=None):
     """Return selected TrackRecords and per-frame quality metadata.
 
     Decode sequentially, score all eligible observations, keep one candidate
@@ -93,6 +93,7 @@ def select_quality_samples(video, records: list[TrackRecord], *, purpose, sample
     eligible_frames = {
         frame for frame, rows in by_frame.items()
         if any((track_ids is None or r.track_id in track_ids)
+               and (eligible_keys is None or (r.track_id, r.frame_idx) in eligible_keys)
                and r.det_score >= min_score
                and r.bbox_xyxy[2] - r.bbox_xyxy[0] >= min_width
                and r.bbox_xyxy[3] - r.bbox_xyxy[1] >= min_height for r in rows)
@@ -115,6 +116,8 @@ def select_quality_samples(video, records: list[TrackRecord], *, purpose, sample
             rows = by_frame[frame_idx]
             for record in rows:
                 if track_ids is not None and record.track_id not in track_ids:
+                    continue
+                if eligible_keys is not None and (record.track_id, record.frame_idx) not in eligible_keys:
                     continue
                 box = record.bbox_xyxy
                 if (record.det_score < min_score or box[2] - box[0] < min_width

@@ -6,6 +6,22 @@ from __future__ import annotations
 import numpy as np
 
 
+def supported_set_distance(matrix, *, min_support=2):
+    """Symmetric multi-image support; one lucky image pair cannot win a match.
+
+    Compare the best supported views on both sides rather than averaging
+    front/back embeddings or requiring every occluded view to match.
+    """
+    matrix = np.asarray(matrix, dtype=np.float32)
+    if matrix.ndim != 2 or min_support < 1 or np.isnan(matrix).any() or (matrix < 0).any():
+        raise ValueError('Invalid template distance matrix/support')
+    if min(matrix.shape) < min_support:
+        return float('inf')
+    left = np.sort(matrix.min(axis=1))[:min_support]
+    right = np.sort(matrix.min(axis=0))[:min_support]
+    return max(float(left[-1]), float(right[-1]))
+
+
 def part_distances(embeddings, visibility, *, min_common_parts=2, block_size=128):
     features = np.asarray(embeddings, dtype=np.float32)
     visible = np.asarray(visibility, dtype=np.float32)

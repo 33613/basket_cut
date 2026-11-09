@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -14,6 +15,7 @@ import numpy as np
 from contracts.schema import TrackRecord, write_jsonl_line, read_jsonl
 from pipeline.media import atomic_json, cut_video, sha256_file
 from pipeline.identity.player_registry import PlayerRegistry
+from pipeline.identity.cross_clip import supported_set_distance
 from pipeline.player_link.demo_render import draw, render_player_videos
 from workflows import goal_demo as demo, link_player as link
 from workflows.player_events import query_player_events
@@ -167,6 +169,123 @@ class DemoTests(unittest.TestCase):
         result = demo.build_library(self.output)
         self.assertEqual(result['global_person_count'], 1)
         self.assertEqual(result['event_count'], 2)
+
+    def test_occluder_boxes_are_used_but_never_selected_as_the_target(self):
+        directory = self.run/'events/EV-1'
+        records = list(read_jsonl(directory/'tracks.jsonl'))
+        for row in records:
+            if row['track_id'] == 1:
+                row['bbox_xyxy'] = [10,20,50,100]
+        with (directory/'tracks.jsonl').open('w') as stream:
+            for row in records:
+                write_jsonl_line(stream, row)
+        link.mark(directory, 'track', {}, ['tracks.jsonl', 'video_meta.json'])
+        plan = demo.prepare(self.run, self.review, self.output)
+        item = plan['items'][0]
+        self.assertTrue(all(s['track_id'] == 0 for s in item['samples']))
+        self.assertTrue(all(s['sampling_components']['overlap_fraction'] == 1 for s in item['samples']))
+        self.assertFalse(item['feature_eligible'])
+        self.assertEqual(len(plan['items']), 2)  # Preserve the goal and manual identity.
+
+    def test_fallback_preview_never_enters_kpr_or_loads_model(self):
+        with patch('pipeline.identity.sampling.select_quality_samples', return_value=([], {})):
+            plan = demo.prepare(self.run, self.review, self.output, identity_mode='kpr')
+        self.assertFalse(any(i['feature_eligible'] for i in plan['items']))
+        checkpoint, config = self.base/'weights', self.base/'config'
+        checkpoint.write_bytes(b'test-checkpoint')
+        config.write_text('test')
+        with patch('pipeline.identity.kpr_backend.KPRBackend') as backend:
+            result = demo.features(self.output, kpr_root=self.base, config=config, checkpoint=checkpoint)
+            backend.assert_not_called()
+        self.assertEqual(result['event_ids'], [])
+        self.assertEqual(demo.build_library(self.output)['event_count'], 2)
+
+    def test_real_templates_retain_views_and_remove_isolated_outlier(self):
+        def feature(angle):
+            return [[np.cos(angle), np.sin(angle)]]*2
+        vectors = np.asarray([feature(0), feature(.05), feature(1.6)], dtype=np.float32)
+        samples = [dict(source_frame_idx=i*2, timestamp_s=i*.2, sampling_quality=.5+i*.2) for i in range(3)]
+        kept, audit = demo.template_indices(vectors, np.ones((3,2)), samples)
+        self.assertEqual(set(kept), {0,1})
+        self.assertEqual(audit[2]['reason'], 'isolated_appearance')
+        # Equal-looking images from different times can still provide two supports.
+        kept, _ = demo.template_indices(vectors[[0,0]], np.ones((2,2)), samples[:2])
+        self.assertEqual(len(kept), 2)
+        samples[1]['timestamp_s'] = .05
+        kept, _ = demo.template_indices(vectors[[0,0]], np.ones((2,2)), samples[:2])
+        self.assertEqual(len(kept), 1)
+
+    def test_zero_and_double_zero_are_distinct_player_keys(self):
+        self.review.write_text(self.review.read_text().replace('27g', '0g', 1).replace('27g', '00g', 1))
+        rows = demo.reviewed_rows(self.review, self.protocol['events'])
+        self.assertEqual(rows['EV-1']['jersey_number'], '0')
+        self.assertEqual(rows['EV-2']['jersey_number'], '00')
+        demo.prepare(self.run, self.review, self.output)
+        self.assertEqual(demo.build_library(self.output)['global_person_count'], 2)
+
+    def test_changed_crop_is_rejected_before_feature_extraction(self):
+        plan = demo.prepare(self.run, self.review, self.output, identity_mode='kpr')
+        item = plan['items'][0]
+        path = self.output/item['event_id']/'identity'/item['samples'][0]['crop_path']
+        path.write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'crop changed'):
+            demo.build_library(self.output)
+
+
+class TemplateMatchingTests(unittest.TestCase):
+    def test_one_lucky_pair_does_not_certify_two_images(self):
+        self.assertGreater(supported_set_distance([[.01,.9],[.9,.39]]), .2)
+        self.assertAlmostEqual(supported_set_distance([[.05,.8],[.8,.07]]), .07, places=5)
+        self.assertTrue(np.isinf(supported_set_distance([[.01,.02]])))
+
+    def test_automatic_matches_cannot_create_an_identity_drift_chain(self):
+        def feature(angle):
+            return [[float(np.cos(angle)), float(np.sin(angle))]]*2
+        vectors = [feature(a) for a in (0,.04,.28,.32,.56,.60)]
+        weights = [[1.,1.]]*6
+        def node(name, indices, key='', team='g', number=None):
+            return dict(node_id=name, clip_name=name, video_id=name, local_person_id='shooter',
+                raw_track_ids=[0], intervals=[[0,1]], hold_reasons=[], cover={}, exemplars=[],
+                sample_count=len(indices), feature_indices=indices, review_player_key=key,
+                team_id=team, jersey=dict(number=number, status='candidate_consensus' if number else 'unreadable'))
+        with tempfile.TemporaryDirectory() as folder:
+            with PlayerRegistry(Path(folder)/'players.sqlite3', 'match') as registry:
+                contract = {'test':'multi-image-v2'}
+                registry.ingest_reviewed([node('seed',[0,1],key='27g',number='27')],
+                    features=vectors, visibility=weights, contract=contract)
+                registry.ingest([node('near',[2,3])], vectors, weights, [], contract, template_matching=True)
+                stored = registry.db.execute("SELECT gallery,payload FROM observations WHERE id='near'").fetchone()
+                self.assertEqual(json.loads(stored['payload'])['decision'], 'matched')
+                self.assertEqual(stored['gallery'], 0)
+                registry.ingest([node('drift',[4,5])], vectors, weights, [], contract, template_matching=True)
+                stored = registry.db.execute("SELECT payload FROM observations WHERE id='drift'").fetchone()
+                self.assertEqual(json.loads(stored[0])['decision'], 'pending')
+                # A close appearance from an explicitly different team cannot match.
+                registry.ingest([node('other-team',[0,1],team='y')], vectors, weights, [], contract, template_matching=True)
+                other = registry.db.execute("SELECT payload FROM observations WHERE id='other-team'").fetchone()
+                self.assertEqual(json.loads(other[0])['decision'], 'new_candidate')
+
+    def test_similar_teammates_need_margin_and_number_conflicts_veto(self):
+        vectors = [[[float(np.cos(a)),float(np.sin(a))]]*2 for a in (0,.02,.08,.10,.04,.06)]
+        weights = [[1.,1.]]*6
+        def node(name, indices, key='', number=None):
+            return dict(node_id=name, clip_name=name, video_id=name, local_person_id='shooter',
+                raw_track_ids=[0], intervals=[[0,1]], hold_reasons=[], cover={}, exemplars=[],
+                feature_indices=indices, review_player_key=key, team_id='g',
+                jersey=dict(number=number, status='candidate_consensus' if number else 'unreadable'))
+        with tempfile.TemporaryDirectory() as folder:
+            with PlayerRegistry(Path(folder)/'db.sqlite3', 'match') as registry:
+                contract = {'test':'multi-image-v2'}
+                registry.ingest_reviewed([node('a',[0,1],'27g','27'), node('b',[2,3],'15g','15')],
+                    features=vectors, visibility=weights, contract=contract)
+                registry.ingest([node('unknown',[4,5])], vectors, weights, [], contract, template_matching=True)
+                unknown = registry.db.execute("SELECT payload FROM observations WHERE id='unknown'").fetchone()
+                self.assertEqual(json.loads(unknown[0])['decision'], 'pending')
+                registry.ingest([node('known-number',[4,5],number='27')], vectors, weights, [], contract, template_matching=True)
+                matched = registry.db.execute("SELECT player,payload FROM observations WHERE id='known-number'").fetchone()
+                seed = registry.db.execute("SELECT player FROM observations WHERE id='a'").fetchone()
+                self.assertEqual(json.loads(matched['payload'])['decision'], 'matched')
+                self.assertEqual(matched['player'], seed['player'])
 
 
 if __name__ == '__main__':

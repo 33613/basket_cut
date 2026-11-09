@@ -65,11 +65,11 @@ def reviewed_rows(path, events):
                 row['player_key'] = row['team_id'] + ':' + row['jersey_number']
             jersey = re.fullmatch(r'(\d{1,2})([A-Za-z]+)', row.get('player_key', ''))
             if jersey:
-                row['player_key'] = str(int(jersey[1])) + jersey[2].lower()
+                row['player_key'] = jersey[1] + jersey[2].lower()
                 row.setdefault('team_id', '')
                 row.setdefault('jersey_number', '')
                 row['team_id'] = row['team_id'] or jersey[2].lower()
-                row['jersey_number'] = row['jersey_number'] or str(int(jersey[1]))
+                row['jersey_number'] = row['jersey_number'] or jersey[1]
             result[eid] = row
     return result
 
@@ -120,7 +120,7 @@ def prepare(link_run, review_csv, output, *, identity_mode='reviewed', samples=6
         raise ValueError('Invalid demo options')
     protocol = flow.saved(link_run)
     reviews = reviewed_rows(review_csv, protocol['events'])
-    request = dict(version=1, link_run=str(link_run), protocol_sha256=sha256_file(link_run/'protocol.json'),
+    request = dict(version=2, link_run=str(link_run), protocol_sha256=sha256_file(link_run/'protocol.json'),
                    review_sha256=sha256_file(review_csv), identity_mode=identity_mode, samples=samples)
     request_path = output/'request.json'
     if request_path.exists():
@@ -168,14 +168,20 @@ def prepare(link_run, review_csv, output, *, identity_mode='reviewed', samples=6
                 raise ValueError('Target observation clock mismatch')
         dest = output/eid
         (dest/'tracking').mkdir(parents=True, exist_ok=True)
-        selected, _ = select_quality_samples(directory/'window.mkv', target, purpose='person',
-            sample_count=samples, min_score=.3, min_width=8, min_height=16, min_gap_s=.15)
+        selected, quality = select_quality_samples(directory/'window.mkv', records, purpose='person',
+            sample_count=samples, min_score=.5, min_width=24, min_height=64, min_gap_s=.15,
+            eligible_keys={(r.track_id, r.frame_idx) for r in target})
+        quality_passed = bool(selected)
         if not selected:
             selected = [target[len(target)//2]]
         _, images = load_selected_crops(directory/'window.mkv', selected, padding=0.,
             context_padding=.25, output_dir=dest/'identity', prompt_mode='none', prompts={})
         for image in images:
             image['source_frame_idx'] = image['frame_idx']+offset
+            image.update(quality.get((image['track_id'], image['frame_idx']), {}))
+            overlap = image.get('sampling_components', {}).get('overlap_fraction', 1.)
+            image['identity_eligible'] = quality_passed and overlap <= .45
+        images.sort(key=lambda s: (-s['identity_eligible'], -s.get('sampling_quality', 0.), s['frame_idx']))
         with (dest/'target_tracks.jsonl').open('w') as stream:
             for r in target:
                 value = r.to_dict()
@@ -200,7 +206,8 @@ def prepare(link_run, review_csv, output, *, identity_mode='reviewed', samples=6
             clip_start_s=clip_start, clip_end_s=clip_end,
             ball_path=str(ball_path) if ball_path.is_file() else None,
             ball_sha256=sha256_file(ball_path) if ball_path.is_file() else None,
-            samples=images, feature_eligible=truth(row.get('images_usable')) is not False,
+            samples=images, feature_eligible=any(s['identity_eligible'] for s in images) and truth(row.get('images_usable')) is not False,
+            sampling_quality_passed=quality_passed,
             automatic_track_id=result['shooter_track_id'], reviewed_target=corrected,
             score=next((c['score'] for c in result.get('candidates', [])
                         if c['track_id'] in {s['track_id'] for s in segments}), 0.))
@@ -213,6 +220,49 @@ def prepare(link_run, review_csv, output, *, identity_mode='reviewed', samples=6
     return plan
 
 
+def template_indices(embeddings, visibility, samples, *, limit=4):
+    """Drop isolated appearance outliers, then keep supported, diverse real views."""
+    import numpy as np
+    from pipeline.identity.cross_clip import part_distances
+    from pipeline.identity.gallery_memory import select_templates
+
+    distance = part_distances(embeddings, visibility)
+    visible = np.count_nonzero(np.asarray(visibility) > 0, axis=1) >= 2
+    supported = visible & ((distance <= .4).sum(axis=1) >= (2 if len(samples) > 1 else 1))
+    bank = {i: dict(quality=s.get('sampling_quality', .5), view='unknown',
+                    source_frame=s['source_frame_idx']) for i, s in enumerate(samples) if supported[i]}
+    ranked = sorted(bank, key=lambda i: (-bank[i]['quality'], samples[i]['source_frame_idx']))
+    protected = []
+    for i in ranked:
+        if all(abs(samples[i]['timestamp_s']-samples[j]['timestamp_s']) >= .15-1e-6 for j in protected):
+            protected.append(i)
+        if len(protected) == 2:
+            break
+    selected = select_templates(bank, distance, limit, protected=protected)
+    # Track fragments can be adjacent in time despite per-track sample spacing.
+    spaced = []
+    for i in selected:
+        if all(abs(samples[i]['timestamp_s']-samples[j]['timestamp_s']) >= .15-1e-6 for j in spaced):
+            spaced.append(i)
+    return spaced, [dict(source_frame_idx=s['source_frame_idx'],
+        accepted=i in spaced, reason=('selected' if i in spaced else
+            'insufficient_visible_parts' if not visible[i] else
+            'isolated_appearance' if not supported[i] else 'redundant_or_bank_limit'))
+        for i, s in enumerate(samples)]
+
+
+def verify_sample_images(output, plan):
+    from workflows.library_inputs import safe_relative
+    paths = []
+    for item in plan['items']:
+        for sample in item['samples']:
+            path = safe_relative(output, f"{item['event_id']}/identity/{sample['crop_path']}")
+            if sha256_file(path) != sample['crop_sha256']:
+                raise ValueError('Identity input crop changed after preparation')
+            paths.append(path)
+    return paths
+
+
 def features(output, *, kpr_root, config, checkpoint, cpu=False, backend=None):
     import numpy as np
     import cv2
@@ -220,8 +270,12 @@ def features(output, *, kpr_root, config, checkpoint, cpu=False, backend=None):
 
     output = Path(output).resolve()
     plan = read(output/'plan.json')
+    if plan['request'].get('version') != 2:
+        raise ValueError('KPR sampling policy changed; prepare into a new demo output directory')
+    verify_sample_images(output, plan)
     contract = dict(backend='KPR', checkpoint_sha256=sha256_file(checkpoint),
-                    config_sha256=sha256_file(config), prompt_mode='none')
+                    config_sha256=sha256_file(config), prompt_mode='none',
+                    template_policy='quality_visible_multiframe_v2', template_limit=4)
     signature = dict(plan_sha256=sha256_file(output/'plan.json'), contract=contract)
     marker = output/'features.json'
     if marker.exists():
@@ -229,25 +283,38 @@ def features(output, *, kpr_root, config, checkpoint, cpu=False, backend=None):
         if previous['signature'] != signature or previous['sha256'] != sha256_file(output/'features.npz'):
             raise ValueError('KPR inputs/features changed; use a new output directory')
         return previous
-    backend = backend or KPRBackend(kpr_root=Path(kpr_root), config_path=Path(config),
-        checkpoint_path=Path(checkpoint), use_gpu=not cpu)
-    vectors, weights, ids = [], [], []
+    vectors, weights, ids, event_indices, audits = [], [], [], {}, {}
     for item in plan['items']:
         if not item['feature_eligible']:
+            audits[item['event_id']] = dict(reason='no_usable_identity_images', samples=[])
             continue
-        images = [cv2.imread(str(output/item['event_id']/'identity'/s['crop_path'])) for s in item['samples']]
+        samples = [s for s in item['samples'] if s.get('identity_eligible', False)]
+        paths = [output/item['event_id']/'identity'/s['crop_path'] for s in samples]
+        for path, sample in zip(paths, samples):
+            if sha256_file(path) != sample['crop_sha256']:
+                raise ValueError('KPR input crop changed after preparation')
+        images = [cv2.imread(str(path)) for path in paths]
         if any(image is None for image in images):
             raise ValueError('Missing identity sample image')
+        if backend is None:
+            backend = KPRBackend(kpr_root=Path(kpr_root), config_path=Path(config),
+                checkpoint_path=Path(checkpoint), use_gpu=not cpu)
         embeddings, visibility = backend.extract([{'image': image} for image in images], batch_size=8)
-        e, v = np.asarray(embeddings), np.asarray(visibility)
-        mean = (e*v[..., None]).sum(axis=0)/np.maximum(v.sum(axis=0)[:, None], 1e-12)
-        mean /= np.maximum(np.linalg.norm(mean, axis=-1, keepdims=True), 1e-12)
-        vectors.append(mean)
-        weights.append(v.mean(axis=0))
+        e, v = np.asarray(embeddings, dtype=np.float32), np.asarray(visibility, dtype=np.float32)
+        if e.ndim != 3 or len(e) != len(samples) or v.shape != e.shape[:2]:
+            raise ValueError('KPR output/sample layout differs')
+        selected, audit = template_indices(e, v, samples)
+        audits[item['event_id']] = dict(samples=audit, matching_eligible=len(selected)>=2)
+        if not selected:
+            continue
+        event_indices[item['event_id']] = list(range(len(vectors), len(vectors)+len(selected)))
+        vectors.extend(e[selected])
+        weights.extend(v[selected])
         ids.append(item['event_id'])
         print(f'[demo KPR] {len(ids)}/{len(plan["items"])} {item["event_id"]}', flush=True)
     np.savez(output/'features.npz', embeddings=np.asarray(vectors), visibility=np.asarray(weights))
-    result = dict(signature=signature, event_ids=ids, contract=contract,
+    result = dict(signature=signature, event_ids=ids, event_indices=event_indices,
+                  template_audits=audits, contract=contract,
                   sha256=sha256_file(output/'features.npz'))
     atomic_json(marker, result)
     return result
@@ -261,15 +328,18 @@ def build_library(output, *, max_distance=.2):
 
     output = Path(output).resolve()
     plan = read(output/'plan.json')
+    image_paths = verify_sample_images(output, plan)
     vectors, weights, indices, contract = [], [], {}, None
     if plan['request']['identity_mode'] == 'kpr':
         feature_info = read(output/'features.json')
         if feature_info['signature']['plan_sha256'] != sha256_file(output/'plan.json') or feature_info['sha256'] != sha256_file(output/'features.npz'):
             raise ValueError('KPR feature provenance changed')
         contract = feature_info['contract']
+        if contract.get('template_policy') != 'quality_visible_multiframe_v2':
+            raise ValueError('Old averaged KPR features; prepare/extract in a new demo output directory')
         with np.load(output/'features.npz', allow_pickle=False) as data:
             vectors, weights = list(data['embeddings']), list(data['visibility'])
-        indices = {eid: i for i, eid in enumerate(feature_info['event_ids'])}
+        indices = feature_info.get('event_indices') or {eid: [i] for i, eid in enumerate(feature_info['event_ids'])}
     nodes, events = [], []
     for item in plan['items']:
         eid, source = item['event_id'], item['source']
@@ -285,7 +355,7 @@ def build_library(output, *, max_distance=.2):
             sample_count=len(samples), observation_count=sum(1 for _ in read_jsonl(output/eid/'target_tracks.jsonl')),
             hold_reasons=[] if item['feature_eligible'] else ['images_not_usable_for_gallery'],
             cover=media(samples[0]), exemplars=[media(s) for s in samples[:4]],
-            feature_indices=[indices[eid]] if eid in indices else [],
+            feature_indices=indices.get(eid, []),
             jersey=dict(number=item['jersey_number'] or None,
                         status='candidate_consensus' if item['jersey_number'] else 'unreadable')))
         events.append(dict(clip_name=eid, event_id=eid, video_id=item['video_id'],
@@ -311,9 +381,15 @@ def build_library(output, *, max_distance=.2):
         automatic = [n for n in nodes if not n['review_player_key'] and n['feature_indices']]
         registry.ingest_reviewed(reviewed, features=vectors, visibility=weights, contract=contract)
         if automatic:
-            registry.ingest(automatic, vectors, weights, [], contract, max_distance=max_distance)
+            registry.ingest(automatic, vectors, weights, [], contract, max_distance=max_distance,
+                            template_matching=True)
         registry.ingest_reviewed([], events)
         signatures = {'plan.json': file_stamp(output/'plan.json')}
+        for path in image_paths:
+            signatures[path.relative_to(output).as_posix()] = file_stamp(path)
+        if plan['request']['identity_mode'] == 'kpr':
+            for name in ('features.npz', 'features.json'):
+                signatures[name] = file_stamp(output/name)
         for item in plan['items']:
             for name in ('item.json', 'target_tracks.jsonl', 'tracking/video_meta.json'):
                 p = output/item['event_id']/name

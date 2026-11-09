@@ -109,6 +109,12 @@ python -m cli.player_events --run-dir /outputs/player-demo-001 --player-id PL-xx
 
 视频只显示指定球员的框和身份标签、真实观测且时间确认的球点及短轨迹；不画其他人物、篮筐、分数或调试文字，不连接不同球段/长缺口。画框仅限可信轨迹段，不延伸到未验证的同号轨迹。原片音轨保留，无音轨时补静音，统一 H.264/AAC、默认1280×720/30fps后按视频编号排序拼接；可用 `--width 1920 --height 1080` 调整输出。原尺寸身份图片不随视频缩放。默认窗口不一定覆盖完整攻防回合，可在 CSV 调整剪辑范围，但窗口以外没有追踪时不补造人物框/球点。
 
+KPR 模式使用 `quality_visible_multiframe_v2`：抽图保留所有人物框用于遮挡评分，但仅抽人工确认的目标/帧；至少24×64、检测分数0.5、其他人体框覆盖超过45%的图片不送入特征库。筛选失败的中间帧只作展示兜底，不能成为身份参考。保留最多4张实际图片的部位特征，不平均正背面；移除没有相近同伴的孤立外观样本，保护至少两张相隔0.15秒的支持图，并保存 `features.json/template_audits`。这些尺度、距离及遮挡阈值是工程默认值，不是经过NBA标注校准的置信度。
+
+比较仍使用KPR共同可见部位距离。查询和图库各取最近邻距离中的第二小值，两边取最大，需同时通过距离0.2和领先次优球员0.05的默认条件；只有一张支持图时不自动归并。人工球队/号码冲突先排除，号码0和00保留区别。自动匹配事件不立即加入参考图库，避免错误链式扩散；人工分组及有多图支持的初始新候选提供参考。不清晰/不确定事件仍保留在各自集锦中，人工归组不受影响。旧平均向量不能与新版混用，需新 demo 目录重新抽图/提特征，原追踪、动作和球缓存可直接使用。
+
+参考：[KPR，ECCV 2024](https://github.com/VlSomers/keypoint_promptable_reidentification) 的目标消歧和可见部位比较；[BPBreID，WACV 2023](https://github.com/VlSomers/bpbreid) 的部位表示；[PRTReID，MMSports 2023](https://github.com/VlSomers/prtreid) 的身份/球队/角色联合建模。这里复用已有KPR权重并改进工程匹配，不是复现这些论文的新训练结果，也未换用足球PRTReID权重。当前仍是无关键点提示模式；多人拥挤时通过筛图减轻问题，不能宣称获得了带关键点提示的完整消歧能力。
+
 ```bash
 python -m unittest analysis.goal_demo_selfcheck analysis.person_library_selfcheck
 ```
